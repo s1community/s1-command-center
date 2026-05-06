@@ -27,12 +27,15 @@ CARD = "#2d2d44"
 
 
 def _help_btn(parent, text):
-    """Create a small circular ? button that prints help to the OUTPUT console."""
+    """Create a small ? button that prints help to the OUTPUT console."""
+    import sys
     def _show():
         cli_log(text, "info")
-    btn = ctk.CTkButton(parent, text="?", width=26, height=26,
+    # Windows doesn't render high corner_radius well — use smaller radius
+    cr = 13 if sys.platform == "darwin" else 6
+    btn = ctk.CTkButton(parent, text="?", width=28, height=28,
                         font=("Segoe UI", 12, "bold"), fg_color="#444",
-                        hover_color="#666", corner_radius=13,
+                        hover_color="#666", corner_radius=cr,
                         command=_show)
     return btn
 
@@ -118,7 +121,7 @@ class ConnectionsPage(ctk.CTkFrame):
 
         paste_row = ctk.CTkFrame(self, fg_color="transparent")
         paste_row.grid(row=2, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 4))
-        ctk.CTkButton(paste_row, text="Paste from Ticket", width=160, height=32,
+        ctk.CTkButton(paste_row, text="Paste from Clipboard", width=160, height=32,
                       fg_color="#2980b9", hover_color="#1f6da3",
                       command=self._paste_from_ticket).pack(side="left")
         _help_btn(paste_row,
@@ -473,7 +476,12 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("S1 Command Center")
-        self.geometry("1200x780")
+        w, h = 1200, 780
+        sx = self.winfo_screenwidth()
+        sy = self.winfo_screenheight()
+        x = (sx - w) // 2
+        y = (sy - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
         self.minsize(900, 600)
         icon_path = os.path.join(os.path.dirname(__file__), "s1cc.ico")
         if os.path.exists(icon_path):
@@ -497,7 +505,7 @@ class App(ctk.CTk):
 
     def _build(self):
         # sidebar
-        sb = ctk.CTkFrame(self, width=210, fg_color=SIDEBAR_BG,
+        sb = ctk.CTkFrame(self, width=250, fg_color=SIDEBAR_BG,
                           corner_radius=0)
         sb.pack(side="left", fill="y")
         sb.pack_propagate(False)
@@ -505,7 +513,7 @@ class App(ctk.CTk):
         logo = ctk.CTkFrame(sb, fg_color="transparent")
         logo.pack(fill="x", padx=14, pady=(14, 4))
         ctk.CTkLabel(logo, text="S1 Command Center",
-                     font=("Segoe UI", 19, "bold"),
+                     font=("Segoe UI", 22, "bold"),
                      text_color="white").pack(anchor="w")
         self._src_frame = ctk.CTkFrame(logo, fg_color="#0d3b2e", corner_radius=6)
         self._src_frame.pack(fill="x", pady=(6, 2))
