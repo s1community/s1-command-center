@@ -5,6 +5,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/s1community/s1-command-center/releases/latest">
+    <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F_Download-macOS_%26_Windows-00b894?style=for-the-badge&logo=github&logoColor=white" alt="Download"/>
+  </a>
+</p>
+
+<p align="center">
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
