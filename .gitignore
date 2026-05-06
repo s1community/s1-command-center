@@ -8,3 +8,8 @@ venv/
 s1-backup-*.json
 s1-restore-report-*.html
 *.xlsx
+
+# Build artifacts
+build/
+dist/
+*.spec

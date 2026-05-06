@@ -1,0 +1,128 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build macOS app
+        run: |
+          pyinstaller \
+            --name "S1 Command Center" \
+            --windowed \
+            --onedir \
+            --icon s1cc.ico \
+            --add-data "s1cc.ico:." \
+            --add-data "export_utils.py:." \
+            --hidden-import customtkinter \
+            --hidden-import openpyxl \
+            --hidden-import PIL \
+            --collect-all customtkinter \
+            --noconfirm \
+            main.py
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "S1 Command Center" \
+            -srcfolder "dist/S1 Command Center.app" \
+            -ov -format UDZO "dist/S1-Command-Center-macOS.dmg"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: S1-Command-Center-macOS
+          path: dist/S1-Command-Center-macOS.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Windows exe
+        run: |
+          pyinstaller `
+            --name "S1 Command Center" `
+            --windowed `
+            --onedir `
+            --icon s1cc.ico `
+            --add-data "s1cc.ico;." `
+            --add-data "export_utils.py;." `
+            --hidden-import customtkinter `
+            --hidden-import openpyxl `
+            --hidden-import PIL `
+            --collect-all customtkinter `
+            --noconfirm `
+            main.py
+
+      - name: Create ZIP
+        run: |
+          Compress-Archive -Path "dist\S1 Command Center" -DestinationPath "dist\S1-Command-Center-Windows.zip"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: S1-Command-Center-Windows
+          path: dist/S1-Command-Center-Windows.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: S1-Command-Center-macOS
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: S1-Command-Center-Windows
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: S1 Command Center ${{ github.ref_name }}
+          body: |
+            ## S1 Command Center ${{ github.ref_name }}
+
+            ### Downloads
+            - **macOS**: `S1-Command-Center-macOS.dmg` — Double-click to install
+            - **Windows**: `S1-Command-Center-Windows.zip` — Extract and run `S1 Command Center.exe`
+
+            ### Requirements
+            - No Python installation needed — fully standalone
+            - macOS 12+ (Intel & Apple Silicon)
+            - Windows 10/11 (64-bit)
+          files: |
+            S1-Command-Center-macOS.dmg
+            S1-Command-Center-Windows.zip
