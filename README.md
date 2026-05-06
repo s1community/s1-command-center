@@ -262,5 +262,7 @@ This software is provided **AS IS**, free of charge, for use by SentinelOne empl
 ---
 
 <p align="center">
-  <strong>Built with ❤️ by Ran Jacobi - SentinelOne Professional Services Team</strong>
+  <strong>Built with ❤️ by Ran Jacobi</strong>
+    <strong>SentinelOne Professional Services Team</strong>
+
 </p>
