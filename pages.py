@@ -2542,7 +2542,7 @@ class RestorePage(ctk.CTkFrame):
 {errors_html}
 {failed_html}
 {log_html}
-<div class="footer">S1 Command Center &bull; Generated {now}</div>
+<div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
 </body></html>"""
 
         # save

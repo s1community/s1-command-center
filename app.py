@@ -592,6 +592,14 @@ class App(ctk.CTk):
             b.pack(fill="x", padx=10, pady=1)
             self._btns.append((label, b))
 
+        # credit at bottom of sidebar
+        ctk.CTkLabel(sb, text="Made by Ran Jacobi",
+                     font=("Segoe UI", 9), text_color="#555").pack(
+            side="bottom", pady=(0, 8))
+        ctk.CTkLabel(sb, text="v1.0.1",
+                     font=("Segoe UI", 9), text_color="#444").pack(
+            side="bottom", pady=(0, 2))
+
         # right side: content + console
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True)
@@ -730,6 +738,7 @@ class App(ctk.CTk):
         self.cli_log("═" * 60, "banner")
         self.cli_log("  S1 Command Center GUI", "banner")
         self.cli_log("  SentinelOne console management tool", "banner")
+        self.cli_log("  Made by Ran Jacobi", "banner")
         self.cli_log("  This software is provided AS IS, free of charge.", "banner")
         self.cli_log("═" * 60, "banner")
         self.cli_log("Application started", "success")

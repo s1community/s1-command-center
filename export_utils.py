@@ -132,7 +132,7 @@ def generate_html(title: str, columns: list[str], rows: list[dict],
 </div>
 {stats_html}
 <table><thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table>
-<div class="footer">S1 Command Center &bull; Generated {now}</div>
+<div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
 </body></html>"""
 
 
