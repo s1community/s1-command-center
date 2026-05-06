@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="https://sentinelone.com/wp-content/uploads/2021/09/S1_Logo_Horizontal_Purple.png" alt="SentinelOne" width="320"/>
-</p>
-
-<h1 align="center">S1 Command Center</h1>
+<h1 align="center">🛡️ S1 Command Center</h1>
 
 <p align="center">
   <strong>A professional GUI tool for SentinelOne console management, backup, restore, and migration.</strong>
@@ -262,7 +258,7 @@ This software is provided **AS IS**, free of charge, for use by SentinelOne empl
 ---
 
 <p align="center">
-  <strong>Built with ❤️ by Ran Jacobi/n</strong>
-    <strong>SentinelOne Professional Services Team</strong>
+  <strong>Built with ❤️ by Ran Jacobi</strong><br>
+  <strong>SentinelOne Professional Services Team</strong>
 
 </p>
