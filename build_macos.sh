@@ -44,13 +44,22 @@ pyinstaller \
     --noconfirm \
     main.py
 
+# remove quarantine flag so users don't get the malware warning
+echo "Removing quarantine flags..."
+xattr -cr "dist/S1 Command Center.app"
+
+# create DMG
+echo "Creating DMG installer..."
+hdiutil create -volname "S1 Command Center" \
+    -srcfolder "dist/S1 Command Center.app" \
+    -ov -format UDZO "dist/S1-Command-Center.dmg"
+
+# remove quarantine from DMG too
+xattr -cr "dist/S1-Command-Center.dmg"
+
 echo ""
 echo "═══════════════════════════════════════════════════"
 echo "  ✅ Build complete!"
 echo "  App: dist/S1 Command Center.app"
+echo "  DMG: dist/S1-Command-Center.dmg"
 echo "═══════════════════════════════════════════════════"
-echo ""
-echo "To create a DMG installer:"
-echo "  hdiutil create -volname 'S1 Command Center' \\"
-echo "    -srcfolder 'dist/S1 Command Center.app' \\"
-echo "    -ov -format UDZO 'dist/S1-Command-Center.dmg'"
