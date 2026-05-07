@@ -275,7 +275,6 @@ Contributions are welcome! Please:
 - **Site Update API** — Added `update_site` method for renaming sites and changing `isDefault` on the destination
 
 ### v1.0.1 — 2026-05-06
-- Added "Made by Ran Jacobi" credit across app, reports, and README
 - Fixed sidebar width, centered window on launch
 - Fixed Windows help button rendering
 - Fixed paste button text
