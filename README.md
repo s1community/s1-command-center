@@ -16,6 +16,7 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#backup--restore">Backup & Restore</a> •
   <a href="#architecture">Architecture</a> •
+  <a href="#changelog">Changelog</a> •
   <a href="#license">License</a>
 </p>
 
