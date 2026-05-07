@@ -257,6 +257,39 @@ Contributions are welcome! Please:
 4. Push to the branch (`git push origin feature/my-feature`)
 5. Open a Pull Request
 
+## Changelog
+
+### v1.1 — 2026-05-07
+#### New Features
+- **Set Defaults Dialog** — Edit `isDefault`, `expiration`, `unlimitedExpiration`, and `unlimitedLicenses` on accounts/sites/groups in the backup file before restoring
+- **Default Site Override** — When restoring a site marked as default, detects existing default sites and prompts to override (with rename)
+- **Smart Site Resolution** — When a site name doesn't match on the destination, detects broken/zombie sites (404), offers to map to the existing default site instead of failing
+- **Live Restore Progress** — Shows step-by-step detail during resolve (`finding account…`, `looking up site…`) and element restore (`restoring star (12/566)…`)
+- **Connection Validation** — Backup now verifies the console connection before starting; clear error on invalid/expired token
+- **Auto-open Reports** — Exported HTML/Excel reports open automatically instead of showing a popup link
+
+#### Fixes
+- **0-node Backup Warning** — Backup with 0 nodes now shows a warning instead of a false success message
+- **Shortened Error Messages** — Connection test and backup errors are truncated to prevent UI overflow
+- **Site Update API** — Added `update_site` method for renaming sites and changing `isDefault` on the destination
+
+### v1.0.1 — 2026-05-06
+- Added "Made by Ran Jacobi" credit across app, reports, and README
+- Fixed sidebar width, centered window on launch
+- Fixed Windows help button rendering
+- Fixed paste button text
+- Build improvements: xattr quarantine removal, auto-DMG creation
+
+### v1.0.0 — 2026-05-06
+- Initial release
+- Full backup & restore for 26 element types
+- Dual console connections with paste-from-ticket
+- Mangle rename, auto-create sites/groups
+- SKU mismatch detection and auto-fix
+- HTML/Excel/JSON report generation
+- 14 operations pages (Agents, Threats, STAR, DV, Ranger, etc.)
+- macOS & Windows builds via GitHub Actions
+
 ## License
 
 This software is provided **AS IS**, free of charge, for use by SentinelOne employees and authorized partners.
