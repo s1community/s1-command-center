@@ -248,7 +248,8 @@ class ConnectionsPage(ctk.CTkFrame):
                              text_color=GREEN)
 
         def fail(e):
-            status.configure(text=f"Failed: {e}", text_color=ACCENT)
+            short = str(e)[:60]
+            status.configure(text=f"Failed: {short}", text_color=ACCENT)
 
         run_async(self, do, ok, fail)
 
@@ -596,7 +597,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(sb, text="Made by Ran Jacobi",
                      font=("Segoe UI", 9), text_color="#555").pack(
             side="bottom", pady=(0, 8))
-        ctk.CTkLabel(sb, text="v1.0.1",
+        ctk.CTkLabel(sb, text="v1.1",
                      font=("Segoe UI", 9), text_color="#444").pack(
             side="bottom", pady=(0, 2))
 

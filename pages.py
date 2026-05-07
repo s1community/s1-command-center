@@ -10,6 +10,7 @@ from typing import Optional
 
 from app import run_async, LogBox, CARD, GREEN, ACCENT, WARN, cli_log, _ConsoleProxy, _help_btn
 from export_utils import export_report
+from s1_api import S1APIError
 
 EXCL_TYPES = ["white_hash", "path", "file_type", "certificate", "browser"]
 
@@ -630,12 +631,23 @@ class BackupPage(ctk.CTkFrame):
                 self._status_lbl.configure(
                     text=f"Stopped — {len(backup_data)} nodes saved",
                     text_color=WARN)
+            elif len(backup_data) == 0:
+                self._timer_lbl.configure(
+                    text=f"⚠ {m:02d}:{s:02d}", text_color=WARN)
+                self._status_lbl.configure(
+                    text="0 nodes — check connection & filters",
+                    text_color=WARN)
             else:
                 self._timer_lbl.configure(
                     text=f"✓ {m:02d}:{s:02d}", text_color=GREEN)
                 self._status_lbl.configure(
                     text=f"Done — {len(backup_data)} nodes",
                     text_color=GREEN)
+            if len(backup_data) == 0:
+                self.progress.set(0)
+                cli_log("Backup returned 0 nodes — nothing was saved. "
+                        "Check your connection and filters.", "warning")
+                return
             with open(path, "w") as f:
                 json.dump(backup_data, f, indent=2, default=str)
             self.app._last_backup_path = path  # share with Restore page
@@ -658,6 +670,17 @@ class BackupPage(ctk.CTkFrame):
         run_async(self, do, done, fail)
 
     def _run_backup(self, api, levels, elements, filters):
+        # ── verify connection first ──
+        try:
+            api.get_my_user()
+        except S1APIError as e:
+            if e.status_code == 401:
+                raise S1APIError("Connection refused — invalid or expired API token.", 401)
+            short = e.message[:80] if len(e.message) > 80 else e.message
+            raise S1APIError(f"Cannot reach console — {short}", e.status_code)
+        except Exception:
+            raise S1APIError(f"Cannot reach console — connection refused. Check URL and token.")
+
         nodes = []
         acct_f = filters.get("account", "").lower()
         site_f = filters.get("site", "").lower()
@@ -1037,6 +1060,322 @@ class BackupPage(ctk.CTkFrame):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Set Defaults / Edit Properties Dialog
+# ═══════════════════════════════════════════════════════════════════════
+
+class SetDefaultsDialog(ctk.CTkToplevel):
+    """Dialog to edit isDefault, expiration, unlimitedExpiration,
+    and unlimitedLicenses on accounts/sites/groups in a backup JSON."""
+
+    _COLS = [
+        ("Type", 60), ("Name", 0), ("Default", 55),
+        ("Expiration", 130), ("∞ Exp", 45), ("∞ Lic", 45),
+    ]
+
+    def __init__(self, parent, initial_path: Optional[str] = None,
+                 on_save: Optional[callable] = None):
+        super().__init__(parent)
+        self.title("Edit Backup — Defaults & Licenses")
+        self.geometry("980x580")
+        self.configure(fg_color="#0d0d1a")
+        self.transient(parent)
+        self.grab_set()
+
+        self._entries = []
+        self._backup_data = None
+        self._file_path = None
+        self._row_widgets = []  # per-row widget refs
+        self._on_save = on_save
+
+        self._build()
+        if initial_path and os.path.isfile(initial_path):
+            self._load_file(initial_path)
+
+    # ── UI ─────────────────────────────────────────────────────────────
+
+    def _build(self):
+        # file row
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 8))
+        self._file_lbl = ctk.CTkLabel(
+            top, text="No file loaded", font=("Segoe UI", 12),
+            text_color="gray")
+        self._file_lbl.pack(side="left", fill="x", expand=True, anchor="w")
+        ctk.CTkButton(top, text="Browse…", width=90, height=30,
+                      fg_color="#555", hover_color="#666",
+                      command=self._browse).pack(side="right")
+
+        # filter row
+        filt = ctk.CTkFrame(self, fg_color="transparent")
+        filt.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(filt, text="Show:", font=("Segoe UI", 12)).pack(
+            side="left", padx=(0, 6))
+        self._filter_var = ctk.StringVar(value="all")
+        for val in ["all", "account", "site", "group"]:
+            ctk.CTkRadioButton(filt, text=val.capitalize(),
+                               variable=self._filter_var, value=val,
+                               font=("Segoe UI", 12),
+                               command=self._refresh).pack(
+                side="left", padx=6)
+        self._count_lbl = ctk.CTkLabel(filt, text="", font=("Segoe UI", 11),
+                                        text_color="#888")
+        self._count_lbl.pack(side="right")
+
+        # scrollable table
+        self._table = ctk.CTkScrollableFrame(
+            self, fg_color=CARD, corner_radius=12)
+        self._table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        for col, (txt, w) in enumerate(self._COLS):
+            kw = {"text": txt, "font": ("Segoe UI", 10, "bold"),
+                  "text_color": "#888"}
+            if w:
+                kw["width"] = w
+            ctk.CTkLabel(self._table, **kw).grid(
+                row=0, column=col, padx=4, pady=4, sticky="w")
+        self._table.grid_columnconfigure(1, weight=1)
+
+        # buttons
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(btns, text="∞ Exp ON", height=32, width=90,
+                      fg_color="#555", hover_color="#666",
+                      font=("Segoe UI", 11),
+                      command=lambda: self._bulk_bool("unlimitedExpiration", True)).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(btns, text="∞ Exp OFF", height=32, width=90,
+                      fg_color="#555", hover_color="#666",
+                      font=("Segoe UI", 11),
+                      command=lambda: self._bulk_bool("unlimitedExpiration", False)).pack(
+            side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="∞ Lic ON", height=32, width=90,
+                      fg_color="#555", hover_color="#666",
+                      font=("Segoe UI", 11),
+                      command=lambda: self._bulk_bool("unlimitedLicenses", True)).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(btns, text="∞ Lic OFF", height=32, width=90,
+                      fg_color="#555", hover_color="#666",
+                      font=("Segoe UI", 11),
+                      command=lambda: self._bulk_bool("unlimitedLicenses", False)).pack(
+            side="left", padx=(0, 4))
+
+        # save row
+        save_row = ctk.CTkFrame(self, fg_color="transparent")
+        save_row.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkButton(save_row, text="Save to File", height=34,
+                      fg_color="#2980b9", hover_color="#2471a3",
+                      command=self._save).pack(side="right")
+        self._status = ctk.CTkLabel(save_row, text="", font=("Segoe UI", 11),
+                                     text_color="#888")
+        self._status.pack(side="right", padx=12)
+
+    # ── Load / Parse ───────────────────────────────────────────────────
+
+    def _browse(self):
+        p = filedialog.askopenfilename(
+            title="Open backup JSON",
+            filetypes=[("JSON", "*.json")])
+        if p:
+            self._load_file(p)
+
+    def _load_file(self, path: str):
+        try:
+            with open(path, "r") as f:
+                self._backup_data = json.load(f)
+            self._file_path = path
+            self._file_lbl.configure(
+                text=f"File: {os.path.basename(path)}",
+                text_color="white")
+        except Exception as e:
+            self._file_lbl.configure(text=f"Error: {e}", text_color=ACCENT)
+            return
+
+        self._entries = []
+        for idx, node in enumerate(self._backup_data):
+            ntype = node.get("type", "")
+            if ntype not in ("account", "site", "group"):
+                continue
+            obj = node.get(ntype, {}) or {}
+            if not isinstance(obj, dict):
+                continue
+            entry = {
+                "idx": idx,
+                "type": ntype,
+                "name": obj.get("name", node.get("path", "?")),
+                "accountName": obj.get("accountName", ""),
+            }
+            if "isDefault" in obj:
+                entry["isDefault"] = bool(obj.get("isDefault"))
+            if "expiration" in obj:
+                entry["expiration"] = obj.get("expiration") or ""
+            if "unlimitedExpiration" in obj:
+                entry["unlimitedExpiration"] = bool(obj.get("unlimitedExpiration"))
+            if "unlimitedLicenses" in obj:
+                entry["unlimitedLicenses"] = bool(obj.get("unlimitedLicenses"))
+            # only include if at least one editable field exists
+            if any(k in entry for k in ("isDefault", "expiration",
+                                         "unlimitedExpiration",
+                                         "unlimitedLicenses")):
+                self._entries.append(entry)
+        self._refresh()
+
+    # ── Table rendering ────────────────────────────────────────────────
+
+    def _refresh(self):
+        for w in list(self._table.winfo_children()):
+            info = w.grid_info()
+            if info and int(info.get("row", 0)) > 0:
+                w.destroy()
+
+        filt = self._filter_var.get()
+        visible = [e for e in self._entries
+                   if filt == "all" or e["type"] == filt]
+        self._row_widgets = []
+
+        for i, entry in enumerate(visible, start=1):
+            rw = {"entry": entry}
+
+            # col 0 — type
+            icons = {"account": "🏢", "site": "🌐", "group": "📁"}
+            ctk.CTkLabel(self._table,
+                         text=f"{icons.get(entry['type'], '')} {entry['type']}",
+                         font=("Segoe UI", 11), width=60).grid(
+                row=i, column=0, padx=4, pady=2, sticky="w")
+
+            # col 1 — name
+            ctk.CTkLabel(self._table, text=entry["name"],
+                         font=("Segoe UI", 12, "bold"),
+                         text_color="white").grid(
+                row=i, column=1, padx=4, pady=2, sticky="w")
+
+            # col 2 — isDefault checkbox
+            if "isDefault" in entry:
+                var = ctk.BooleanVar(value=entry["isDefault"])
+                var._entry_ref = entry
+                cb = ctk.CTkCheckBox(self._table, text="", variable=var,
+                                     width=20,
+                                     command=lambda v=var:
+                                         self._on_toggle(v, "isDefault"))
+                cb.grid(row=i, column=2, padx=4, pady=2, sticky="w")
+                rw["isDefault"] = var
+            else:
+                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                             width=55).grid(
+                    row=i, column=2, padx=4, pady=2, sticky="w")
+
+            # col 3 — expiration entry
+            if "expiration" in entry:
+                exp_e = ctk.CTkEntry(self._table, width=130, height=26,
+                                     font=("Consolas", 11))
+                exp_e.insert(0, entry.get("expiration", ""))
+                exp_e.grid(row=i, column=3, padx=4, pady=2, sticky="w")
+                exp_e._entry_ref = entry
+                exp_e.bind("<FocusOut>", lambda e, w=exp_e:
+                           self._on_exp_change(w))
+                rw["expiration"] = exp_e
+            else:
+                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                             width=130).grid(
+                    row=i, column=3, padx=4, pady=2, sticky="w")
+
+            # col 4 — unlimitedExpiration checkbox
+            if "unlimitedExpiration" in entry:
+                var2 = ctk.BooleanVar(value=entry["unlimitedExpiration"])
+                var2._entry_ref = entry
+                ctk.CTkCheckBox(self._table, text="", variable=var2,
+                                width=20,
+                                command=lambda v=var2:
+                                    self._on_toggle(v, "unlimitedExpiration")
+                                ).grid(row=i, column=4, padx=4, pady=2,
+                                       sticky="w")
+                rw["unlimitedExpiration"] = var2
+            else:
+                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                             width=45).grid(
+                    row=i, column=4, padx=4, pady=2, sticky="w")
+
+            # col 5 — unlimitedLicenses checkbox
+            if "unlimitedLicenses" in entry:
+                var3 = ctk.BooleanVar(value=entry["unlimitedLicenses"])
+                var3._entry_ref = entry
+                ctk.CTkCheckBox(self._table, text="", variable=var3,
+                                width=20,
+                                command=lambda v=var3:
+                                    self._on_toggle(v, "unlimitedLicenses")
+                                ).grid(row=i, column=5, padx=4, pady=2,
+                                       sticky="w")
+                rw["unlimitedLicenses"] = var3
+            else:
+                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                             width=45).grid(
+                    row=i, column=5, padx=4, pady=2, sticky="w")
+
+            self._row_widgets.append(rw)
+
+        self._count_lbl.configure(
+            text=f"{len(visible)} entries"
+            + (f" (of {len(self._entries)})" if filt != "all" else ""))
+
+    # ── Callbacks ──────────────────────────────────────────────────────
+
+    def _on_toggle(self, var, field):
+        var._entry_ref[field] = var.get()
+
+    def _on_exp_change(self, widget):
+        widget._entry_ref["expiration"] = widget.get().strip()
+
+    def _bulk_bool(self, field, value: bool):
+        n = 0
+        for rw in self._row_widgets:
+            var = rw.get(field)
+            if var:
+                var.set(value)
+                rw["entry"][field] = value
+                n += 1
+        self._status.configure(
+            text=f"{n} entries → {field}={value}",
+            text_color=GREEN if value else WARN)
+
+    # ── Save ───────────────────────────────────────────────────────────
+
+    def _save(self):
+        if not self._backup_data or not self._file_path:
+            self._status.configure(text="No file loaded", text_color=ACCENT)
+            return
+
+        # flush any expiration entry still focused
+        for rw in self._row_widgets:
+            exp_w = rw.get("expiration")
+            if exp_w:
+                rw["entry"]["expiration"] = exp_w.get().strip()
+
+        changes = 0
+        for entry in self._entries:
+            node = self._backup_data[entry["idx"]]
+            obj = node.get(entry["type"], {})
+            if not isinstance(obj, dict):
+                continue
+            for field in ("isDefault", "expiration",
+                          "unlimitedExpiration", "unlimitedLicenses"):
+                if field in entry and obj.get(field) != entry[field]:
+                    obj[field] = entry[field]
+                    changes += 1
+
+        try:
+            with open(self._file_path, "w") as f:
+                json.dump(self._backup_data, f, indent=2, default=str)
+            self._status.configure(
+                text=f"Saved — {changes} change(s) → "
+                     f"{os.path.basename(self._file_path)}",
+                text_color=GREEN)
+            cli_log(f"Edit Backup: saved {changes} change(s) → "
+                    f"{os.path.basename(self._file_path)}", "success")
+            if self._on_save:
+                self._on_save(self._file_path)
+        except Exception as e:
+            self._status.configure(text=f"Save error: {e}", text_color=ACCENT)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Restore Page
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1197,6 +1536,9 @@ class RestorePage(ctk.CTkFrame):
             btn_row, text="Export Log", height=38,
             fg_color="#2980b9", command=self._export, state="disabled")
         self._export_btn.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn_row, text="Set Defaults", height=38,
+                      fg_color="#8e44ad", hover_color="#9b59b6",
+                      command=self._open_set_defaults).pack(side="left", padx=(0, 4))
         self.progress = ctk.CTkProgressBar(btn_row, width=200)
         self.progress.pack(side="left", padx=8)
         self.progress.set(0)
@@ -1262,6 +1604,10 @@ class RestorePage(ctk.CTkFrame):
     def on_show(self):
         self._update_indicator()
         self._auto_load_latest()
+
+    def _open_set_defaults(self):
+        path = self.file_entry.get().strip() or getattr(self.app, "_last_backup_path", None)
+        SetDefaultsDialog(self, path, on_save=lambda p: self._load_file(p))
 
     def _toggle_mangle(self):
         if self._mangle_collapsed:
@@ -1719,7 +2065,10 @@ class RestorePage(ctk.CTkFrame):
             # ── resolve destination (auto-create if needed) ──
             ui(lambda n=nid: pt.set_running(n))
             ui(lambda n=nid: pt.set_detail(n, "resolving…"))
-            dest_id = self._resolve_dest_id(api, node, log)
+            dest_id = self._resolve_dest_id(
+                api, node, log,
+                progress=lambda msg, n=nid: ui(
+                    lambda m=msg, nn=n: pt.set_detail(nn, m)))
             if dest_id is None and ntype != "global":
                 # show the last logged error from _resolve_dest_id
                 errs = [l for l in self._operation_log if "✗" in l or "not found" in l]
@@ -1727,6 +2076,94 @@ class RestorePage(ctk.CTkFrame):
                 ui(lambda n=nid, r=reason: pt.set_error(n, r))
                 skipped += 1
                 continue
+
+            # ── override default site if needed ──
+            if ntype == "site" and dest_id:
+                site_obj = node.get("site", {})
+                if site_obj.get("isDefault"):
+                    ui(lambda n=nid: pt.set_detail(n, "checking default site…"))
+                    path_parts = npath.strip("/").split("/")
+                    acct_name = path_parts[0] if path_parts else ""
+                    try:
+                        accts = api.get_accounts()
+                        acct_match = [a for a in accts
+                                      if a.get("name") == acct_name]
+                        if acct_match:
+                            acct_id = acct_match[0]["id"]
+                            all_sites = api.get_sites(
+                                params={"accountIds": acct_id})
+                            existing_default = [
+                                s for s in all_sites
+                                if s.get("isDefault")
+                                and str(s.get("id")) != str(dest_id)]
+                            if existing_default:
+                                cur = existing_default[0]
+                                cur_name = cur.get("name", "?")
+                                new_name = site_obj.get("name", "?")
+                                # ask user on UI thread
+                                import threading as _thr
+                                answer = [None]
+                                evt = _thr.Event()
+                                def _ask():
+                                    answer[0] = messagebox.askyesno(
+                                        "Default Site Exists",
+                                        f"Account '{acct_name}' already has a "
+                                        f"default site:\n\n"
+                                        f"  Current default:  {cur_name}\n"
+                                        f"  New default:        {new_name}\n\n"
+                                        f"Override '{cur_name}' and set "
+                                        f"'{new_name}' as the default?")
+                                    evt.set()
+                                ui(lambda: _ask())
+                                ui(lambda n=nid: pt.set_detail(
+                                    n, f"⏸ waiting — default site "
+                                       f"'{cur_name}' exists…"))
+                                evt.wait()
+                                if not answer[0]:
+                                    log(f"  Skipped default override for "
+                                        f"'{new_name}' (user declined)")
+                                    self._operation_log.append(
+                                        f"  ⊘ Skipped default override: "
+                                        f"'{new_name}' (user declined)")
+                                    ui(lambda n=nid: pt.set_detail(
+                                        n, "default override skipped"))
+                                else:
+                                    ui(lambda n=nid: pt.set_detail(
+                                        n, "overriding default site…"))
+                                    for s in existing_default:
+                                        api.update_site(s["id"],
+                                                        {"isDefault": False})
+                                        log(f"  Unset default on site "
+                                            f"'{s.get('name')}'")
+                                        self._operation_log.append(
+                                            f"  ↻ Unset default: "
+                                            f"'{s.get('name')}' "
+                                            f"(id={s['id']})")
+                                    update = {"isDefault": True,
+                                              "name": new_name}
+                                    api.update_site(dest_id, update)
+                                    log(f"  Set default + rename → "
+                                        f"'{new_name}'")
+                                    self._operation_log.append(
+                                        f"  ✓ Set default + renamed: "
+                                        f"'{new_name}' (id={dest_id})")
+                            else:
+                                # no conflict, just set it + rename
+                                sname = site_obj.get('name', '')
+                                update = {"isDefault": True}
+                                if sname:
+                                    update["name"] = sname
+                                api.update_site(dest_id, update)
+                                log(f"  Set default + rename → "
+                                    f"'{sname}'")
+                                self._operation_log.append(
+                                    f"  ✓ Set default + renamed: "
+                                    f"'{sname}' (id={dest_id})")
+                    except Exception as exc:
+                        detail = str(exc)[:80]
+                        log(f"  ⚠ Default override failed: {detail}")
+                        self._operation_log.append(
+                            f"  ⚠ Default override failed: {detail}")
 
             scope = _scope(ntype, dest_id or "")
             restored += 1
@@ -1756,6 +2193,7 @@ class RestorePage(ctk.CTkFrame):
 
             def _r(label, fn, *a, **kw):
                 """Restore helper: call fn, track ok/skip/fail."""
+                ui(lambda n=nid, l=label: pt.set_detail(n, f"restoring {l}…"))
                 try:
                     fn(*a, **kw)
                     results.append((label, "ok"))
@@ -1775,9 +2213,16 @@ class RestorePage(ctk.CTkFrame):
 
             def _r_bulk(label, items, fn):
                 """Bulk restore: create items one by one, skip existing."""
+                item_list = items or []
+                total_items = len(item_list)
+                ui(lambda n=nid, l=label, c=total_items:
+                   pt.set_detail(n, f"restoring {l} (0/{c})…"))
                 ok = skip = fail = 0
                 last_err_msg = ""
-                for item in (items or []):
+                for idx, item in enumerate(item_list, 1):
+                    if idx % 5 == 1 or idx == total_items:
+                        ui(lambda n=nid, l=label, x=idx, t=total_items:
+                           pt.set_detail(n, f"restoring {l} ({x}/{t})…"))
                     try:
                         fn(item)
                         ok += 1
@@ -2134,28 +2579,31 @@ class RestorePage(ctk.CTkFrame):
             f"Total: {restored} restored, {skipped} skipped (of {total})")
         return restored
 
-    def _resolve_dest_id(self, api, node, log):
+    def _resolve_dest_id(self, api, node, log, progress=None):
         """Resolve destination ID, auto-creating sites/groups if missing."""
         ntype = node.get("type")
         npath = node.get("path", "")
+        _p = progress or (lambda msg: None)
 
         if ntype == "global":
             return None
 
         if ntype == "account":
             name = node.get("account", {}).get("name", "")
+            _p(f"resolving account '{name}'…")
             accts = api.get_accounts()
             match = [a for a in accts if a.get("name") == name]
             if match:
+                _p(f"found account → id={match[0]['id']}")
                 return match[0]["id"]
-            # Accounts cannot be auto-created (requires Global/MSSP)
+            _p(f"account '{name}' not found")
             return None
 
         if ntype == "site":
             sname = node.get("site", {}).get("name", "")
-            # find parent account on destination
             path_parts = npath.strip("/").split("/")
             acct_name = path_parts[0] if path_parts else ""
+            _p(f"finding account '{acct_name}'…")
             accts = api.get_accounts()
             acct_match = [a for a in accts if a.get("name") == acct_name]
             if not acct_match:
@@ -2163,12 +2611,77 @@ class RestorePage(ctk.CTkFrame):
                     f"  Site '{sname}': parent account '{acct_name}' not found")
                 return None
             acct_id = acct_match[0]["id"]
-            # search for site in that account
+            _p(f"looking up site '{sname}'…")
             all_sites = api.get_sites(params={"accountIds": acct_id})
-            match = [s for s in all_sites if s.get("name") == sname]
+            # only consider active sites
+            active_sites = [s for s in all_sites
+                            if s.get("state", "active").lower()
+                            not in ("expired", "deleted", "disabled")]
+            match = [s for s in active_sites if s.get("name") == sname]
             if match:
-                return match[0]["id"]
-            # auto-create the site
+                mid = match[0]["id"]
+                # verify site is actually writable
+                try:
+                    api.update_site(mid, {})
+                    _p(f"found site → id={mid}")
+                    return mid
+                except Exception as ve:
+                    sc = getattr(ve, "status_code", 0)
+                    if sc == 404:
+                        _p(f"site '{sname}' (id={mid}) returns 404 "
+                           f"— skipping it")
+                        self._operation_log.append(
+                            f"  ⚠ Site '{sname}' (id={mid}) exists "
+                            f"but returns 404 — treating as not found")
+                        active_sites = [s for s in active_sites
+                                        if s.get("id") != mid]
+                    else:
+                        # other error (e.g. 400) means the site exists
+                        _p(f"found site → id={mid}")
+                        return mid
+
+            # site not found — offer to use an existing site instead of
+            # auto-creating (pick the default site, or the only site)
+            if active_sites:
+                existing_default = [s for s in active_sites
+                                    if s.get("isDefault")]
+                candidate = (existing_default[0] if existing_default
+                             else active_sites[0]
+                             if len(active_sites) == 1
+                             else None)
+                if candidate:
+                    ed_name = candidate.get("name", "?")
+                    _p(f"no match — asking to use '{ed_name}'…")
+                    import threading as _thr
+                    answer = [None]
+                    evt = _thr.Event()
+                    site_list = ", ".join(
+                        s.get("name", "?") for s in all_sites[:5])
+                    def _ask_map(en=ed_name, sn=sname, an=acct_name,
+                                 sl=site_list):
+                        answer[0] = messagebox.askyesno(
+                            "Site Not Found",
+                            f"Site '{sn}' was not found in account "
+                            f"'{an}'.\n\n"
+                            f"Existing sites: {sl}\n\n"
+                            f"Use '{en}' as the target and rename it "
+                            f"to '{sn}'?\n\n"
+                            f"Click No to skip this site.")
+                        evt.set()
+                    self.after(0, _ask_map)
+                    evt.wait()
+                    if answer[0]:
+                        _p(f"mapping to '{ed_name}' → id={candidate['id']}")
+                        self._operation_log.append(
+                            f"  ↻ Mapped '{sname}' → existing "
+                            f"'{ed_name}' (id={candidate['id']})")
+                        return candidate["id"]
+                    else:
+                        self._operation_log.append(
+                            f"  ⊘ Skipped site '{sname}' (user declined)")
+                        return None
+
+            _p(f"creating site '{sname}'…")
             create_data = {"name": sname}
             site_obj = node.get("site", {})
             if site_obj.get("siteType"):
@@ -2207,11 +2720,10 @@ class RestorePage(ctk.CTkFrame):
 
         if ntype == "group":
             gname = node.get("group", {}).get("name", "")
-            # find parent site on destination
             path_parts = npath.strip("/").split("/")
             acct_name = path_parts[0] if len(path_parts) > 0 else ""
             site_name = path_parts[1] if len(path_parts) > 1 else ""
-            # resolve account → site
+            _p(f"finding account '{acct_name}'…")
             accts = api.get_accounts()
             acct_match = [a for a in accts if a.get("name") == acct_name]
             if not acct_match:
@@ -2219,6 +2731,7 @@ class RestorePage(ctk.CTkFrame):
                     f"  Group '{gname}': parent account '{acct_name}' not found")
                 return None
             acct_id = acct_match[0]["id"]
+            _p(f"finding site '{site_name}'…")
             all_sites = api.get_sites(params={"accountIds": acct_id})
             site_match = [s for s in all_sites if s.get("name") == site_name]
             if not site_match:
@@ -2226,12 +2739,13 @@ class RestorePage(ctk.CTkFrame):
                     f"  Group '{gname}': parent site '{site_name}' not found")
                 return None
             site_id = site_match[0]["id"]
-            # search for group in that site
+            _p(f"looking up group '{gname}'…")
             all_groups = api.get_groups(params={"siteIds": site_id})
             grp_match = [g for g in all_groups if g.get("name") == gname]
             if grp_match:
+                _p(f"found group → id={grp_match[0]['id']}")
                 return grp_match[0]["id"]
-            # auto-create the group (inherits policy from site by default)
+            _p(f"creating group '{gname}'…")
             try:
                 create_data = {"name": gname, "inherits": True}
                 resp = api.create_group(site_id, create_data)

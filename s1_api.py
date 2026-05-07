@@ -395,6 +395,9 @@ class S1API:
         body["data"]["accountId"] = account_id
         return self._post("/sites", body=body)
 
+    def update_site(self, site_id: str, data: dict) -> dict:
+        return self._put(f"/sites/{site_id}", body={"data": data})
+
     def create_group(self, site_id: str, data: dict) -> dict:
         body = {"data": dict(data)}
         body["data"]["siteId"] = site_id
