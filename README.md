@@ -15,6 +15,7 @@
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#backup--restore">Backup & Restore</a> •
+  <a href="#troubleshooting">Troubleshooting</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#changelog">Changelog</a> •
   <a href="#license">License</a>
@@ -111,20 +112,6 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### macOS — Authorize the App
-
-If you download the pre-built `.app`, macOS may block it because it's not from an identified developer. To authorize it:
-
-1. Click the **Apple Menu ()** in the top-left corner and select **System Settings** (or System Preferences)
-2. Navigate to **Privacy & Security**
-3. Scroll down to the **Security** section
-4. You should see a message: *"S1 Command Center" was blocked from use because it is not from an identified developer*
-5. Click **Open Anyway**
-6. Enter your Mac password or use Touch ID when prompted
-7. Click **Open** on the final confirmation pop-up
-
-> After this one-time step, the app will open normally going forward.
-
 ### Dependencies
 | Package | Purpose |
 |---------|---------|
@@ -210,6 +197,38 @@ The restore process handles common issues automatically:
 - **Expired/deleted sites** → Automatically skipped
 - **Missing sites/groups** → Auto-created on destination
 - **Read-only fields** → Stripped before sending to API
+
+## Troubleshooting
+
+### macOS — "App is not from an identified developer"
+
+If macOS blocks the app on first launch, authorize it through System Preferences:
+
+1. Click the **Apple Menu ()** in the top-left corner and select **System Settings** (or System Preferences)
+2. Navigate to **Privacy & Security**
+3. Scroll down to the **Security** section
+4. You should see a message: *"S1 Command Center" was blocked from use because it is not from an identified developer*
+5. Click **Open Anyway**
+6. Enter your Mac password or use Touch ID when prompted
+7. Click **Open** on the final confirmation pop-up
+
+> After this one-time step, the app will open normally going forward.
+
+### Connection Errors
+
+- **"Connection refused — invalid or expired API token"** → Verify the API token is correct and not expired. Generate a new one from the console if needed.
+- **"Cannot reach console"** → Check the URL is correct (e.g. `usea1-021` or full `https://usea1-021.sentinelone.net`).
+
+### Backup Returns 0 Nodes
+
+- Verify the SOURCE console is connected (check the sidebar indicators)
+- Check your account/site name filters — they must match exactly
+- Make sure the API token has sufficient permissions (Admin role recommended)
+
+### Restore — Site Returns 404
+
+- A previous failed restore may have created a broken/phantom site. The app will detect this and offer to use the existing default site instead.
+- If issues persist, check the destination console for duplicate or expired sites.
 
 ## Architecture
 
