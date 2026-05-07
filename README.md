@@ -111,6 +111,20 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### macOS — Authorize the App
+
+If you download the pre-built `.app`, macOS may block it because it's not from an identified developer. To authorize it:
+
+1. Click the **Apple Menu ()** in the top-left corner and select **System Settings** (or System Preferences)
+2. Navigate to **Privacy & Security**
+3. Scroll down to the **Security** section
+4. You should see a message: *"S1 Command Center" was blocked from use because it is not from an identified developer*
+5. Click **Open Anyway**
+6. Enter your Mac password or use Touch ID when prompted
+7. Click **Open** on the final confirmation pop-up
+
+> After this one-time step, the app will open normally going forward.
+
 ### Dependencies
 | Package | Purpose |
 |---------|---------|
