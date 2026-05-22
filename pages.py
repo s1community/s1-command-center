@@ -40,17 +40,21 @@ BACKUP_ELEMENTS = [
     "config_overrides",
     "log_collection_rules",
     "auto_upgrade_policies",
+    "locations",
     # ── Settings ──
     "settings_notifications",
     "settings_sso",
     "settings_smtp",
     "settings_syslog",
     "settings_ad",
+    "webhooks",
+    "scheduled_reports",
     # ── Users & Roles ──
     "roles",
     "service_users",
     # ── Other ──
     "gateways",
+    "marketplace_apps",
 ]
 
 
@@ -73,14 +77,20 @@ ELEMENT_HELP = {
     "config_overrides": "Persistent agent configuration overrides",
     "log_collection_rules": "XDR log collection rules for 3rd-party data ingestion",
     "auto_upgrade_policies": "Agent auto-upgrade policy schedules",
+    "locations": "Network locations used by firewall location-awareness rules",
     "settings_notifications": "Notification settings and email recipients",
     "settings_sso": "SSO / SAML single sign-on configuration",
     "settings_smtp": "SMTP relay settings for email notifications",
     "settings_syslog": "Syslog forwarding configuration",
     "settings_ad": "Active Directory integration settings",
+    "webhooks": "Notification webhook endpoints (Slack/Teams/generic HTTP)",
+    "scheduled_reports": "Scheduled / saved console reports",
     "roles": "RBAC custom role definitions (account level only)",
     "service_users": "API service user accounts (account level only)",
     "gateways": "Management proxy / gateway configurations",
+    "marketplace_apps": "Inventory of installed Singularity Marketplace apps "
+                       "(read-only — re-install manually on destination as "
+                       "each app requires its own OAuth / credentials)",
 }
 
 
@@ -172,8 +182,16 @@ def _build_elements_section(parent, row, title="Elements"):
     return hdr, elem_vars
 
 
-class ProgressTable(ctk.CTkScrollableFrame):
-    """Live-updating progress table for backup/restore operations."""
+class ProgressTable(ctk.CTkFrame):
+    """Live-updating progress table for backup/restore operations.
+
+    Rolled-our-own scrollable container: an outer `tk.Canvas` + vertical
+    `tk.Scrollbar`, with an inner CTkFrame containing the rows. We bypass
+    `CTkScrollableFrame` entirely because its layout fights with
+    `tk.PanedWindow` (the real Tk path is nested under an internal canvas,
+    so siblings can't see it) and its mouse-wheel binding fails to reach
+    nested CTkLabel widgets.
+    """
 
     STATUS_COLORS = {
         "pending":  ("#444", "#888"),
@@ -183,23 +201,116 @@ class ProgressTable(ctk.CTkScrollableFrame):
         "skipped":  ("#333", "#666"),
     }
 
-    def __init__(self, master, **kw):
+    def __init__(self, master, height: int = 300, **kw):
         kw.setdefault("fg_color", CARD)
         kw.setdefault("corner_radius", 12)
         super().__init__(master, **kw)
+        import tkinter as _tk
+
         self._rows = {}
         self._row_idx = 0
-        # header
-        ctk.CTkLabel(self, text="Node", font=("Segoe UI", 10, "bold"),
+
+        # Outer canvas (the scrollable viewport).
+        self._canvas = _tk.Canvas(
+            self, bg=CARD, highlightthickness=0, bd=0, height=height)
+        self._vscroll = _tk.Scrollbar(
+            self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vscroll.set)
+
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        self._vscroll.grid(row=0, column=1, sticky="ns")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # Inner frame — every row goes inside this.
+        self._inner = ctk.CTkFrame(self._canvas, fg_color="transparent",
+                                    corner_radius=0)
+        self._inner_window = self._canvas.create_window(
+            (0, 0), window=self._inner, anchor="nw")
+        # When the inner content's bounding box changes, update the
+        # canvas scrollregion (otherwise the scrollbar thinks there's
+        # nothing to scroll).
+        self._inner.bind("<Configure>", self._on_inner_configure)
+        # When the canvas itself is resized, stretch the inner frame to
+        # match its width so column-weighted children expand correctly.
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+        # Wheel scrolling on the canvas + any descendant (see _bind_wheel).
+        self._bind_wheel(self._canvas)
+        self._bind_wheel(self._inner)
+
+        # Header row inside the inner frame.
+        ctk.CTkLabel(self._inner, text="Node",
+                     font=("Segoe UI", 10, "bold"),
                      text_color="#888", width=250).grid(
             row=0, column=0, padx=(8, 4), pady=4, sticky="w")
-        ctk.CTkLabel(self, text="Status", font=("Segoe UI", 10, "bold"),
+        ctk.CTkLabel(self._inner, text="Status",
+                     font=("Segoe UI", 10, "bold"),
                      text_color="#888", width=70).grid(
             row=0, column=1, padx=4, pady=4)
-        ctk.CTkLabel(self, text="Details", font=("Segoe UI", 10, "bold"),
+        ctk.CTkLabel(self._inner, text="Details",
+                     font=("Segoe UI", 10, "bold"),
                      text_color="#888").grid(
             row=0, column=2, padx=(4, 8), pady=4, sticky="w")
-        self.grid_columnconfigure(2, weight=1)
+        self._inner.grid_columnconfigure(2, weight=1)
+
+        # Re-compute detail-label wraplength on resize.
+        self.bind("<Configure>", self._on_configure_relayout)
+        self._canvas.bind("<Configure>", self._on_configure_relayout, add="+")
+
+    # ── scrolling plumbing ────────────────────────────────────────────
+
+    def _on_inner_configure(self, _evt=None):
+        # Inner content grew/shrunk → recompute scrollable region.
+        bbox = self._canvas.bbox("all")
+        if bbox:
+            self._canvas.configure(scrollregion=bbox)
+
+    def _on_canvas_configure(self, event):
+        # Stretch the inner frame to fill the canvas width so column
+        # weight=1 children actually expand.
+        self._canvas.itemconfigure(self._inner_window, width=event.width)
+
+    def _bind_wheel(self, widget):
+        """Bind mouse-wheel and arrow-keys to scroll the inner canvas.
+        Tkinter's wheel events are platform-specific:
+          • macOS:   `<MouseWheel>` with delta of ±1/2 per notch.
+          • Windows: `<MouseWheel>` with delta of ±120 per notch.
+          • X11:     `<Button-4>` (up) / `<Button-5>` (down).
+        Calling `add='+'` keeps any existing bindings intact.
+        """
+        def on_wheel(event):
+            d = getattr(event, "delta", 0)
+            if d:
+                step = -1 if d > 0 else 1
+                if abs(d) >= 120:        # Windows
+                    step = -1 * int(d / 120)
+            else:                        # X11
+                step = -1 if event.num == 4 else 1
+            self._canvas.yview_scroll(step, "units")
+            return "break"
+
+        widget.bind("<MouseWheel>", on_wheel, add="+")
+        widget.bind("<Button-4>", on_wheel, add="+")
+        widget.bind("<Button-5>", on_wheel, add="+")
+        # Arrow keys when the canvas has focus.
+        widget.bind("<Up>",   lambda _e: (self._canvas.yview_scroll(-1, "units"), "break"), add="+")
+        widget.bind("<Down>", lambda _e: (self._canvas.yview_scroll( 1, "units"), "break"), add="+")
+        widget.bind("<Prior>", lambda _e: (self._canvas.yview_scroll(-1, "pages"), "break"), add="+")
+        widget.bind("<Next>",  lambda _e: (self._canvas.yview_scroll( 1, "pages"), "break"), add="+")
+
+    def _on_configure_relayout(self, event=None):
+        try:
+            total_w = self.winfo_width()
+        except Exception:
+            return
+        # Subtract Node (~240px), Status (~80px), padding (~40px).
+        avail = max(180, total_w - 360)
+        for row in self._rows.values():
+            try:
+                row["detail"].configure(wraplength=avail)
+                row["name"].configure(wraplength=max(200, total_w - avail - 120))
+            except Exception:
+                pass
 
     def clear(self):
         for widgets in self._rows.values():
@@ -207,6 +318,22 @@ class ProgressTable(ctk.CTkScrollableFrame):
                 w.destroy()
         self._rows = {}
         self._row_idx = 0
+
+    @staticmethod
+    def _short_path(path: str, ntype: str) -> str:
+        """Trim the redundant account/site prefix so long enterprise
+        paths don't eat the whole row. Full path stays in the tooltip."""
+        parts = [p for p in path.strip("/").split("/") if p]
+        if not parts:
+            return path
+        if ntype == "account":
+            return parts[0]
+        if ntype == "site":
+            return parts[-1]
+        if ntype == "group":
+            # site / group   — drops the account prefix.
+            return " / ".join(parts[-2:])
+        return parts[-1]
 
     def add_node(self, node_id: str, path: str, ntype: str = ""):
         """Add a pending row. Returns node_id for later updates."""
@@ -216,25 +343,84 @@ class ProgressTable(ctk.CTkScrollableFrame):
                   "site": "  ▹", "group": "    ◦"}.get(ntype, "")
         bg, fg = self.STATUS_COLORS["pending"]
 
-        name_lbl = ctk.CTkLabel(self, text=f"{prefix} {path}",
+        display = self._short_path(path, ntype)
+        # Numbered index — same as diff panel ordering. Padded to 3 chars
+        # so paths stay vertically aligned no matter how many rows there
+        # are.
+        name_lbl = ctk.CTkLabel(self._inner,
+                                text=f"{r:>3}. {prefix} {display}",
                                 font=("Consolas", 11), text_color="#ccc",
-                                anchor="w", width=250)
-        name_lbl.grid(row=r, column=0, padx=(8, 4), pady=1, sticky="w")
+                                anchor="w")
+        name_lbl.grid(row=r, column=0, padx=(8, 4), pady=1, sticky="ew")
+        # Hover-tooltip: show the FULL path on mouse-over so the operator
+        # can confirm what scope this row belongs to.
+        self._attach_tooltip(name_lbl, path)
 
-        status_lbl = ctk.CTkLabel(self, text="pending",
+        status_lbl = ctk.CTkLabel(self._inner, text="pending",
                                   font=("Segoe UI", 10, "bold"),
                                   fg_color=bg, text_color=fg,
                                   corner_radius=6, width=70, height=22)
         status_lbl.grid(row=r, column=1, padx=4, pady=1)
 
-        detail_lbl = ctk.CTkLabel(self, text="",
+        # wraplength=0 disables wrap on CTkLabel; pass a positive value so
+        # long element-summary strings spill onto a second line instead of
+        # being clipped. Re-computed on resize via _on_configure.
+        detail_lbl = ctk.CTkLabel(self._inner, text="",
                                   font=("Consolas", 10), text_color="#999",
-                                  anchor="w")
-        detail_lbl.grid(row=r, column=2, padx=(4, 8), pady=1, sticky="w")
+                                  anchor="w", justify="left",
+                                  wraplength=380)
+        detail_lbl.grid(row=r, column=2, padx=(4, 8), pady=1, sticky="ew")
+
+        # Forward wheel events on each row widget to the outer canvas so
+        # the cursor-position doesn't matter for trackpad/wheel scrolling.
+        for w in (name_lbl, status_lbl, detail_lbl):
+            self._bind_wheel(w)
 
         self._rows[node_id] = {
             "name": name_lbl, "status": status_lbl, "detail": detail_lbl}
         return node_id
+
+    def _attach_tooltip(self, widget, text: str):
+        """Lightweight Tk tooltip — pops up after a brief hover."""
+        import tkinter as _tk
+        tip = {"win": None, "after_id": None}
+
+        def show(_evt=None):
+            if tip["win"] is not None:
+                return
+            x = widget.winfo_rootx() + 20
+            y = widget.winfo_rooty() + widget.winfo_height() + 2
+            w = _tk.Toplevel(widget)
+            w.wm_overrideredirect(True)
+            w.wm_geometry(f"+{x}+{y}")
+            lbl = _tk.Label(
+                w, text=text, justify="left",
+                background="#1f2329", foreground="#e0e0e0",
+                relief="solid", borderwidth=1,
+                font=("Consolas", 10), padx=6, pady=3)
+            lbl.pack()
+            tip["win"] = w
+
+        def schedule(_evt=None):
+            tip["after_id"] = widget.after(450, show)
+
+        def hide(_evt=None):
+            if tip["after_id"]:
+                try:
+                    widget.after_cancel(tip["after_id"])
+                except Exception:
+                    pass
+                tip["after_id"] = None
+            if tip["win"] is not None:
+                try:
+                    tip["win"].destroy()
+                except Exception:
+                    pass
+                tip["win"] = None
+
+        widget.bind("<Enter>", schedule)
+        widget.bind("<Leave>", hide)
+        widget.bind("<Button-1>", hide)
 
     def set_running(self, node_id: str):
         row = self._rows.get(node_id)
@@ -243,6 +429,30 @@ class ProgressTable(ctk.CTkScrollableFrame):
         bg, fg = self.STATUS_COLORS["running"]
         row["status"].configure(text="running", fg_color=bg, text_color=fg)
         row["name"].configure(text_color="white")
+        # Auto-scroll so the active row is always visible. Defer one tick
+        # so Tk has finished laying out the just-configured label widths.
+        self.after(20, lambda r=row: self._scroll_to_widget(r["name"]))
+
+    def _scroll_to_widget(self, widget):
+        """Scroll the inner canvas so `widget` is visible inside the
+        viewport, near the top third."""
+        try:
+            self.update_idletasks()
+            canvas = self._canvas
+            wy = widget.winfo_y()           # y inside _inner
+            wh = widget.winfo_height() or 22
+            inner_h = max(1, self._inner.winfo_height())
+            view_top, view_bot = canvas.yview()
+            current_top_px = view_top * inner_h
+            current_bot_px = view_bot * inner_h
+            # Only scroll if the row isn't comfortably in view already.
+            if wy < current_top_px + 20 \
+                    or (wy + wh) > current_bot_px - 20:
+                target = max(0.0, (wy - 40) / inner_h)
+                target = min(target, 1.0)
+                canvas.yview_moveto(target)
+        except Exception:
+            pass
 
     def set_done(self, node_id: str, summary: str = ""):
         row = self._rows.get(node_id)
@@ -313,6 +523,269 @@ _STRIP_FIELDS = {
 def _clean_for_restore(obj: dict) -> dict:
     """Remove source-specific fields before pushing to destination."""
     return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
+
+
+# ── Error explanation knowledge base ───────────────────────────────────
+# Each entry maps a regex (matched against the lowercased error text) to a
+# structured explanation the GUI can show the operator.
+# Order matters — the first match wins, so put the more specific patterns
+# above the generic ones.
+import re as _re
+
+_ERROR_RULES = [
+    {
+        "match": _re.compile(r"hash .* already exists|already exists.*hash"),
+        "what": "Duplicate hash on destination",
+        "why":  "This SHA1/SHA256 hash is already in the destination's "
+                "blocklist or hash-exclusion list — most likely from a "
+                "previous restore or because both consoles share the same "
+                "Threat Intel feed.",
+        "fix":  "Safe to ignore — the entry exists. No action needed.",
+        "severity": "info",
+    },
+    {
+        "match": _re.compile(r"filter with the given name already exists"),
+        "what": "Saved DV filter already exists",
+        "why":  "A Deep Visibility / SDL saved filter with this name "
+                "already exists on the destination at the same scope.",
+        "fix":  "Safe to ignore, or rename the destination filter and "
+                "re-run the restore if you want both versions.",
+        "severity": "info",
+    },
+    {
+        "match": _re.compile(r"rule with same name|rule with the same name"),
+        "what": "Duplicate rule name on destination",
+        "why":  "A firewall, device-control or STAR rule with the same name "
+                "already exists in this scope. S1 enforces unique names per "
+                "scope.",
+        "fix":  "Safe to ignore unless the destination rule's contents "
+                "differ. To force replace, delete the destination rule "
+                "first and re-run.",
+        "severity": "info",
+    },
+    {
+        "match": _re.compile(r"cannot update other settings without marking "
+                             r"scope as decoupled|marking scope.*decoupled"),
+        "what": "Scope inherits from parent",
+        "why":  "The destination group/site inherits this configuration "
+                "(Device Control / Firewall / NQ config) from its parent. "
+                "S1 blocks per-scope writes until you explicitly 'decouple' "
+                "the scope.",
+        "fix":  "If the source ALSO inherited at this level, ignore — the "
+                "inherited config is already correct.\n"
+                "If the source had a custom override here, open the "
+                "destination console → this scope → the relevant section → "
+                "click 'Override' / 'Decouple from parent', then re-run.",
+        "severity": "info",
+    },
+    {
+        "match": _re.compile(
+            r"post /exclusions.*→\s*400|"
+            r"data:\s*value:|"
+            r"data:\s*pathexclusiontype|"
+            r"invalid (path|hash|value)|"
+            r"path must (start|end)"),
+        "what": "Path / value exclusion rejected by destination validation",
+        "why":  "S1 validates each exclusion's path against strict rules: "
+                "Windows paths must start with a drive letter or a "
+                "supported environment variable (%SystemRoot%, "
+                "%ProgramFiles%, %ProgramData%, %SystemDrive%, "
+                "%AllUsersProfile%, etc.), folder exclusions must end with "
+                "'\\', and file exclusions must include an extension. The "
+                "destination version may have stricter validation than the "
+                "source.",
+        "fix":  "1) Open the full error text (Copy button) — the S1 reason "
+                "now appears after 'POST /exclusions → 400'.\n"
+                "2) For unsupported env vars, replace with absolute paths "
+                "or a vendor-supported variable on the destination.\n"
+                "3) If many items fail with the same reason, edit the "
+                "source exclusion list and re-export, then re-run the "
+                "restore (existing items will be skipped).",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"put /settings/sso.*→ 5\d\d|"
+                             r"sso.*server could not process"),
+        "what": "SSO configuration rejected by destination",
+        "why":  "The destination tenant returned an HTTP 5xx when applying "
+                "the SAML/SSO settings. Common causes: the destination has "
+                "no SSO provisioned yet, the SAML certificate is bound to "
+                "the source tenant's URL, or your token lacks the SSO "
+                "edit permission.",
+        "fix":  "1) Confirm SSO is enabled for the destination tenant.\n"
+                "2) Re-issue the SAML cert/metadata using the destination "
+                "URL.\n"
+                "3) If you don't need to migrate SSO right now, uncheck "
+                "the 'settings_sso' element and re-run.\n"
+                "4) If it still fails, copy this error and send it to "
+                "SentinelOne Support — server-side log lookup is needed.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"at least one identifier must be defined"),
+        "what": "Location has no identifiers",
+        "why":  "S1 requires every Location to declare at least one "
+                "identifier (IP, MAC, DNS suffix, gateway, AD site, or "
+                "registry key). The migrator captured a location with an "
+                "empty identifier set — usually the per-site 'Fallback' "
+                "location, which S1 auto-creates at site creation.",
+        "fix":  "Update to S1 Command Center v1.2.0+ — the restore now "
+                "skips empty/auto-created locations automatically.\n"
+                "If a non-Fallback location triggers this, the source "
+                "location was misconfigured; re-create it manually with at "
+                "least one identifier.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"filter:.*groupids.*unknown field|"
+                             r"unknown field.*groupids"),
+        "what": "Element doesn't exist at group scope",
+        "why":  "S1 stores this element type (e.g. Locations) only at "
+                "Account or Site scope. The migrator tried to write it at "
+                "Group scope and the API rejected the `groupIds` filter.",
+        "fix":  "Update to S1 Command Center v1.2.0+ — group-scoped writes "
+                "for these elements are now skipped automatically. No data "
+                "is lost: the parent site already holds the configuration.",
+        "severity": "info",
+    },
+    {
+        "match": _re.compile(r"scope.*missing data for required field|"
+                             r"missing data for required field.*scope"),
+        "what": "Destination scope filter missing",
+        "why":  "The destination console wants the override/rule to be "
+                "anchored to a scope (account/site/group), but the "
+                "migrator didn't include one. This usually means the "
+                "S1 Command Center version is out of date.",
+        "fix":  "Update to the latest S1 Command Center build (v1.2.0+).\n"
+                "If the error persists, copy it and send to the developer.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"insufficient permissions|forbidden|→ 403"),
+        "what": "API token lacks the required permission",
+        "why":  "Your destination API token doesn't have the role/permission "
+                "needed for this action (e.g. 'Policy Override.create', "
+                "'Threat Intel.update', 'SSO.edit').",
+        "fix":  "1) Open the destination console → Settings → Users → your "
+                "service user → Role.\n"
+                "2) Grant the missing permission listed in the error.\n"
+                "3) Re-issue the API token if you changed the role, then "
+                "re-run the restore.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"→ 401|unauthorized"),
+        "what": "API token invalid or expired",
+        "why":  "The destination token was rejected. It may have expired, "
+                "been revoked, or come from a different tenant.",
+        "fix":  "Open the destination console → Settings → Users → API "
+                "Tokens → generate a fresh token, paste it into the "
+                "DESTINATION card, click 'Save & Connect', then re-run.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"→ 404|not found"),
+        "what": "Target endpoint or resource not found",
+        "why":  "The destination console returned 404. Either the endpoint "
+                "isn't enabled on this tenant (e.g. XDR / Marketplace / "
+                "Singularity Mobile), or the parent scope (site/group) "
+                "wasn't created before this element tried to write to it.",
+        "fix":  "1) Confirm the matching product module is licensed on the "
+                "destination.\n"
+                "2) If it's a per-scope element, re-run after the parent "
+                "site/group is fully created.\n"
+                "3) Uncheck this element and continue if the feature isn't "
+                "in use on the destination.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"→ 429|rate limit|too many requests"),
+        "what": "Destination console rate-limited the migration",
+        "why":  "The destination API throttled the request bursts. The "
+                "migrator retries with backoff, but if the limit is hit "
+                "repeatedly, large bulk creates can still fail.",
+        "fix":  "Wait a few minutes and re-run — the migrator skips items "
+                "that already exist, so a retry is cheap.\n"
+                "For very large tenants, run the migration during "
+                "off-peak hours.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"→ 5\d\d|server could not process|"
+                             r"internal server error"),
+        "what": "Destination console returned a server error (5xx)",
+        "why":  "The S1 console itself errored while processing the request. "
+                "This is almost always a server-side issue, not a problem "
+                "with the migration tool.",
+        "fix":  "1) Re-run — many 5xx errors are transient.\n"
+                "2) If it persists for the same element, copy this error "
+                "(use the Copy button) and send it to SentinelOne Support; "
+                "they'll need the timestamp and full URL.\n"
+                "3) Meanwhile, uncheck the failing element to let the rest "
+                "of the migration complete.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"connection.*refused|connection.*reset|"
+                             r"name resolution|nodename nor servname|"
+                             r"timed out|read timeout"),
+        "what": "Network issue reaching the destination console",
+        "why":  "Your machine couldn't talk to the destination URL — DNS "
+                "failure, firewall block, VPN drop, or the console URL is "
+                "typed wrong.",
+        "fix":  "1) Verify the DESTINATION URL in the Connections page.\n"
+                "2) Click 'Test' on the DESTINATION card — it should "
+                "say 'OK — <your name>'.\n"
+                "3) Check VPN/proxy, then re-run the restore.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"ssl|certificate verify failed"),
+        "what": "TLS certificate could not be verified",
+        "why":  "The destination console's HTTPS certificate didn't pass "
+                "verification. Usually means a corporate MITM proxy is "
+                "rewriting TLS, or the console is using a self-signed cert.",
+        "fix":  "On the DESTINATION connection card, tick the "
+                "'Ignore SSL errors' checkbox, click 'Save & Connect', "
+                "then re-run the restore.\n"
+                "(Only do this if you trust the network between you and "
+                "the console.)",
+        "severity": "warning",
+    },
+]
+
+
+def explain_error(label: str, detail: str, status_code: int = 0) -> dict:
+    """Return a structured explanation for a restore error.
+
+    Looks up the first matching rule from `_ERROR_RULES` and decorates it
+    with the calling element label and a copy-friendly raw error blob.
+    """
+    raw = f"[{label}] HTTP {status_code} {detail}".strip()
+    text = raw.lower()
+    for rule in _ERROR_RULES:
+        if rule["match"].search(text):
+            return {
+                "label":    label,
+                "what":     rule["what"],
+                "why":      rule["why"],
+                "fix":      rule["fix"],
+                "severity": rule["severity"],
+                "raw":      raw,
+            }
+    # Fallback: unknown error pattern
+    return {
+        "label":    label,
+        "what":     f"Unrecognised error from '{label}'",
+        "why":      "The migration tool doesn't have a specific explanation "
+                    "for this error code/message.",
+        "fix":      "Copy the raw error using the Copy button below and "
+                    "send it to SentinelOne Support (or the migrator "
+                    "developer) — include the destination console URL, "
+                    "the element name, and the time it happened.",
+        "severity": "error",
+        "raw":      raw,
+    }
 
 
 # Whitelists for specific element types that are strict about accepted fields
@@ -390,6 +863,195 @@ def _scope(scope_type, scope_id):
     elif scope_type == "group":
         return {"groupIds": [scope_id]}
     return {}
+
+
+# ─── Diff-panel summary helpers ────────────────────────────────────────
+# Used by the side-by-side DiffPanel on the Restore page. The same shape
+# is produced from a backup node's `data` dict AND from a live destination
+# query, so the two columns line up element-by-element.
+
+# (category, count, top_names[])  — ordering matters: it's the row order
+# the panel renders in.
+def _summarize_node_payload(data: dict) -> list:
+    out = []
+    pol = (data or {}).get("policy") or {}
+    if pol:
+        mode = "inherit" if pol.get("inheritedFrom") else "custom"
+        out.append(("policy", 1, [mode]))
+    else:
+        out.append(("policy", 0, []))
+
+    excls = (data or {}).get("exclusions") or {}
+    if isinstance(excls, dict):
+        for etype in EXCL_TYPES:
+            items = excls.get(etype) or []
+            out.append((f"excl/{etype}", len(items),
+                        [str(i.get("value", ""))[:60] for i in items[:50]]))
+
+    bl = (data or {}).get("restrictions") \
+        or (data or {}).get("blocklist") or []
+    out.append(("blocklist", len(bl),
+                [str(b.get("value", ""))[:60] for b in bl[:50]]))
+
+    fw = (data or {}).get("firewall", {}) or {}
+    fw_rules = fw.get("rules") or []
+    out.append(("fw-rules", len(fw_rules),
+                [str(r.get("name", ""))[:60] for r in fw_rules[:50]]))
+    fw_locs = fw.get("locations") or []
+    out.append(("fw-locations", len(fw_locs),
+                [str(l.get("name", ""))[:60] for l in fw_locs[:50]]))
+
+    dc = (data or {}).get("deviceControl", {}) or {}
+    dc_rules = dc.get("rules") or []
+    out.append(("dc-rules", len(dc_rules),
+                [str(r.get("ruleName") or r.get("name", ""))[:60]
+                 for r in dc_rules[:50]]))
+
+    nq = (data or {}).get("networkQuarantine", {}) or {}
+    nq_rules = nq.get("rules") or []
+    out.append(("nq-rules", len(nq_rules),
+                [str(r.get("name", ""))[:60] for r in nq_rules[:50]]))
+
+    dv = (data or {}).get("deepVisibility", {}) or {}
+    flt = dv.get("filters") or (data or {}).get("saved_filters") or []
+    out.append(("saved_filters", len(flt),
+                [str(f.get("name", ""))[:60] for f in flt[:50]]))
+
+    ovrs = ((data or {}).get("config", {}) or {}).get("overrides") or []
+    out.append(("config_overrides", len(ovrs),
+                [str(o.get("name", ""))[:60] for o in ovrs[:50]]))
+    return out
+
+
+def _node_identity(node: dict) -> dict:
+    """Identity block displayed at the top of each diff column. Pulled
+    from a backup node dict — the same shape is built for destination by
+    `_dest_identity_from_data`."""
+    ntype = node.get("type", "?")
+    info = {"type": ntype, "path": node.get("path", "?")}
+    if ntype == "group":
+        g = node.get("group", {}) or {}
+        info["name"] = g.get("name", "?")
+        info["group_type"] = g.get("type", "?")
+        info["filterId"] = g.get("filterId") \
+            or (g.get("filter") or {}).get("id") or ""
+        info["filterName"] = g.get("filterName") \
+            or (g.get("filter") or {}).get("name") or ""
+        info["inherits"] = g.get("inherits", "?")
+    elif ntype == "site":
+        s = node.get("site", {}) or {}
+        info["name"] = s.get("name", "?")
+        info["state"] = s.get("state", "?")
+        info["siteType"] = s.get("siteType", "?")
+    elif ntype == "account":
+        a = node.get("account", {}) or {}
+        info["name"] = a.get("name", "?")
+        info["state"] = a.get("state", "?")
+    return info
+
+
+def _dest_identity_from_data(ntype: str, data: dict) -> dict:
+    info = {"type": ntype}
+    if ntype == "group":
+        g = data.get("_group", {}) or {}
+        info["name"] = g.get("name", "?")
+        info["group_type"] = g.get("type", "?")
+        info["filterId"] = g.get("filterId") \
+            or (g.get("filter") or {}).get("id") or ""
+        info["filterName"] = g.get("filterName") \
+            or (g.get("filter") or {}).get("name") or ""
+        info["inherits"] = g.get("inherits", "?")
+    elif ntype == "site":
+        s = data.get("_site", {}) or {}
+        info["name"] = s.get("name", "?")
+        info["state"] = s.get("state", "?")
+    elif ntype == "account":
+        a = data.get("_account", {}) or {}
+        info["name"] = a.get("name", "?")
+    return info
+
+
+def _fetch_dest_snapshot(api, ntype: str, dest_id: str) -> dict:
+    """Snapshot the destination console for one node — shaped the same as
+    a backup `data` dict so `_summarize_node_payload` works on both sides.
+    Errors per-element are swallowed; missing keys just produce 0-count
+    rows."""
+    if not dest_id and ntype != "global":
+        return {}
+    scope = _scope(ntype, dest_id) if ntype != "global" else {"tenant": "true"}
+    data: dict = {}
+    if ntype == "group":
+        try:
+            grps = api.get_groups(params={"groupIds": dest_id})
+            if grps:
+                data["_group"] = grps[0]
+        except Exception:
+            pass
+    elif ntype == "site":
+        try:
+            sites = api.get_sites(params={"siteIds": dest_id})
+            if sites:
+                data["_site"] = sites[0]
+        except Exception:
+            pass
+    elif ntype == "account":
+        try:
+            accts = api.get_accounts()
+            for a in accts:
+                if str(a.get("id")) == str(dest_id):
+                    data["_account"] = a
+                    break
+        except Exception:
+            pass
+
+    if ntype != "global":
+        try:
+            data["policy"] = api.get_policy(ntype, dest_id)
+        except Exception:
+            pass
+        data["exclusions"] = {}
+        for et in EXCL_TYPES:
+            try:
+                data["exclusions"][et] = api.get_exclusions(scope, et)
+            except Exception:
+                pass
+        try:
+            data["restrictions"] = api.get_blocklist(scope)
+        except Exception:
+            pass
+        data["firewall"] = {}
+        try:
+            data["firewall"]["rules"] = api.get_firewall_rules(scope)
+        except Exception:
+            pass
+        if ntype != "group":
+            try:
+                data["firewall"]["locations"] = api.get_locations(scope)
+            except Exception:
+                pass
+        data["deviceControl"] = {}
+        try:
+            data["deviceControl"]["rules"] = \
+                api.get_device_control_rules(scope)
+        except Exception:
+            pass
+        data["networkQuarantine"] = {}
+        try:
+            data["networkQuarantine"]["rules"] = api.get_nq_rules(scope)
+        except Exception:
+            pass
+        if ntype != "group":
+            try:
+                data["deepVisibility"] = {
+                    "filters": api.get_saved_filters(scope)}
+            except Exception:
+                pass
+        try:
+            data.setdefault("config", {})["overrides"] = \
+                api.get_config_overrides(scope)
+        except Exception:
+            pass
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -499,6 +1161,7 @@ class BackupPage(ctk.CTkFrame):
         self._timer_start = 0.0
         self._operation_log = []
         self._cancelled = False
+        self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
 
     def _tick_timer(self):
         if not self._timer_running:
@@ -682,9 +1345,10 @@ class BackupPage(ctk.CTkFrame):
             raise S1APIError(f"Cannot reach console — connection refused. Check URL and token.")
 
         nodes = []
-        acct_f = filters.get("account", "").lower()
-        site_f = filters.get("site", "").lower()
-        group_f = filters.get("group", "").lower()
+        acct_f    = filters.get("account", "").lower()
+        site_f    = filters.get("site", "").lower()
+        group_f   = filters.get("group", "").lower()
+        acct_id_f = getattr(self, "_acct_id", "").strip()
         pt = self.ptable
 
         def ui(fn):
@@ -748,11 +1412,22 @@ class BackupPage(ctk.CTkFrame):
 
         # ── discover structure ──
         accounts = api.get_accounts()
+        if acct_id_f:
+            id_match = [a for a in accounts if str(a.get("id", "")) == acct_id_f]
+            if not id_match:
+                cli_log(f"⚠ Account ID {acct_id_f} not found in this console "
+                        f"— verify the source connection is correct!", "error")
+            else:
+                cli_log(f"  ✓ Backup: account ID {acct_id_f} → "
+                        f"'{id_match[0].get('name')}' confirmed", "success")
         node_count = 0
         for acct in accounts:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if not name_match(aname, acct_f):
+            if acct_id_f:
+                if str(aid) != acct_id_f:
+                    continue
+            elif not name_match(aname, acct_f):
                 continue
             node_count += 1
             try:
@@ -787,7 +1462,10 @@ class BackupPage(ctk.CTkFrame):
         for acct in accounts:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if not name_match(aname, acct_f):
+            if acct_id_f:
+                if str(aid) != acct_id_f:
+                    continue
+            elif not name_match(aname, acct_f):
                 continue
             nid = f"acct-{aid}"
             ui(lambda n=nid, p=f"{aname}/": pt.add_node(n, p, "account"))
@@ -820,11 +1498,31 @@ class BackupPage(ctk.CTkFrame):
                         "sortOrder": "asc"})
                 except Exception:
                     groups = []
+                # Enrich dynamic-group payloads with the saved filter's
+                # NAME (resolved from the source console) so restore can
+                # map it to the destination filter by name. Some S1
+                # versions don't include `filterName` in /groups responses.
+                _src_filter_name_by_id: dict = {}
                 for grp in groups:
                     gname = grp.get("name", "?")
                     gid = grp.get("id", "")
                     if not name_match(gname, group_f):
                         continue
+                    fid = (grp.get("filterId")
+                           or (grp.get("filter") or {}).get("id"))
+                    if fid and not grp.get("filterName"):
+                        fname = _src_filter_name_by_id.get(str(fid))
+                        if fname is None:
+                            try:
+                                hits = api.get_saved_filters(
+                                    {"ids": str(fid)})
+                                fname = (hits[0].get("name")
+                                         if hits else "")
+                            except Exception:
+                                fname = ""
+                            _src_filter_name_by_id[str(fid)] = fname or ""
+                        if fname:
+                            grp["filterName"] = fname
                     nid = f"grp-{gid}"
                     gp = f"{aname}/{sname}/{gname}"
                     ui(lambda n=nid, p=gp: pt.add_node(n, p, "group"))
@@ -1006,6 +1704,24 @@ class BackupPage(ctk.CTkFrame):
         if "auto_upgrade_policies" in elements and scope_type in ("account", "site"):
             _fetch("autoUpgradePolicies", "upgrade-pol",
                    api.get_auto_upgrade_policies, scope)
+
+        # ── Locations (firewall location-awareness) ──
+        if "locations" in elements:
+            _fetch("locations", "locations", api.get_locations, scope)
+
+        # ── Webhooks ──
+        if "webhooks" in elements and scope_type in ("account", "site", "global"):
+            _fetch("webhooks", "webhooks", api.get_webhooks, scope)
+
+        # ── Scheduled reports ──
+        if "scheduled_reports" in elements and scope_type in ("account", "site", "global"):
+            _fetch("scheduledReports", "sched-rep",
+                   api.get_scheduled_reports, scope)
+
+        # ── Marketplace integrations (inventory only) ──
+        if "marketplace_apps" in elements and scope_type in ("account", "global"):
+            _fetch("marketplaceApps", "mkt-apps",
+                   api.get_marketplace_apps, scope)
 
         # ── Settings ──
         if scope_type in ("account", "site", "global"):
@@ -1376,6 +2092,249 @@ class SetDefaultsDialog(ctk.CTkToplevel):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Diff Panel — live side-by-side restore comparison
+# ═══════════════════════════════════════════════════════════════════════
+
+class DiffPanel(ctk.CTkFrame):
+    """Side-by-side preview of what the loaded backup contains vs what
+    the destination console currently has, for the currently-focused
+    restore node.
+
+    Left column  = backup file (parsed once when the file is loaded).
+    Right column = destination snapshot — re-queried twice per node
+                   during restore (before processing and after it
+                   finishes) so the operator can watch the change land.
+    """
+
+    PHASE_LABELS = {
+        "initial":  ("📷 initial",  "#888"),
+        "before":   ("📷 pre-restore",  "#f0b248"),
+        "after":    ("✅ post-restore", "#6dbf6d"),
+    }
+
+    def __init__(self, master, **kw):
+        kw.setdefault("fg_color", CARD)
+        kw.setdefault("corner_radius", 12)
+        super().__init__(master, **kw)
+        import tkinter as tk
+        self._tk = tk
+        self._backup: list = []
+        # idx → {"phase": str, "at": str, "summary": list, "identity": dict}
+        self._dest_snaps: dict = {}
+        self._current_idx: Optional[int] = None
+
+        # ── Header ──
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=8, pady=(8, 2))
+        ctk.CTkLabel(hdr, text="🔍  Source vs Destination",
+                     font=("Segoe UI", 13, "bold")).pack(side="left")
+        self._refresh_lbl = ctk.CTkLabel(
+            hdr, text="", font=("Segoe UI", 10), text_color="#888")
+        self._refresh_lbl.pack(side="right", padx=(4, 0))
+
+        # ── Node selector ──
+        self._node_var = ctk.StringVar(value="(no backup loaded)")
+        self._node_menu = ctk.CTkOptionMenu(
+            self, variable=self._node_var, values=["(no backup loaded)"],
+            command=self._on_select_node, height=28,
+            font=("Consolas", 11))
+        self._node_menu.pack(fill="x", padx=8, pady=(2, 4))
+
+        # ── Column headers ──
+        col_hdr = ctk.CTkFrame(self, fg_color="transparent")
+        col_hdr.pack(fill="x", padx=8, pady=(0, 2))
+        col_hdr.grid_columnconfigure(0, weight=1, uniform="c")
+        col_hdr.grid_columnconfigure(1, weight=1, uniform="c")
+        ctk.CTkLabel(col_hdr, text="📦  BACKUP",
+                     font=("Segoe UI", 11, "bold"),
+                     text_color=GREEN, anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=4)
+        ctk.CTkLabel(col_hdr, text="🌐  DESTINATION (live)",
+                     font=("Segoe UI", 11, "bold"),
+                     text_color=ACCENT, anchor="w").grid(
+            row=0, column=1, sticky="ew", padx=4)
+
+        # ── Text widgets ──
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        body.grid_columnconfigure(0, weight=1, uniform="c")
+        body.grid_columnconfigure(1, weight=1, uniform="c")
+        body.grid_rowconfigure(0, weight=1)
+
+        self._left = tk.Text(
+            body, font=("Consolas", 10), bg="#15171c", fg="#d0d0d0",
+            relief="flat", borderwidth=0, wrap="none", height=18,
+            insertbackground="#d0d0d0")
+        self._left.grid(row=0, column=0, sticky="nsew", padx=(4, 2))
+        self._right = tk.Text(
+            body, font=("Consolas", 10), bg="#15171c", fg="#d0d0d0",
+            relief="flat", borderwidth=0, wrap="none", height=18,
+            insertbackground="#d0d0d0")
+        self._right.grid(row=0, column=1, sticky="nsew", padx=(2, 4))
+
+        for w in (self._left, self._right):
+            w.tag_configure("hdr",  foreground="#9eaab8",
+                            font=("Consolas", 10, "bold"))
+            w.tag_configure("same", foreground="#6dbf6d")
+            w.tag_configure("diff", foreground="#f0b248",
+                            font=("Consolas", 10, "bold"))
+            w.tag_configure("missing", foreground="#666",
+                            font=("Consolas", 10, "italic"))
+            w.tag_configure("identity_diff", foreground="#e94560",
+                            font=("Consolas", 10, "bold"))
+            w.configure(state="disabled")
+
+        self._status = ctk.CTkLabel(
+            self, text="Load a backup file and start a restore to see "
+                       "side-by-side changes.",
+            font=("Segoe UI", 10), text_color="#888", anchor="w")
+        self._status.pack(fill="x", padx=8, pady=(0, 6))
+
+    # ── Public API ─────────────────────────────────────────────────────
+
+    def set_backup(self, backup: list):
+        """Called once when a backup file is loaded into RestorePage."""
+        self._backup = backup or []
+        self._dest_snaps.clear()
+        labels = [self._label_for(i, n)
+                  for i, n in enumerate(self._backup)]
+        if not labels:
+            labels = ["(empty backup)"]
+            self._current_idx = None
+        else:
+            self._current_idx = 0
+        self._node_menu.configure(values=labels)
+        self._node_var.set(labels[0])
+        self._render()
+
+    def focus(self, idx: int):
+        """Programmatic focus — used by the restore loop to follow the
+        currently-processing node."""
+        if not (0 <= idx < len(self._backup)):
+            return
+        self._current_idx = idx
+        self._node_var.set(self._label_for(idx, self._backup[idx]))
+        self._render()
+
+    def record_dest_snapshot(self, idx: int, ntype: str, snap_data: dict,
+                             phase: str):
+        """Store the destination snapshot for node `idx`. Safe to call
+        from a worker thread — UI redraw is marshalled to the main thread.
+        """
+        self._dest_snaps[idx] = {
+            "ntype": ntype,
+            "phase": phase,
+            "at": datetime.now().strftime("%H:%M:%S"),
+            "summary": _summarize_node_payload(snap_data),
+            "identity": _dest_identity_from_data(ntype, snap_data),
+        }
+        # Marshal UI redraw if we're showing this node right now.
+        if self._current_idx == idx:
+            self.after(0, self._render)
+
+    # ── Internals ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _label_for(i: int, node: dict) -> str:
+        icon = {"global": "●", "account": "▸", "site": "  ▹",
+                "group": "    ◦"}.get(node.get("type", ""), "")
+        return f"{i+1:>3}. {icon} [{node.get('type','?'):<7}] {node.get('path','?')}"
+
+    def _on_select_node(self, choice: str):
+        for i, n in enumerate(self._backup):
+            if self._label_for(i, n) == choice:
+                self._current_idx = i
+                break
+        self._render()
+
+    def _render(self):
+        L, R = self._left, self._right
+        L.configure(state="normal"); R.configure(state="normal")
+        L.delete("1.0", "end"); R.delete("1.0", "end")
+
+        if self._current_idx is None or not self._backup:
+            L.insert("end", "(load a backup file)\n", "missing")
+            R.insert("end", "(no node selected)\n", "missing")
+            L.configure(state="disabled"); R.configure(state="disabled")
+            return
+
+        idx = self._current_idx
+        node = self._backup[idx]
+        ntype = node.get("type", "?")
+        src_id = _node_identity(node)
+        src_sum = _summarize_node_payload(node.get("data") or {})
+
+        snap = self._dest_snaps.get(idx)
+        dst_id = (snap or {}).get("identity") or {"type": ntype}
+        dst_sum = (snap or {}).get("summary") or []
+
+        # — Identity block —
+        L.insert("end", f"━━━ Identity ━━━\n", "hdr")
+        R.insert("end", f"━━━ Identity ━━━\n", "hdr")
+        keys = ["path", "name", "group_type", "filterName", "filterId",
+                "inherits", "state", "siteType"]
+        for k in keys:
+            sv = src_id.get(k)
+            dv = dst_id.get(k)
+            if sv is None and dv is None:
+                continue
+            sv_s = "" if sv is None else str(sv)
+            dv_s = "" if dv is None else str(dv)
+            same = (sv_s == dv_s)
+            tag_l = "same" if same else "identity_diff"
+            tag_r = "same" if same else "identity_diff"
+            if not dv_s:
+                tag_r = "missing"
+            L.insert("end", f"  {k:<12}: {sv_s or '—'}\n", tag_l)
+            R.insert("end", f"  {k:<12}: {dv_s or '—'}\n", tag_r)
+
+        # — Elements block —
+        L.insert("end", "\n━━━ Elements ━━━\n", "hdr")
+        R.insert("end", "\n━━━ Elements ━━━\n", "hdr")
+        # Build dest lookup by category for fast pairing.
+        dst_by_cat = {cat: (cnt, names) for cat, cnt, names in dst_sum}
+        for cat, scnt, snames in src_sum:
+            dcnt, dnames = dst_by_cat.get(cat, (0, []))
+            same = (scnt == dcnt)
+            tag = "same" if same else "diff"
+            L.insert("end",
+                     f"  {cat:<16} = {scnt:>5}\n",
+                     tag)
+            R.insert("end",
+                     f"  {cat:<16} = {dcnt:>5}"
+                     f"{'   (Δ '+ ('+' if dcnt>scnt else '') + str(dcnt-scnt) +')' if not same else ''}\n",
+                     tag)
+            # Sample of names — first 5 per side, indented
+            for name in snames[:5]:
+                L.insert("end", f"      · {name}\n", "same")
+            for name in dnames[:5]:
+                in_src = name in snames
+                t = "same" if in_src else "diff"
+                R.insert("end", f"      · {name}\n", t)
+            if len(snames) > 5:
+                L.insert("end", f"      … {len(snames)-5} more\n", "missing")
+            if len(dnames) > 5:
+                R.insert("end", f"      … {len(dnames)-5} more\n", "missing")
+
+        if snap:
+            phase_label, color = self.PHASE_LABELS.get(
+                snap["phase"], ("📷", "#888"))
+            self._refresh_lbl.configure(
+                text=f"{phase_label} @ {snap['at']}", text_color=color)
+            self._status.configure(
+                text=f"Destination snapshot taken at {snap['at']} "
+                     f"({snap['phase']}).")
+        else:
+            self._refresh_lbl.configure(text="(not yet queried)",
+                                         text_color="#666")
+            self._status.configure(
+                text="Destination not queried yet — start a restore "
+                     "to capture before/after snapshots.")
+
+        L.configure(state="disabled"); R.configure(state="disabled")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Restore Page
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1536,6 +2495,17 @@ class RestorePage(ctk.CTkFrame):
             btn_row, text="Export Log", height=38,
             fg_color="#2980b9", command=self._export, state="disabled")
         self._export_btn.pack(side="left", padx=(0, 4))
+        self._explain_btn = ctk.CTkButton(
+            btn_row, text="🛟  Explain Errors", height=38,
+            fg_color="#e67e22", hover_color="#d35400",
+            command=self._show_errors_dialog, state="disabled")
+        self._explain_btn.pack(side="left", padx=(0, 4))
+        _help_btn(btn_row,
+                  "After a restore, click this to see plain-English "
+                  "explanations of every failure — what it means, why it "
+                  "happened, what to do, and how to copy the error to send "
+                  "to support."
+                  ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Set Defaults", height=38,
                       fg_color="#8e44ad", hover_color="#9b59b6",
                       command=self._open_set_defaults).pack(side="left", padx=(0, 4))
@@ -1551,16 +2521,48 @@ class RestorePage(ctk.CTkFrame):
                                          text_color="#888")
         self._status_lbl.pack(side="left", padx=(8, 0))
 
-        # progress table for restore
+        # progress table + diff panel (resizable side by side).
+        # Use a tk.PanedWindow so the user can drag the divider to give
+        # either side more room. PanedWindow requires its children to be
+        # DIRECT Tk-path children, but CTkScrollableFrame wraps itself in
+        # an internal canvas (its real Tk path is `…!canvas.!progresstable`,
+        # not `…!progresstable`). So we add plain tk.Frame holders and
+        # nest the actual widgets inside them.
         self.grid_rowconfigure(7, weight=1)
-        self.ptable = ProgressTable(self, height=300)
-        self.ptable.grid(row=7, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        import tkinter as _tk
+        split = _tk.PanedWindow(
+            self, orient="horizontal",
+            sashwidth=8, sashrelief="raised",
+            bg=CARD, bd=0, sashpad=0,
+            opaqueresize=True)
+        split.grid(row=7, column=0, sticky="nsew", padx=20, pady=(4, 12))
+
+        # CRITICAL: PanedWindow doesn't constrain its children's heights —
+        # without pack_propagate(False) the inner CTkScrollableFrame would
+        # expand to fit all its rows (defeating the whole point of being
+        # scrollable). Fixed initial height + propagate-off keeps the
+        # scrollable region clipped so the scrollbar actually engages.
+        left_pane = _tk.Frame(split, bg=CARD, bd=0, highlightthickness=0,
+                              height=400)
+        right_pane = _tk.Frame(split, bg=CARD, bd=0, highlightthickness=0,
+                               height=400)
+        left_pane.pack_propagate(False)
+        right_pane.pack_propagate(False)
+        split.add(left_pane, minsize=300, stretch="always", width=620)
+        split.add(right_pane, minsize=320, stretch="always", width=520)
+
+        self.ptable = ProgressTable(left_pane, height=300)
+        self.ptable.pack(fill="both", expand=True)
+        self.diff_panel = DiffPanel(right_pane)
+        self.diff_panel.pack(fill="both", expand=True)
+        self._split = split
 
         self.log = _ConsoleProxy(self.app)
         self._timer_running = False
         self._timer_start = 0.0
         self._operation_log = []
         self._cancelled = False
+        self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
 
     def _tick_timer(self):
         if not self._timer_running:
@@ -1690,6 +2692,13 @@ class RestorePage(ctk.CTkFrame):
                 t = node.get("type", "?")
                 types[t] = types.get(t, 0) + 1
             summary = ", ".join(f"{v} {k}(s)" for k, v in types.items())
+            # Populate the diff panel so the operator can browse the
+            # backup contents *before* clicking restore.
+            if hasattr(self, "diff_panel"):
+                try:
+                    self.diff_panel.set_backup(self.backup_data)
+                except Exception:
+                    pass
             self.info_lbl.configure(
                 text=f"Loaded {n} nodes: {summary}  ({os.path.basename(fp)})")
         except Exception as e:
@@ -1860,12 +2869,19 @@ class RestorePage(ctk.CTkFrame):
             self._start_btn.configure(state="disabled")
             self._stop_btn.configure(state="normal")
             self._export_btn.configure(state="disabled")
+            self._explain_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
                                         text_color="#4da6ff")
         else:
             self._start_btn.configure(state="normal")
             self._stop_btn.configure(state="disabled")
             self._export_btn.configure(state="normal")
+            # enable Explain Errors only if the last run produced any
+            has_failures = any(
+                n.get("failed_items")
+                for n in getattr(self, "_report_nodes", []))
+            self._explain_btn.configure(
+                state="normal" if has_failures else "disabled")
 
     def _start_restore(self):
         api = self._get_restore_api()
@@ -1915,6 +2931,7 @@ class RestorePage(ctk.CTkFrame):
         import time as _time
         self.ptable.clear()
         self._operation_log = []
+        self._skip_make_default_ids: set = set()  # sites created as Scenario B (no default override)
         self._report_nodes = []   # structured per-node report data
         self._report_meta = {     # report metadata
             "source_url": "",
@@ -2002,6 +3019,27 @@ class RestorePage(ctk.CTkFrame):
 
         total = len(backup)
 
+        # ── Build a source-side saved-filter id→name map ──
+        # Group payloads sometimes carry `filterId` but not `filterName`
+        # (older S1 API versions, or backups produced before filterName
+        # enrichment was added). Without a name we can't resolve the filter
+        # on the destination and dynamic groups silently fall back to
+        # static. Walk every node's saved-filters blob once and cache.
+        # Also build the dest-side cache lazily (keyed by site id).
+        src_filter_names: dict[str, str] = {}
+        for _n in backup:
+            _d = _n.get("data") or {}
+            for _f in ((_d.get("deepVisibility") or {}).get("filters") or []):
+                fid, fname = _f.get("id"), _f.get("name")
+                if fid and fname:
+                    src_filter_names[str(fid)] = fname
+            for _f in (_d.get("saved_filters") or []):
+                fid, fname = _f.get("id"), _f.get("name")
+                if fid and fname:
+                    src_filter_names[str(fid)] = fname
+        self._src_filter_id_to_name = src_filter_names
+        self._dest_filter_cache: dict[str, dict] = {}
+
         # ── add all nodes as pending rows ──
         for i, node in enumerate(backup):
             ntype = node.get("type", "?")
@@ -2047,7 +3085,9 @@ class RestorePage(ctk.CTkFrame):
                 skipped += 1
                 continue
             if ntype == "account":
-                nm = node.get("account", {}).get("name", "")
+                # Prefer npath (already updated by mangle-rename) over the
+                # nested name field which is NOT updated by mangle-rename.
+                nm = npath.strip("/").split("/")[0]
                 if acct_f and acct_f not in nm.lower():
                     ui(lambda n=nid: pt.set_skipped(n, "filtered"))
                     skipped += 1; continue
@@ -2065,6 +3105,11 @@ class RestorePage(ctk.CTkFrame):
             # ── resolve destination (auto-create if needed) ──
             ui(lambda n=nid: pt.set_running(n))
             ui(lambda n=nid: pt.set_detail(n, "resolving…"))
+            # Follow the active node in the diff panel so the operator
+            # always sees source-vs-dest for whatever is currently being
+            # processed.
+            ui(lambda ii=i: getattr(self, "diff_panel", None)
+               and self.diff_panel.focus(ii))
             dest_id = self._resolve_dest_id(
                 api, node, log,
                 progress=lambda msg, n=nid: ui(
@@ -2077,17 +3122,44 @@ class RestorePage(ctk.CTkFrame):
                 skipped += 1
                 continue
 
+            # ── Diff-panel: snapshot destination BEFORE we write to it ──
+            # Network calls — runs in this worker thread.
+            try:
+                snap_before = _fetch_dest_snapshot(api, ntype, dest_id or "")
+                if hasattr(self, "diff_panel"):
+                    ui(lambda ii=i, t=ntype, d=snap_before:
+                       self.diff_panel.record_dest_snapshot(
+                           ii, t, d, "before"))
+            except Exception as _e:
+                pass
+
             # ── override default site if needed ──
             if ntype == "site" and dest_id:
                 site_obj = node.get("site", {})
-                if site_obj.get("isDefault"):
+                # Skip default promotion for sites the user chose to create fresh (Scenario B)
+                if str(dest_id) in self._skip_make_default_ids:
+                    log(f"  Site '{site_obj.get('name')}' restored as non-default "
+                        f"(user kept existing default site unchanged)")
+                    self._operation_log.append(
+                        f"  ℹ '{site_obj.get('name')}' created as new non-default site "
+                        f"(Scenario B — existing default site preserved)")
+                elif site_obj.get("isDefault"):
                     ui(lambda n=nid: pt.set_detail(n, "checking default site…"))
                     path_parts = npath.strip("/").split("/")
                     acct_name = path_parts[0] if path_parts else ""
                     try:
                         accts = api.get_accounts()
-                        acct_match = [a for a in accts
-                                      if a.get("name") == acct_name]
+                        # Use ticket account ID to pick the right account when names are duplicate
+                        dest_acct_id = getattr(self, "_acct_id", "").strip()
+                        if dest_acct_id:
+                            acct_match = [a for a in accts
+                                          if str(a.get("id", "")) == dest_acct_id]
+                            if not acct_match:
+                                acct_match = [a for a in accts
+                                              if a.get("name") == acct_name]
+                        else:
+                            acct_match = [a for a in accts
+                                          if a.get("name") == acct_name]
                         if acct_match:
                             acct_id = acct_match[0]["id"]
                             all_sites = api.get_sites(
@@ -2100,7 +3172,6 @@ class RestorePage(ctk.CTkFrame):
                                 cur = existing_default[0]
                                 cur_name = cur.get("name", "?")
                                 new_name = site_obj.get("name", "?")
-                                # ask user on UI thread
                                 import threading as _thr
                                 answer = [None]
                                 evt = _thr.Event()
@@ -2139,23 +3210,20 @@ class RestorePage(ctk.CTkFrame):
                                             f"  ↻ Unset default: "
                                             f"'{s.get('name')}' "
                                             f"(id={s['id']})")
-                                    update = {"isDefault": True,
-                                              "name": new_name}
-                                    api.update_site(dest_id, update)
-                                    log(f"  Set default + rename → "
-                                        f"'{new_name}'")
+                                    api.update_site(dest_id,
+                                                    {"isDefault": True, "name": new_name})
+                                    log(f"  Set default + rename → '{new_name}'")
                                     self._operation_log.append(
                                         f"  ✓ Set default + renamed: "
                                         f"'{new_name}' (id={dest_id})")
                             else:
-                                # no conflict, just set it + rename
-                                sname = site_obj.get('name', '')
+                                # no conflict — set default + rename
+                                sname = site_obj.get("name", "")
                                 update = {"isDefault": True}
                                 if sname:
                                     update["name"] = sname
                                 api.update_site(dest_id, update)
-                                log(f"  Set default + rename → "
-                                    f"'{sname}'")
+                                log(f"  Set default + rename → '{sname}'")
                                 self._operation_log.append(
                                     f"  ✓ Set default + renamed: "
                                     f"'{sname}' (id={dest_id})")
@@ -2171,16 +3239,40 @@ class RestorePage(ctk.CTkFrame):
             failed_items = []  # collect per-item failures for report
 
             def _is_exists_error(exc):
-                """Check if error means the item already exists."""
+                """Treat duplicate-create and scope-inheritance errors as
+                benign skips rather than real failures.
+                S1APIError carries the human-readable reason in `.detail`,
+                while `str(exc)` is only the short 'METHOD /path → code'
+                line, so we inspect both."""
                 sc = getattr(exc, "status_code", 0)
-                msg = str(exc).lower()
-                return (sc in (400, 409)
-                        and any(w in msg for w in
-                                ("already", "duplicate", "exists",
-                                 "conflict", "unique",
-                                 "filter with the given name",
-                                 "hash",
-                                 "rule with same name")))
+                msg = (str(exc) + " " + str(getattr(exc, "detail", ""))).lower()
+                exists_words = ("already", "duplicate", "exists",
+                                "conflict", "unique",
+                                "filter with the given name",
+                                "hash",
+                                "rule with same name",
+                                "with same name")
+                # 403 + 'decoupled scope' wording = destination group inherits
+                # from its parent, so per-scope writes are blocked. Not a bug
+                # — that's the intended inherited-config state.
+                inherit_words = ("decoupled", "marking scope",
+                                 "cannot update other settings")
+                if sc in (400, 409) and any(w in msg for w in exists_words):
+                    return True
+                if sc == 403 and any(w in msg for w in inherit_words):
+                    return True
+                return False
+
+            def _err_detail(exc):
+                """Best-effort human-readable error text from an exception.
+                S1APIError carries `.detail` but the API sometimes returns
+                an empty body, leaving detail = ''. Fall back to str(exc)
+                whenever detail is missing or blank so the user never sees
+                an empty error in the report/dialog."""
+                d = getattr(exc, "detail", "") or ""
+                if not str(d).strip():
+                    d = str(exc) or repr(exc)
+                return str(d)
 
             def _item_id(item, label=""):
                 """Extract a human-readable identifier from an item."""
@@ -2201,7 +3293,7 @@ class RestorePage(ctk.CTkFrame):
                     if _is_exists_error(exc):
                         results.append((label, "exists"))
                     else:
-                        detail = getattr(exc, "detail", str(exc))
+                        detail = _err_detail(exc)
                         results.append((label, f"ERR: {detail}"))
                         failed_items.append({
                             "element": label,
@@ -2231,13 +3323,15 @@ class RestorePage(ctk.CTkFrame):
                             skip += 1
                         else:
                             fail += 1
-                            err_detail = getattr(exc, "detail",
-                                                 str(exc))[:120]
-                            last_err_msg = err_detail
+                            # Persist the full error so the classifier sees
+                            # the actual S1 reason; the console log gets the
+                            # short version.
+                            full_err = _err_detail(exc)
+                            last_err_msg = full_err[:120]
                             failed_items.append({
                                 "element": label,
                                 "name": _item_id(item, label),
-                                "error": err_detail,
+                                "error": full_err[:500],
                             })
                 total = ok + skip + fail
                 if total:
@@ -2270,12 +3364,15 @@ class RestorePage(ctk.CTkFrame):
                                 e_skip += 1
                             else:
                                 e_fail += 1
-                                e_last_err = getattr(exc, "detail",
-                                                     str(exc))[:80]
+                                # Keep full detail in the failure record so
+                                # the error-classifier can match on it; the
+                                # console line gets the short version.
+                                full_err = _err_detail(exc)
+                                e_last_err = full_err[:80]
                                 failed_items.append({
                                     "element": f"excl/{etype}",
                                     "name": item.get("value", "?")[:80],
-                                    "error": e_last_err,
+                                    "error": full_err[:500],
                                 })
                 parts = []
                 if e_ok: parts.append(f"{e_ok} new")
@@ -2325,12 +3422,12 @@ class RestorePage(ctk.CTkFrame):
                             fw_skip += 1
                         else:
                             fw_fail += 1
-                            fw_last_err = getattr(exc, "detail",
-                                                  str(exc))[:80]
+                            full_err = _err_detail(exc)
+                            fw_last_err = full_err[:80]
                             failed_items.append({
                                 "element": "fw-rule",
                                 "name": rule.get("name", "?")[:80],
-                                "error": fw_last_err,
+                                "error": full_err[:500],
                             })
                 parts = []
                 if fw_ok: parts.append(f"{fw_ok} new")
@@ -2363,34 +3460,55 @@ class RestorePage(ctk.CTkFrame):
                    dc.get("config") or data.get("device_control_config"))
             dc_r = dc.get("rules") or data.get("device_control_rules") or []
             if "device_control_rules" in elements and dc_r:
-                sorted_dc = sorted(dc_r,
-                    key=lambda r: r.get("order", 9999))
-                new_dc_ids = []
-                dc_ok = dc_skip = dc_fail = 0
-                for rule in sorted_dc:
-                    try:
-                        resp = api.create_device_control_rule(scope, _whitelist(rule, _DC_RULE_FIELDS))
-                        new_id = (resp.get("data", {}).get("id")
-                                  if isinstance(resp, dict) else None)
-                        if new_id:
-                            new_dc_ids.append(new_id)
-                        dc_ok += 1
-                    except Exception as exc:
-                        if _is_exists_error(exc):
-                            dc_skip += 1
-                        else:
-                            dc_fail += 1
-                parts = []
-                if dc_ok: parts.append(f"{dc_ok} new")
-                if dc_skip: parts.append(f"{dc_skip} exist")
-                if dc_fail: parts.append(f"{dc_fail} err")
-                if parts:
-                    results.append(("dc-rules", ", ".join(parts)))
-                if len(new_dc_ids) > 1:
-                    try:
-                        api.reorder_device_control_rules(scope, new_dc_ids)
-                    except Exception:
-                        pass
+                # Only restore rules that actually belong to this node's scope.
+                # The API returns inherited rules at every level, so without this
+                # filter account-scoped rules appear inside site/group nodes and
+                # would be incorrectly re-created (or silently fail) at the wrong scope.
+                dc_r_scoped = [r for r in dc_r
+                               if r.get("scope", "").lower() == ntype]
+                if not dc_r_scoped:
+                    log(f"  dc-rules: 0 rules at {ntype} scope "
+                        f"({len(dc_r)} inherited rules skipped)")
+                else:
+                    sorted_dc = sorted(dc_r_scoped,
+                                       key=lambda r: r.get("order", 9999))
+                    new_dc_ids = []
+                    dc_ok = dc_skip = dc_fail = 0
+                    for rule in sorted_dc:
+                        rname = rule.get("ruleName", "?")
+                        try:
+                            resp = api.create_device_control_rule(
+                                scope, _whitelist(rule, _DC_RULE_FIELDS))
+                            new_id = (resp.get("data", {}).get("id")
+                                      if isinstance(resp, dict) else None)
+                            if new_id:
+                                new_dc_ids.append(new_id)
+                            dc_ok += 1
+                        except Exception as exc:
+                            if _is_exists_error(exc):
+                                dc_skip += 1
+                            else:
+                                dc_fail += 1
+                                full_err = _err_detail(exc)
+                                detail = full_err[:120]
+                                log(f"  ✗ dc-rule '{rname}': {detail}")
+                                self._operation_log.append(
+                                    f"  ✗ DC rule '{rname}' failed: {detail}")
+                                failed_items.append({
+                                    "element": "dc-rule",
+                                    "name": str(rname)[:80],
+                                    "error": full_err[:500],
+                                })
+                    parts = []
+                    if dc_ok:   parts.append(f"{dc_ok} new")
+                    if dc_skip: parts.append(f"{dc_skip} exist")
+                    if dc_fail: parts.append(f"{dc_fail} err")
+                    results.append(("dc-rules", ", ".join(parts) or "0"))
+                    if len(new_dc_ids) > 1:
+                        try:
+                            api.reorder_device_control_rules(scope, new_dc_ids)
+                        except Exception:
+                            pass
 
             # ── Tags ──
             tags = data.get("config", {}).get("tags", {})
@@ -2433,8 +3551,20 @@ class RestorePage(ctk.CTkFrame):
             # ── Config overrides ──
             ovr = data.get("config", {}).get("overrides") or []
             if "config_overrides" in elements and ovr:
+                # NOTE: S1 requires `data.scope` (a string like "site" /
+                # "account" / "group" / "global") even though the wrapping
+                # `filter` already names the scope. `_clean_for_restore`
+                # strips the source's `scope` field, so we re-inject it here
+                # using the destination scope type. Without this the API
+                # rejects every create with "data: scope: Missing data for
+                # required field." See restore-error bundle (v1.2.0).
+                def _build_override(o):
+                    body = _clean_for_restore(o)
+                    body["scope"] = ntype
+                    return body
                 _r_bulk("overrides", ovr,
-                        lambda o: api.create_config_override(_clean_for_restore(o)))
+                        lambda o: api.create_config_override(
+                            scope, _build_override(o)))
 
             # ── Settings ──
             stg = data.get("settings", {})
@@ -2480,6 +3610,67 @@ class RestorePage(ctk.CTkFrame):
                 _r_bulk("upgrade-pol", aup,
                         lambda p: api.create_auto_upgrade_policy(_clean_for_restore(p)))
 
+            # ── Locations ──
+            # S1 only accepts location filters with accountIds / siteIds —
+            # passing groupIds returns "Unknown field". Also the per-site
+            # "Fallback" location is auto-created by S1 and has no
+            # identifiers, so re-posting it returns "At least one identifier
+            # must be defined". Skip both.
+            locs = data.get("locations") or []
+            if "locations" in elements and locs and ntype != "group":
+                def _has_identifier(loc: dict) -> bool:
+                    # S1 location identifiers: IP / range, MAC, DNS suffix,
+                    # gateway, AD site, registry. Tolerate any non-empty
+                    # identifier list.
+                    for k in ("identifiers", "ipAddresses", "macAddresses",
+                              "dnsSuffixes", "gatewayIps", "gatewayMacs",
+                              "adSiteNames", "registryKeys", "subnets"):
+                        v = loc.get(k)
+                        if isinstance(v, list) and v:
+                            return True
+                    return False
+
+                real_locs = [l for l in locs if _has_identifier(l)]
+                skipped = len(locs) - len(real_locs)
+                if skipped:
+                    self._operation_log.append(
+                        f"  ↻ Skipped {skipped} auto-created location(s) "
+                        f"with no identifiers (e.g. Fallback)")
+                if real_locs:
+                    _r_bulk("locations", real_locs,
+                            lambda l: api.create_location(
+                                scope, _clean_for_restore(l)))
+            elif "locations" in elements and locs and ntype == "group":
+                # Quiet skip — locations don't exist at group scope on S1.
+                self._operation_log.append(
+                    f"  ↻ Locations skipped at group scope "
+                    f"(S1 locations are site/account-only)")
+
+            # ── Webhooks ──
+            hooks = data.get("webhooks") or []
+            if "webhooks" in elements and hooks:
+                _r_bulk("webhooks", hooks,
+                        lambda w: api.create_webhook(scope, _clean_for_restore(w)))
+
+            # ── Scheduled reports ──
+            sched = data.get("scheduledReports") or []
+            if "scheduled_reports" in elements and sched:
+                _r_bulk("sched-rep", sched,
+                        lambda r: api.create_scheduled_report(
+                            scope, _clean_for_restore(r)))
+
+            # ── Marketplace inventory (read-only, log only) ──
+            mkt = data.get("marketplaceApps") or []
+            if "marketplace_apps" in elements and mkt:
+                names = ", ".join(
+                    (a.get("name") or a.get("applicationName") or "?")
+                    for a in mkt[:20])
+                more = f" (+{len(mkt) - 20} more)" if len(mkt) > 20 else ""
+                self._operation_log.append(
+                    f"  ℹ Marketplace apps to re-install manually "
+                    f"({len(mkt)}): {names}{more}")
+                results.append(("mkt-apps", f"{len(mkt)} listed"))
+
             # ── Build summary and update table ──
             ok_parts = []
             skip_parts = []
@@ -2510,6 +3701,18 @@ class RestorePage(ctk.CTkFrame):
                 ui(lambda n=nid, s=summary: pt.set_error(n, s))
             else:
                 ui(lambda n=nid, s=summary: pt.set_done(n, s))
+
+            # ── Diff-panel: snapshot destination AFTER the writes land ──
+            # This is the "after" state the operator wants to compare to
+            # the backup. Same network cost as the "before" snapshot.
+            try:
+                snap_after = _fetch_dest_snapshot(api, ntype, dest_id or "")
+                if hasattr(self, "diff_panel"):
+                    ui(lambda ii=i, t=ntype, d=snap_after:
+                       self.diff_panel.record_dest_snapshot(
+                           ii, t, d, "after"))
+            except Exception:
+                pass
 
             # detailed log + structured report
             self._operation_log.append(
@@ -2592,20 +3795,61 @@ class RestorePage(ctk.CTkFrame):
             name = node.get("account", {}).get("name", "")
             _p(f"resolving account '{name}'…")
             accts = api.get_accounts()
+            dest_acct_id = getattr(self, "_acct_id", "").strip()
+            if dest_acct_id:
+                # Prefer exact ID match — guarantees the right account even if name differs
+                id_match = [a for a in accts if str(a.get("id", "")) == dest_acct_id]
+                if id_match:
+                    found = id_match[0]
+                    _p(f"found account by ID → '{found['name']}' (id={dest_acct_id})")
+                    if found.get("name") != name:
+                        self._operation_log.append(
+                            f"  ℹ Account name differs: backup has '{name}', "
+                            f"destination has '{found['name']}' — matched by ID")
+                    return found["id"]
+                # ID not found — fall back to name match with a warning
+                self._operation_log.append(
+                    f"  ⚠ Target account ID {dest_acct_id} not found in destination "
+                    f"— falling back to name match for '{name}'")
             match = [a for a in accts if a.get("name") == name]
             if match:
-                _p(f"found account → id={match[0]['id']}")
-                return match[0]["id"]
+                found = match[0]
+                if dest_acct_id and str(found.get("id", "")) != dest_acct_id:
+                    self._operation_log.append(
+                        f"  ⚠ Name-matched account '{name}' has ID {found['id']}, "
+                        f"expected {dest_acct_id} — verify this is the correct account!")
+                _p(f"found account → id={found['id']}")
+                return found["id"]
             _p(f"account '{name}' not found")
             return None
 
         if ntype == "site":
             sname = node.get("site", {}).get("name", "")
+            src_site_is_default = node.get("site", {}).get("isDefault", False)
             path_parts = npath.strip("/").split("/")
             acct_name = path_parts[0] if path_parts else ""
             _p(f"finding account '{acct_name}'…")
             accts = api.get_accounts()
-            acct_match = [a for a in accts if a.get("name") == acct_name]
+
+            # ── Account identity: prefer ticket account ID to avoid duplicate-name ambiguity ──
+            dest_acct_id = getattr(self, "_acct_id", "").strip()
+            if dest_acct_id:
+                acct_match = [a for a in accts
+                              if str(a.get("id", "")) == dest_acct_id]
+                if acct_match:
+                    _p(f"account matched by ID → '{acct_match[0]['name']}' "
+                       f"(id={dest_acct_id})")
+                    if acct_match[0].get("name") != acct_name:
+                        self._operation_log.append(
+                            f"  ℹ Account name in backup ('{acct_name}') differs from "
+                            f"destination ('{acct_match[0]['name']}') — matched by ID {dest_acct_id}")
+                else:
+                    self._operation_log.append(
+                        f"  ⚠ Account ID {dest_acct_id} not found — falling back to name match")
+                    acct_match = [a for a in accts if a.get("name") == acct_name]
+            else:
+                acct_match = [a for a in accts if a.get("name") == acct_name]
+
             if not acct_match:
                 self._operation_log.append(
                     f"  Site '{sname}': parent account '{acct_name}' not found")
@@ -2640,50 +3884,106 @@ class RestorePage(ctk.CTkFrame):
                         _p(f"found site → id={mid}")
                         return mid
 
-            # site not found — offer to use an existing site instead of
-            # auto-creating (pick the default site, or the only site)
+            # ── Site not found in destination ───────────────────────────────
+            import threading as _thr
+
             if active_sites:
-                existing_default = [s for s in active_sites
-                                    if s.get("isDefault")]
-                candidate = (existing_default[0] if existing_default
-                             else active_sites[0]
-                             if len(active_sites) == 1
-                             else None)
-                if candidate:
-                    ed_name = candidate.get("name", "?")
-                    _p(f"no match — asking to use '{ed_name}'…")
-                    import threading as _thr
+                # ── Check for "default site" named conflict (Scenario A / B) ──
+                # Conflict: source site is the default AND destination has a
+                # placeholder named "default site".
+                default_named = [s for s in active_sites
+                                 if s.get("name", "").lower() == "default site"]
+                if src_site_is_default and default_named:
+                    placeholder = default_named[0]
+                    ph_name = placeholder.get("name", "default site")
+                    site_list = ", ".join(s.get("name", "?") for s in all_sites[:6])
                     answer = [None]
                     evt = _thr.Event()
-                    site_list = ", ".join(
-                        s.get("name", "?") for s in all_sites[:5])
-                    def _ask_map(en=ed_name, sn=sname, an=acct_name,
-                                 sl=site_list):
+                    def _ask_default_conflict(pn=ph_name, sn=sname,
+                                              an=acct_match[0].get("name", acct_name),
+                                              sl=site_list):
                         answer[0] = messagebox.askyesno(
-                            "Site Not Found",
-                            f"Site '{sn}' was not found in account "
-                            f"'{an}'.\n\n"
-                            f"Existing sites: {sl}\n\n"
-                            f"Use '{en}' as the target and rename it "
-                            f"to '{sn}'?\n\n"
-                            f"Click No to skip this site.")
+                            "Default Site Conflict",
+                            f"Source site  '{sn}'  is marked isDefault.\n"
+                            f"Destination account  '{an}'  has a placeholder "
+                            f"site named  '{pn}'.\n\n"
+                            f"Destination sites: {sl}\n\n"
+                            f"YES — Overwrite '{pn}' with source settings "
+                            f"and rename it to '{sn}'.\n\n"
+                            f"NO — Restore '{sn}' as a brand-new separate "
+                            f"site ('{pn}' is left unchanged).")
                         evt.set()
-                    self.after(0, _ask_map)
+                    _p(f"⏸ default-site conflict with '{ph_name}' — waiting for user…")
+                    self.after(0, _ask_default_conflict)
                     evt.wait()
                     if answer[0]:
-                        _p(f"mapping to '{ed_name}' → id={candidate['id']}")
+                        # Scenario A: overwrite placeholder
+                        _p(f"Scenario A — overwriting '{ph_name}' → "
+                           f"id={placeholder['id']}")
                         self._operation_log.append(
-                            f"  ↻ Mapped '{sname}' → existing "
-                            f"'{ed_name}' (id={candidate['id']})")
-                        return candidate["id"]
+                            f"  ↻ Scenario A: overwriting '{ph_name}' "
+                            f"with source default site '{sname}'")
+                        return placeholder["id"]
                     else:
+                        # Scenario B: create brand-new site; suppress default promotion
+                        _p(f"Scenario B — creating '{sname}' as new site…")
                         self._operation_log.append(
-                            f"  ⊘ Skipped site '{sname}' (user declined)")
-                        return None
+                            f"  ➕ Scenario B: creating '{sname}' as new "
+                            f"non-default site ('{ph_name}' left unchanged)")
+                        # fall through to creation below — do NOT return None
+
+                else:
+                    # Generic: offer to map to the existing default / only site
+                    existing_default = [s for s in active_sites if s.get("isDefault")]
+                    candidate = (existing_default[0] if existing_default
+                                 else active_sites[0] if len(active_sites) == 1
+                                 else None)
+                    if candidate:
+                        ed_name = candidate.get("name", "?")
+                        _p(f"no match — asking what to do with '{sname}'…")
+                        answer = [None]
+                        evt = _thr.Event()
+                        site_list = ", ".join(
+                            s.get("name", "?") for s in all_sites[:6])
+                        def _ask_map(en=ed_name, sn=sname,
+                                     an=acct_match[0].get("name", acct_name),
+                                     sl=site_list):
+                            answer[0] = messagebox.askyesnocancel(
+                                "Site Not Found",
+                                f"Site '{sn}' was not found in account '{an}'.\n\n"
+                                f"Existing sites: {sl}\n\n"
+                                f"YES    — Map to '{en}' (rename it to '{sn}' and "
+                                f"restore settings onto it).\n\n"
+                                f"NO     — Create '{sn}' as a brand-new site in "
+                                f"this account.\n\n"
+                                f"Cancel — Skip '{sn}' entirely.")
+                            evt.set()
+                        self.after(0, _ask_map)
+                        evt.wait()
+                        if answer[0] is True:
+                            # YES: map onto the existing site
+                            _p(f"mapping to '{ed_name}' → id={candidate['id']}")
+                            self._operation_log.append(
+                                f"  ↻ Mapped '{sname}' → existing "
+                                f"'{ed_name}' (id={candidate['id']})")
+                            return candidate["id"]
+                        elif answer[0] is False:
+                            # NO: create a new site — fall through to creation below
+                            _p(f"creating '{sname}' as new site…")
+                            self._operation_log.append(
+                                f"  ➕ Creating '{sname}' as a new site "
+                                f"('{ed_name}' left unchanged)")
+                            # fall through — do NOT return
+                        else:
+                            # Cancel: skip
+                            self._operation_log.append(
+                                f"  ⊘ Skipped site '{sname}' (user cancelled)")
+                            return None
 
             _p(f"creating site '{sname}'…")
             create_data = {"name": sname}
             site_obj = node.get("site", {})
+            is_scenario_b = src_site_is_default  # new site created instead of overwriting default
             if site_obj.get("siteType"):
                 create_data["siteType"] = site_obj["siteType"]
             if site_obj.get("suite"):
@@ -2701,6 +4001,9 @@ class RestorePage(ctk.CTkFrame):
                     if new_id:
                         self._operation_log.append(
                             f"  ✓ AUTO-CREATED site '{sname}' → id={new_id}")
+                        if is_scenario_b:
+                            # Mark this site so the main loop does NOT promote it to default
+                            self._skip_make_default_ids.add(str(new_id))
                         return new_id
                     break
                 except Exception as e:
@@ -2739,21 +4042,225 @@ class RestorePage(ctk.CTkFrame):
                     f"  Group '{gname}': parent site '{site_name}' not found")
                 return None
             site_id = site_match[0]["id"]
+
+            # ── Inspect the source group from the backup ──
+            src_grp = node.get("group", {}) or {}
+            src_type = src_grp.get("type")
+            src_filter_id = src_grp.get("filterId") \
+                or (src_grp.get("filter") or {}).get("id")
+            # Resolve the filter's NAME from (a) the group payload itself,
+            # then (b) the per-restore source filter-id→name map built from
+            # other nodes' saved-filter backups. This covers both new
+            # backups (filterName populated) and older ones (only filterId).
+            src_filter_name = (src_grp.get("filterName")
+                               or (src_grp.get("filter") or {}).get("name"))
+            if not src_filter_name and src_filter_id:
+                src_filter_name = (getattr(self, "_src_filter_id_to_name", {})
+                                   .get(str(src_filter_id)))
+
+            is_dynamic_source = (src_type == "dynamic"
+                                 or bool(src_filter_id)
+                                 or bool(src_filter_name))
+
+            # ── Look up matching destination saved filter by NAME ──
+            # Cache per site so repeated group lookups don't re-hit /filters.
+            dest_filter_id = None
+            if is_dynamic_source and src_filter_name:
+                cache = getattr(self, "_dest_filter_cache", {})
+                site_cache = cache.get(site_id)
+                if site_cache is None:
+                    try:
+                        site_cache = {
+                            f.get("name"): f.get("id")
+                            for f in api.get_saved_filters(
+                                {"siteIds": site_id})
+                            if f.get("name") and f.get("id")
+                        }
+                    except Exception as e:
+                        site_cache = {}
+                        self._operation_log.append(
+                            f"  ⚠ Group '{gname}': could not list dest "
+                            f"filters ({e})")
+                    cache[site_id] = site_cache
+                dest_filter_id = site_cache.get(src_filter_name)
+
+            # ── Build the desired payload (no stale source IDs) ──
+            allowed = {"name", "rank", "description"}
+            desired = {k: v for k, v in src_grp.items()
+                       if k in allowed and v is not None}
+            desired["name"] = gname
+            # IMPORTANT: always create with inherits=True. S1 rejects
+            # `inherits=False` on group create unless a full `policy` body
+            # is supplied in the same call (error code 4000010:
+            # "Policy should be delivered if it is not inherited"). The
+            # per-node policy-restore step that runs right after this
+            # decouples + pushes the real policy when the source had a
+            # custom policy, so the final state still matches the source.
+            desired["inherits"] = True
+            if is_dynamic_source and dest_filter_id:
+                desired["type"] = "dynamic"
+                desired["filterId"] = dest_filter_id
+            elif src_type == "pinned":
+                # Preserve the Pinned group type from the source. S1 POST
+                # /groups accepts `type=pinned` directly; the group is
+                # created without any pinned agents (agents don't migrate),
+                # but the group itself carries the Pinned label so the
+                # destination matches the source's classification.
+                desired["type"] = "pinned"
+
             _p(f"looking up group '{gname}'…")
             all_groups = api.get_groups(params={"siteIds": site_id})
             grp_match = [g for g in all_groups if g.get("name") == gname]
+
+            # ── Existing group: overwrite when source differs ──
             if grp_match:
-                _p(f"found group → id={grp_match[0]['id']}")
-                return grp_match[0]["id"]
+                existing = grp_match[0]
+                existing_id = existing["id"]
+                existing_type = existing.get("type")
+                existing_filter_id = existing.get("filterId") \
+                    or (existing.get("filter") or {}).get("id")
+
+                # Diagnostic — without this it's impossible to tell why a
+                # particular static group isn't being flipped to dynamic.
+                self._operation_log.append(
+                    f"  · Group '{gname}' (id={existing_id}) compare: "
+                    f"src[type={src_type!r}, filterId={src_filter_id!r}, "
+                    f"filterName={src_filter_name!r}, "
+                    f"dynamic={is_dynamic_source}] "
+                    f"vs dest[type={existing_type!r}, "
+                    f"filterId={existing_filter_id!r}] "
+                    f"resolved dest_filter_id={dest_filter_id!r}")
+
+                drift = {}
+                # IMPORTANT: PUT /groups/{id} on this S1 version does NOT
+                # accept a `type` field — sending it returns:
+                #   "data: type: Unknown field (code 4000010)"
+                # S1 infers `type=dynamic` from the *presence* of filterId,
+                # and `type=static` from its absence. So we only send the
+                # filterId on the conversion.
+                if is_dynamic_source and dest_filter_id:
+                    if existing_type != "dynamic" \
+                            or existing_filter_id != dest_filter_id:
+                        drift["filterId"] = dest_filter_id
+                elif src_type == "pinned" and existing_type != "pinned":
+                    # Source is a Pinned group but destination is static
+                    # (or dynamic). Try the dedicated convert endpoint
+                    # chain in S1API.move_group_to_pinned. Verify by
+                    # re-reading the group after the call — some S1
+                    # versions return 200 but silently no-op the change.
+                    try:
+                        api.move_group_to_pinned(existing_id)
+                        # Verify
+                        verify = api.get_groups(
+                            params={"siteIds": site_id})
+                        after = next((g for g in verify
+                                      if g.get("id") == existing_id), {})
+                        after_type = after.get("type")
+                        if after_type == "pinned":
+                            self._operation_log.append(
+                                f"  📌 Converted group '{gname}' "
+                                f"(id={existing_id}) → pinned "
+                                f"(matched source type)")
+                        else:
+                            self._operation_log.append(
+                                f"  ⚠ move-to-pinned returned 200 for "
+                                f"'{gname}' but the group is still "
+                                f"type={after_type!r}. S1 may not "
+                                f"support converting an empty group to "
+                                f"pinned on this tenant — Pinned groups "
+                                f"require at least one pinned agent.")
+                    except Exception as e:
+                        sc = getattr(e, "status_code", 0)
+                        detail = getattr(e, "detail", str(e))
+                        self._operation_log.append(
+                            f"  ⚠ Could not convert group '{gname}' to "
+                            f"pinned (HTTP {sc}): {detail}. "
+                            f"The destination group keeps "
+                            f"type={existing_type!r}.")
+                elif is_dynamic_source and not dest_filter_id:
+                    # Source is dynamic but the matching filter doesn't
+                    # exist on the destination yet. DO NOT downgrade the
+                    # destination group to static — that would discard work
+                    # the operator may have already done. Tell them what
+                    # to do and skip the update.
+                    self._operation_log.append(
+                        f"  ⚠ Group '{gname}' is dynamic on source but "
+                        f"saved filter '{src_filter_name or src_filter_id}' "
+                        f"is missing on destination site — leaving the "
+                        f"existing group untouched. Restore "
+                        f"`saved_filters` first, then re-run.")
+                # Description / rank can be safely synced regardless of
+                # dynamic/static — but skip empty-string vs None drift,
+                # which is cosmetic noise from S1 returning None for
+                # unset fields while the source carries "".
+                for k in ("description", "rank"):
+                    if k not in desired:
+                        continue
+                    src_val = desired[k]
+                    dest_val = existing.get(k)
+                    if src_val == dest_val:
+                        continue
+                    if (src_val in ("", None)) and (dest_val in ("", None)):
+                        continue
+                    drift[k] = src_val
+
+                if drift:
+                    # Send a coherent payload (name + the drifted fields).
+                    # Some S1 versions reject partial PUTs to /groups/{id}
+                    # when changing `type` without `name` also present.
+                    payload = {"name": gname, **drift}
+                    _p(f"overwriting group '{gname}' → {list(drift.keys())}")
+                    try:
+                        api.update_group(existing_id, payload)
+                        # Verify the change actually took — S1 occasionally
+                        # returns 200 but silently no-ops type conversion
+                        # when the group has agents already assigned.
+                        try:
+                            verify = api.get_groups(
+                                params={"siteIds": site_id})
+                            after = next((g for g in verify
+                                          if g.get("id") == existing_id), {})
+                            self._operation_log.append(
+                                f"  ↻ Overwrote existing group '{gname}' "
+                                f"(id={existing_id}) → "
+                                f"{', '.join(f'{k}={v}' for k, v in drift.items())} "
+                                f"| post-state: type={after.get('type')!r}, "
+                                f"filterId={(after.get('filterId') or (after.get('filter') or {}).get('id'))!r}")
+                        except Exception:
+                            self._operation_log.append(
+                                f"  ↻ Overwrote existing group '{gname}' "
+                                f"(id={existing_id}): "
+                                f"{', '.join(f'{k}={v}' for k, v in drift.items())}")
+                    except Exception as e:
+                        detail = getattr(e, "detail", str(e))
+                        self._operation_log.append(
+                            f"  ✗ Failed to overwrite group '{gname}': "
+                            f"{detail}")
+                        cli_log(f"Group '{gname}' update error: {detail}",
+                                "error")
+                else:
+                    _p(f"found group → id={existing_id} "
+                       f"(already matches source)")
+                return existing_id
+
+            # ── No existing group: create ──
+            if is_dynamic_source and not dest_filter_id:
+                self._operation_log.append(
+                    f"  ⚠ Group '{gname}': source is dynamic but saved "
+                    f"filter '{src_filter_name or src_filter_id}' is missing "
+                    f"on destination — creating as STATIC. Restore "
+                    f"`saved_filters` first, then re-run to upgrade it.")
             _p(f"creating group '{gname}'…")
             try:
-                create_data = {"name": gname, "inherits": True}
-                resp = api.create_group(site_id, create_data)
+                resp = api.create_group(site_id, desired)
                 d = resp.get("data", {})
                 new_id = d.get("id")
                 if new_id:
+                    kind = ("dynamic"
+                            if (is_dynamic_source and dest_filter_id)
+                            else "static")
                     self._operation_log.append(
-                        f"  ✓ AUTO-CREATED group '{gname}' → id={new_id}")
+                        f"  ✓ AUTO-CREATED {kind} group '{gname}' → id={new_id}")
                     return new_id
                 self._operation_log.append(
                     f"  Group '{gname}' create returned no ID: {resp}")
@@ -2854,6 +4361,214 @@ class RestorePage(ctk.CTkFrame):
             cli_log("No restore data to export.", "warning")
             return
         self._generate_restore_report()
+
+    def _show_errors_dialog(self):
+        """Open a window that groups every restore failure by error type,
+        shows a plain-English explanation, and lets the user copy the
+        bundle to clipboard to send to support."""
+        import tkinter as tk
+
+        # ── 1. Collect & group failures ──
+        groups: dict = {}  # what -> {"items": [...], "first_expl": dict}
+        for node in getattr(self, "_report_nodes", []):
+            for fi in node.get("failed_items", []):
+                detail = fi.get("error", "") or ""
+                label = fi.get("element", "?")
+                # Try to recover an HTTP code from the message tail
+                sc = 0
+                m = _re.search(r"→\s*(\d{3})", detail)
+                if m:
+                    sc = int(m.group(1))
+                expl = explain_error(label, detail, sc)
+                key = expl["what"]
+                grp = groups.setdefault(key, {
+                    "items": [], "expl": expl,
+                })
+                grp["items"].append({
+                    "path": node.get("path", "?"),
+                    "name": fi.get("name", "?"),
+                    "raw":  detail,
+                })
+
+        if not groups:
+            messagebox.showinfo(
+                "No failures",
+                "The last restore completed without any element failures. 🎉")
+            return
+
+        # ── 2. Build the support-bundle text (always available to copy) ──
+        meta = getattr(self, "_report_meta", {})
+        bundle_lines = [
+            "S1 Command Center — Restore error bundle",
+            f"Source console:      {meta.get('source_url', '?')}",
+            f"Destination console: {meta.get('dest_url', '?')}",
+            f"Started:             {meta.get('start_time', '?')}",
+            f"Finished:            {meta.get('end_time', '?')}",
+            f"Tool version:        v1.3.0",
+            "",
+            f"{sum(len(g['items']) for g in groups.values())} item(s) "
+            f"failed across {len(groups)} error type(s):",
+            "",
+        ]
+        for what, grp in groups.items():
+            expl = grp["expl"]
+            bundle_lines.append(f"── {what} ({len(grp['items'])} item"
+                                f"{'s' if len(grp['items']) != 1 else ''}) "
+                                f"[{expl['severity']}]")
+            bundle_lines.append(f"   Why: {expl['why']}")
+            bundle_lines.append(f"   Fix: {expl['fix']}")
+            for it in grp["items"][:10]:
+                bundle_lines.append(
+                    f"   - {it['path']} / {it['name']}  →  {it['raw']}")
+            if len(grp["items"]) > 10:
+                bundle_lines.append(
+                    f"   …and {len(grp['items']) - 10} more")
+            bundle_lines.append("")
+        bundle_text = "\n".join(bundle_lines)
+
+        # ── 3. Build the modal window ──
+        win = ctk.CTkToplevel(self)
+        win.title("Restore Errors — Explained")
+        win.geometry("980x680")
+        win.transient(self.winfo_toplevel())
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+
+        # header strip
+        hdr = ctk.CTkFrame(win, fg_color="#1a1a2e", corner_radius=0)
+        hdr.pack(fill="x")
+        ctk.CTkLabel(hdr, text="🛟  Restore Errors — Explained",
+                     font=("Segoe UI", 18, "bold"),
+                     text_color="#fdcb6e").pack(side="left", padx=20, pady=14)
+        total_items = sum(len(g["items"]) for g in groups.values())
+        ctk.CTkLabel(hdr,
+                     text=f"{len(groups)} error type(s) · "
+                          f"{total_items} item(s) affected",
+                     font=("Segoe UI", 12), text_color="#888"
+                     ).pack(side="left", padx=8)
+
+        def _copy(text: str, btn=None):
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                self.update()
+                if btn is not None:
+                    btn.configure(text="Copied ✓")
+                    btn.after(1500,
+                              lambda: btn.configure(text="📋 Copy"))
+            except Exception as e:
+                cli_log(f"Clipboard error: {e}", "error")
+
+        # top action row — copy full bundle
+        topbar = ctk.CTkFrame(win, fg_color="transparent")
+        topbar.pack(fill="x", padx=16, pady=(10, 0))
+        ctk.CTkLabel(topbar,
+                     text="Can't fix something yourself? Click below to "
+                          "copy a full bundle and send it to SentinelOne "
+                          "Support (or the developer).",
+                     font=("Segoe UI", 12), text_color="#aaa",
+                     wraplength=700, justify="left").pack(side="left")
+        copy_all_btn = ctk.CTkButton(
+            topbar, text="📋 Copy ALL errors", height=34,
+            fg_color="#e67e22", hover_color="#d35400",
+            font=("Segoe UI", 12, "bold"))
+        copy_all_btn.configure(
+            command=lambda: _copy(bundle_text, copy_all_btn))
+        copy_all_btn.pack(side="right", padx=(8, 0))
+
+        # scrollable list of error groups
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+
+        sev_colors = {
+            "info":    ("#3498db", "ℹ️"),
+            "warning": ("#e67e22", "⚠️"),
+            "error":   ("#e94560", "✗"),
+        }
+
+        for what, grp in groups.items():
+            expl = grp["expl"]
+            sev_color, sev_icon = sev_colors.get(expl["severity"],
+                                                  ("#888", "•"))
+            card = ctk.CTkFrame(body, fg_color="#1a1a2e", corner_radius=10)
+            card.pack(fill="x", pady=6, padx=2)
+
+            # title row
+            trow = ctk.CTkFrame(card, fg_color="transparent")
+            trow.pack(fill="x", padx=14, pady=(12, 4))
+            ctk.CTkLabel(trow,
+                         text=f"{sev_icon}  {what}",
+                         font=("Segoe UI", 14, "bold"),
+                         text_color=sev_color).pack(side="left")
+            ctk.CTkLabel(trow,
+                         text=f"{len(grp['items'])} item"
+                              f"{'s' if len(grp['items']) != 1 else ''}",
+                         font=("Segoe UI", 11),
+                         text_color="#888").pack(side="left", padx=(10, 0))
+
+            grp_text = (
+                f"[{what}]\n"
+                f"Why: {expl['why']}\n"
+                f"Fix: {expl['fix']}\n\n"
+                + "\n".join(
+                    f"- {it['path']} / {it['name']}  →  {it['raw']}"
+                    for it in grp["items"]))
+            copy_grp_btn = ctk.CTkButton(
+                trow, text="📋 Copy", width=80, height=26,
+                fg_color="#555", hover_color="#777",
+                font=("Segoe UI", 11))
+            copy_grp_btn.configure(
+                command=lambda t=grp_text, b=copy_grp_btn: _copy(t, b))
+            copy_grp_btn.pack(side="right")
+
+            # explanation body
+            for label, text in (
+                    ("Why this happens",  expl["why"]),
+                    ("What to do",        expl["fix"])):
+                ctk.CTkLabel(card, text=label,
+                             font=("Segoe UI", 11, "bold"),
+                             text_color="#888"
+                             ).pack(anchor="w", padx=14, pady=(8, 0))
+                ctk.CTkLabel(card, text=text,
+                             font=("Segoe UI", 12),
+                             text_color="#ddd",
+                             wraplength=880, justify="left"
+                             ).pack(anchor="w", padx=14, pady=(0, 2))
+
+            # collapsible item list
+            sample_count = min(5, len(grp["items"]))
+            ctk.CTkLabel(card,
+                         text=f"Affected items (showing {sample_count}"
+                              f" of {len(grp['items'])}):",
+                         font=("Segoe UI", 11, "bold"),
+                         text_color="#888"
+                         ).pack(anchor="w", padx=14, pady=(10, 0))
+            for it in grp["items"][:sample_count]:
+                ctk.CTkLabel(card,
+                             text=f"• {it['path']}  →  {it['name']}",
+                             font=("Consolas", 11),
+                             text_color="#999",
+                             wraplength=880, justify="left"
+                             ).pack(anchor="w", padx=22, pady=0)
+            if len(grp["items"]) > sample_count:
+                ctk.CTkLabel(card,
+                             text=f"… +{len(grp['items']) - sample_count}"
+                                  f" more (use 'Copy' for the full list)",
+                             font=("Segoe UI", 11, "italic"),
+                             text_color="#666"
+                             ).pack(anchor="w", padx=22, pady=(0, 8))
+            else:
+                ctk.CTkFrame(card, height=8,
+                             fg_color="transparent").pack()
+
+        # bottom close button
+        btmbar = ctk.CTkFrame(win, fg_color="transparent")
+        btmbar.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkButton(btmbar, text="Close", height=34, width=100,
+                      fg_color="#555", hover_color="#777",
+                      command=win.destroy).pack(side="right")
 
     def _generate_restore_report(self):
         """Generate a comprehensive HTML restore report."""
@@ -3005,6 +4720,42 @@ class RestorePage(ctk.CTkFrame):
                 })
         failed_html = ""
         if all_failed:
+            # Group failures by explanation 'what' so the operator sees a
+            # short, deduplicated triage list instead of one row per item.
+            grouped: dict = {}
+            for fi in all_failed:
+                detail = fi["error"] or ""
+                sc = 0
+                m = _re.search(r"→\s*(\d{3})", detail)
+                if m:
+                    sc = int(m.group(1))
+                expl = explain_error(fi["element"], detail, sc)
+                grouped.setdefault(expl["what"], {
+                    "expl": expl, "items": [],
+                })["items"].append(fi)
+
+            sev_color = {
+                "info": "#3498db", "warning": "#e67e22", "error": "#e94560",
+            }
+            triage_rows = ""
+            for what, grp in grouped.items():
+                e = grp["expl"]
+                color = sev_color.get(e["severity"], "#888")
+                why_html = e["why"].replace("\n", "<br>")
+                fix_html = e["fix"].replace("\n", "<br>")
+                triage_rows += (
+                    f'<tr>'
+                    f'<td style="vertical-align:top; color:{color}; '
+                    f'font-weight:bold; white-space:nowrap;">{what}</td>'
+                    f'<td style="vertical-align:top; color:#888; '
+                    f'text-align:center;">{len(grp["items"])}</td>'
+                    f'<td style="vertical-align:top; color:#ddd; '
+                    f'font-size:13px;">{why_html}</td>'
+                    f'<td style="vertical-align:top; color:#ddd; '
+                    f'font-size:13px;">{fix_html}</td>'
+                    f'</tr>'
+                )
+
             fi_rows = ""
             for fi in all_failed:
                 fi_rows += (
@@ -3017,11 +4768,23 @@ class RestorePage(ctk.CTkFrame):
                     f'font-size:11px; white-space:normal;">{fi["error"]}</td>'
                     f'</tr>')
             failed_html = f"""<h2 style="color:#fdcb6e; margin:28px 0 12px;
+              font-size:18px;">🛟 Error Triage — What each error means &amp;
+              how to fix it</h2>
+            <p style="color:#888; font-size:13px; margin-bottom:12px;">
+              Failures are grouped by error type. Open the GUI's
+              <b>🛟 Explain Errors</b> button for an interactive copy-to-clipboard
+              version of this table.</p>
+            <table><thead><tr>
+              <th style="width:200px;">Error type</th><th>#</th>
+              <th>Why it happens</th><th>What to do</th>
+            </tr></thead><tbody>{triage_rows}</tbody></table>
+
+            <h2 style="color:#fdcb6e; margin:28px 0 12px;
               font-size:18px;">⚠ Items Not Restored — Manual Action Required
               ({len(all_failed)} items)</h2>
             <p style="color:#888; font-size:13px; margin-bottom:12px;">
-              These individual items could not be migrated automatically.
-              Review each item and restore manually if needed.</p>
+              Raw per-item failures. Cross-reference each row with the
+              triage table above for the recommended action.</p>
             <table><thead><tr>
               <th>Node Path</th><th>Element</th>
               <th>Item Name / Value</th><th>Error</th>

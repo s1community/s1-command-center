@@ -13,3 +13,8 @@ s1-restore-report-*.html
 build/
 dist/
 *.spec
+
+# Internal-only modules (never publish)
+jira_page.py
+atlas_token.txt
+pso_tickets_cache.json

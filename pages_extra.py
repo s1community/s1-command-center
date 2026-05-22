@@ -1710,3 +1710,635 @@ class RawAPIPage(ctk.CTkFrame):
 
     def on_show(self):
         pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Purple AI Page
+# ═══════════════════════════════════════════════════════════════════════
+
+class PurpleAIPage(ctk.CTkFrame):
+    def __init__(self, master, app, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.app = app
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(self, text="Purple AI",
+                     font=("Segoe UI", 22, "bold")).grid(
+            row=0, column=0, sticky="w", padx=20, pady=(20, 2))
+        ctk.CTkLabel(self,
+                     text="Natural language queries against SDL telemetry via Purple AI.",
+                     font=("Segoe UI", 13), text_color="gray").grid(
+            row=1, column=0, sticky="w", padx=20, pady=(0, 12))
+
+        # input card
+        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
+        card.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(card, text="Question:", font=("Segoe UI", 13)).grid(
+            row=0, column=0, padx=12, pady=8, sticky="nw")
+        self.query_text = ctk.CTkTextbox(card, height=60, font=("Segoe UI", 13))
+        self.query_text.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
+
+        opt_frame = ctk.CTkFrame(card, fg_color="transparent")
+        opt_frame.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 8), sticky="ew")
+
+        ctk.CTkLabel(opt_frame, text="View:", font=("Segoe UI", 12)).pack(
+            side="left", padx=(0, 4))
+        self.view_var = ctk.StringVar(value="EDR")
+        ctk.CTkOptionMenu(opt_frame,
+                          values=["EDR", "IDENTITY", "CLOUD", "NGFW", "DATA_LAKE"],
+                          variable=self.view_var, width=130, height=30).pack(
+            side="left", padx=(0, 12))
+
+        ctk.CTkLabel(opt_frame, text="Hours:", font=("Segoe UI", 12)).pack(
+            side="left", padx=(0, 4))
+        self.hours_var = ctk.StringVar(value="24")
+        ctk.CTkEntry(opt_frame, textvariable=self.hours_var,
+                     width=50, height=30).pack(side="left", padx=(0, 12))
+
+        # buttons
+        btn = ctk.CTkFrame(self, fg_color="transparent")
+        btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
+        self._ask_btn = ctk.CTkButton(
+            btn, text="🟣 Ask Purple AI", height=36,
+            fg_color="#7b2d8e", hover_color="#5e2270",
+            font=("Segoe UI", 14, "bold"), command=self._ask)
+        self._ask_btn.pack(side="left", padx=(0, 4))
+        _help_btn(btn,
+                  "Ask a natural language question. Purple AI translates it to "
+                  "a Power Query and returns a summary.\n\n"
+                  "Domain: SDL telemetry (process, network, file events, indicators, "
+                  "ingested logs). NOT for console entities like alerts, agents, sites."
+                  ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn, text="Clear", height=36, fg_color="#555",
+                      command=self._clear).pack(side="left", padx=(0, 4))
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
+                                     text_color="gray")
+        self.info_lbl.pack(side="left", padx=8)
+
+        # results area
+        result_frame = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
+        result_frame.grid(row=4, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        result_frame.grid_columnconfigure(0, weight=1)
+        result_frame.grid_rowconfigure(1, weight=1)
+
+        # summary label
+        self._summary_lbl = ctk.CTkLabel(result_frame, text="",
+                                          font=("Segoe UI", 13),
+                                          wraplength=800, justify="left",
+                                          anchor="nw")
+        self._summary_lbl.grid(row=0, column=0, padx=12, pady=(12, 4),
+                               sticky="new")
+
+        # response textbox (for message + power query)
+        self._result_box = ctk.CTkTextbox(result_frame,
+                                           font=("Consolas", 12),
+                                           fg_color="#0d0d1a",
+                                           text_color="#cccccc")
+        self._result_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self._result_box.configure(state="disabled")
+
+        # suggestions row
+        self._suggestions_frame = ctk.CTkFrame(result_frame,
+                                                fg_color="transparent")
+        self._suggestions_frame.grid(row=2, column=0, padx=8, pady=(0, 8),
+                                     sticky="ew")
+
+    def _ask(self):
+        api = _pick_api(self.app)
+        if not api:
+            return
+        question = self.query_text.get("1.0", "end").strip()
+        if not question:
+            from tkinter import messagebox
+            messagebox.showwarning("Missing", "Type a question.")
+            return
+        try:
+            hours = int(self.hours_var.get())
+        except ValueError:
+            hours = 24
+
+        view = self.view_var.get()
+        self._ask_btn.configure(state="disabled", text="Thinking…")
+        self.info_lbl.configure(text="Querying Purple AI…", text_color=WARN)
+        cli_log(f"Purple AI: {question} (view={view}, hours={hours})", "cmd")
+
+        def do():
+            return api.purple_query(question, view_selector=view, hours=hours)
+
+        def done(r):
+            self._ask_btn.configure(state="normal", text="🟣 Ask Purple AI")
+            state = r.get("state", "")
+            self.info_lbl.configure(
+                text=f"State: {state} | Type: {r.get('result_type', '')}",
+                text_color=GREEN)
+            # summary
+            summary = r.get("summary") or ""
+            self._summary_lbl.configure(text=summary if summary else "")
+            # full message + power query
+            self._result_box.configure(state="normal")
+            self._result_box.delete("1.0", "end")
+            msg = r.get("message") or ""
+            if msg:
+                self._result_box.insert("end", msg + "\n")
+            pq = r.get("power_query")
+            if pq:
+                self._result_box.insert("end", f"\n{'─'*50}\n")
+                self._result_box.insert("end", f"POWER QUERY:\n{pq}\n")
+            vs = r.get("view_selector")
+            if vs:
+                self._result_box.insert("end", f"\nView: {vs}")
+            tr = r.get("time_range")
+            if tr and tr.get("start"):
+                self._result_box.insert("end",
+                    f"\nTime range: {tr['start']} → {tr['end']}")
+            self._result_box.configure(state="disabled")
+            # suggested questions
+            for w in self._suggestions_frame.winfo_children():
+                w.destroy()
+            suggestions = r.get("suggested_questions") or []
+            if suggestions:
+                ctk.CTkLabel(self._suggestions_frame, text="Suggested:",
+                             font=("Segoe UI", 11, "bold"),
+                             text_color="#888").pack(side="left", padx=(0, 6))
+                for sq in suggestions[:3]:
+                    ctk.CTkButton(
+                        self._suggestions_frame, text=sq[:60],
+                        height=26, font=("Segoe UI", 10),
+                        fg_color="#333", hover_color="#555",
+                        command=lambda q=sq: self._use_suggestion(q)
+                    ).pack(side="left", padx=2)
+            cli_log(f"Purple AI response: {state}", "success")
+            if pq:
+                cli_log(f"  Power Query: {pq[:100]}…" if len(pq) > 100 else f"  Power Query: {pq}", "info")
+
+        def fail(e):
+            self._ask_btn.configure(state="normal", text="🟣 Ask Purple AI")
+            self.info_lbl.configure(text=f"Error: {str(e)[:50]}",
+                                    text_color=ACCENT)
+
+        run_async(self, do, done, fail)
+
+    def _use_suggestion(self, question):
+        self.query_text.delete("1.0", "end")
+        self.query_text.insert("1.0", question)
+        self._ask()
+
+    def _clear(self):
+        self.query_text.delete("1.0", "end")
+        self._summary_lbl.configure(text="")
+        self._result_box.configure(state="normal")
+        self._result_box.delete("1.0", "end")
+        self._result_box.configure(state="disabled")
+        for w in self._suggestions_frame.winfo_children():
+            w.destroy()
+        self.info_lbl.configure(text="")
+
+    def on_show(self):
+        self.app.set_active_console("source")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Unified Alerts Page
+# ═══════════════════════════════════════════════════════════════════════
+
+class UnifiedAlertsPage(ctk.CTkFrame):
+    def __init__(self, master, app, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.app = app
+        self._alerts = []
+        self._selected_ids = []
+        self._cursor = None
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(5, weight=1)
+
+        ctk.CTkLabel(self, text="Unified Alerts",
+                     font=("Segoe UI", 22, "bold")).grid(
+            row=0, column=0, sticky="w", padx=20, pady=(20, 2))
+        ctk.CTkLabel(self,
+                     text="Modern multi-source alert triage via Unified Alert Management (GraphQL).",
+                     font=("Segoe UI", 13), text_color="gray").grid(
+            row=1, column=0, sticky="w", padx=20, pady=(0, 12))
+
+        # filters card
+        filt = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
+        filt.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        filt.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(filt, text="Status:", font=("Segoe UI", 12)).grid(
+            row=0, column=0, padx=(12, 4), pady=6, sticky="w")
+        self.status_var = ctk.StringVar(value="ALL")
+        ctk.CTkOptionMenu(filt, values=["ALL", "NEW", "IN_PROGRESS", "RESOLVED"],
+                          variable=self.status_var, width=120, height=30).grid(
+            row=0, column=1, padx=4, pady=6, sticky="w")
+
+        ctk.CTkLabel(filt, text="Severity:", font=("Segoe UI", 12)).grid(
+            row=0, column=2, padx=(12, 4), pady=6, sticky="w")
+        self.severity_var = ctk.StringVar(value="ALL")
+        ctk.CTkOptionMenu(filt, values=["ALL", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
+                          variable=self.severity_var, width=120, height=30).grid(
+            row=0, column=3, padx=4, pady=6, sticky="w")
+
+        ctk.CTkLabel(filt, text="View:", font=("Segoe UI", 12)).grid(
+            row=0, column=4, padx=(12, 4), pady=6, sticky="w")
+        self.view_var = ctk.StringVar(value="ALL")
+        ctk.CTkOptionMenu(filt, values=["ALL", "ENDPOINT", "IDENTITY", "CLOUD",
+                                         "STAR", "THIRD_PARTY"],
+                          variable=self.view_var, width=130, height=30).grid(
+            row=0, column=5, padx=(4, 12), pady=6, sticky="w")
+
+        ctk.CTkLabel(filt, text="Page size:", font=("Segoe UI", 12)).grid(
+            row=1, column=0, padx=(12, 4), pady=6, sticky="w")
+        self.pagesize_var = ctk.StringVar(value="50")
+        ctk.CTkEntry(filt, textvariable=self.pagesize_var,
+                     width=60, height=30).grid(
+            row=1, column=1, padx=4, pady=6, sticky="w")
+
+        # facets row
+        self._facets_frame = ctk.CTkFrame(filt, fg_color="transparent")
+        self._facets_frame.grid(row=1, column=2, columnspan=4, padx=12, pady=6,
+                                sticky="ew")
+
+        # buttons
+        btn = ctk.CTkFrame(self, fg_color="transparent")
+        btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
+        self._load_btn = ctk.CTkButton(
+            btn, text="Load Alerts", height=36,
+            fg_color=GREEN, hover_color="#00a381",
+            font=("Segoe UI", 14, "bold"), command=self._load)
+        self._load_btn.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn, text="Next Page", height=36, fg_color="#2980b9",
+                      command=self._next_page).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn, text="Facets", height=36, fg_color="#555",
+                      command=self._load_facets).pack(side="left", padx=(0, 4))
+        _help_btn(btn,
+                  "Load: fetch alerts with filters. Next Page: paginate. "
+                  "Facets: show severity/status/product distribution.\n\n"
+                  "Detail: enter alert ID below to view notes, history, timeline."
+                  ).pack(side="left", padx=(0, 8))
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
+                                     text_color="gray")
+        self.info_lbl.pack(side="left", padx=8)
+
+        # detail row
+        det = ctk.CTkFrame(self, fg_color="transparent")
+        det.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 4))
+        ctk.CTkLabel(det, text="Alert ID:", font=("Segoe UI", 12)).pack(
+            side="left", padx=(0, 4))
+        self.alert_id_entry = ctk.CTkEntry(det, placeholder_text="for detail/notes/history",
+                                            width=280, height=30)
+        self.alert_id_entry.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(det, text="Detail", height=30, width=70,
+                      command=self._detail).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(det, text="Notes", height=30, width=70,
+                      command=self._notes).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(det, text="History", height=30, width=70,
+                      command=self._history).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(det, text="Timeline", height=30, width=70,
+                      command=self._timeline).pack(side="left", padx=(0, 4))
+
+        # triage buttons
+        ctk.CTkButton(det, text="→ Resolve", height=30, width=80,
+                      fg_color="#27ae60", hover_color="#1e8449",
+                      command=lambda: self._triage("RESOLVED")).pack(
+            side="left", padx=(12, 4))
+        ctk.CTkButton(det, text="→ In Progress", height=30, width=100,
+                      fg_color="#2980b9", hover_color="#1f6da3",
+                      command=lambda: self._triage("IN_PROGRESS")).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(det, text="Export CSV", height=30, width=90,
+                      fg_color="#555",
+                      command=self._export_csv).pack(side="right")
+
+        # results table
+        self.table = ResultTable(self,
+                                 ["name", "severity", "status", "detectedAt",
+                                  "classification", "id"],
+                                 height=300)
+        self.table.grid(row=5, column=0, sticky="nsew", padx=20, pady=(4, 12))
+
+    def _build_filters(self):
+        filters = []
+        st = self.status_var.get()
+        if st != "ALL":
+            filters.append({"fieldId": "status",
+                            "stringEqual": {"value": st}})
+        sv = self.severity_var.get()
+        if sv != "ALL":
+            filters.append({"fieldId": "severity",
+                            "stringEqual": {"value": sv}})
+        return filters
+
+    def _load(self):
+        api = _pick_api(self.app)
+        if not api:
+            return
+        filters = self._build_filters()
+        view = self.view_var.get()
+        view_type = view if view != "ALL" else None
+        try:
+            page_size = int(self.pagesize_var.get())
+        except ValueError:
+            page_size = 50
+        self._cursor = None
+        self._load_btn.configure(state="disabled", text="Loading…")
+        self.info_lbl.configure(text="Fetching…", text_color=WARN)
+        cli_log(f"UAM: loading alerts (status={self.status_var.get()}, "
+                f"severity={self.severity_var.get()}, view={view})", "cmd")
+
+        def do():
+            return api.uam_list_alerts(filters=filters, first=page_size,
+                                       view_type=view_type)
+
+        def done(result):
+            self._load_btn.configure(state="normal", text="Load Alerts")
+            edges = result.get("edges") or []
+            total = result.get("totalCount", 0)
+            pi = result.get("pageInfo") or {}
+            self._cursor = pi.get("endCursor") if pi.get("hasNextPage") else None
+            alerts = [e.get("node", {}) for e in edges]
+            self._alerts = alerts
+            self._selected_ids = [a.get("id", "") for a in alerts]
+            # flatten detectionSource for display
+            rows = []
+            for a in alerts:
+                ds = a.get("detectionSource") or {}
+                rows.append({
+                    "name": a.get("name", ""),
+                    "severity": a.get("severity", ""),
+                    "status": a.get("status", ""),
+                    "detectedAt": (a.get("detectedAt") or "")[:19],
+                    "classification": a.get("classification", ""),
+                    "id": a.get("id", ""),
+                })
+            self.table.load(rows)
+            more = " (more →)" if self._cursor else ""
+            self.info_lbl.configure(
+                text=f"{len(alerts)} alerts / {total} total{more}",
+                text_color=GREEN)
+            cli_log(f"UAM: {len(alerts)} alerts loaded ({total} total)", "success")
+
+        def fail(e):
+            self._load_btn.configure(state="normal", text="Load Alerts")
+            self.info_lbl.configure(text=f"Error: {str(e)[:50]}",
+                                    text_color=ACCENT)
+
+        run_async(self, do, done, fail)
+
+    def _next_page(self):
+        if not self._cursor:
+            cli_log("No more pages.", "warning")
+            return
+        api = _pick_api(self.app)
+        if not api:
+            return
+        filters = self._build_filters()
+        view = self.view_var.get()
+        view_type = view if view != "ALL" else None
+        try:
+            page_size = int(self.pagesize_var.get())
+        except ValueError:
+            page_size = 50
+        cursor = self._cursor
+        cli_log("UAM: loading next page…", "cmd")
+
+        def do():
+            return api.uam_list_alerts(filters=filters, first=page_size,
+                                       after=cursor, view_type=view_type)
+
+        def done(result):
+            edges = result.get("edges") or []
+            pi = result.get("pageInfo") or {}
+            self._cursor = pi.get("endCursor") if pi.get("hasNextPage") else None
+            alerts = [e.get("node", {}) for e in edges]
+            self._alerts.extend(alerts)
+            self._selected_ids.extend([a.get("id", "") for a in alerts])
+            for a in alerts:
+                self.table.add_row({
+                    "name": a.get("name", ""),
+                    "severity": a.get("severity", ""),
+                    "status": a.get("status", ""),
+                    "detectedAt": (a.get("detectedAt") or "")[:19],
+                    "classification": a.get("classification", ""),
+                    "id": a.get("id", ""),
+                })
+            more = " (more →)" if self._cursor else " (end)"
+            self.info_lbl.configure(
+                text=f"{len(self._alerts)} total loaded{more}",
+                text_color=GREEN)
+            cli_log(f"UAM: +{len(alerts)} alerts (total {len(self._alerts)})", "success")
+
+        run_async(self, do, done)
+
+    def _load_facets(self):
+        api = _pick_api(self.app)
+        if not api:
+            return
+        filters = self._build_filters()
+        cli_log("UAM: loading facets…", "cmd")
+
+        def do():
+            return api.uam_facets(["severity", "status", "detectionProduct"],
+                                  filters=filters)
+
+        def done(facets):
+            for w in self._facets_frame.winfo_children():
+                w.destroy()
+            for f in facets:
+                fid = f.get("fieldId", "")
+                vals = f.get("values") or []
+                parts = [f"{v.get('label') or v.get('value','?')}: {v.get('count',0)}"
+                         for v in vals[:5]]
+                text = f"{fid} — {', '.join(parts)}"
+                ctk.CTkLabel(self._facets_frame, text=text,
+                             font=("Segoe UI", 10), text_color="#aaa").pack(
+                    anchor="w")
+                cli_log(f"  {text}", "info")
+            cli_log("Facets loaded", "success")
+
+        run_async(self, do, done)
+
+    def _detail(self):
+        api = _pick_api(self.app)
+        aid = self.alert_id_entry.get().strip()
+        if not api or not aid:
+            return
+        cli_log(f"UAM: fetching alert {aid}…", "cmd")
+
+        def do():
+            return api.uam_get_alert(aid)
+
+        def done(alert):
+            self.table.clear()
+            # show all fields as key-value rows
+            import json
+            for k, v in alert.items():
+                if isinstance(v, (dict, list)):
+                    v = json.dumps(v, default=str)[:80]
+                self.table.add_row({"name": k, "severity": str(v)[:80],
+                                    "status": "", "detectedAt": "",
+                                    "classification": "", "id": ""})
+            cli_log(f"Alert detail: {alert.get('name', '?')} — "
+                    f"{alert.get('severity', '')} / {alert.get('status', '')}",
+                    "success")
+
+        run_async(self, do, done)
+
+    def _notes(self):
+        api = _pick_api(self.app)
+        aid = self.alert_id_entry.get().strip()
+        if not api or not aid:
+            return
+        cli_log(f"UAM: fetching notes for {aid}…", "cmd")
+
+        def do():
+            return api.uam_alert_notes(aid)
+
+        def done(notes):
+            self.table.columns = ["id", "text", "createdAt", "author",
+                                  "type", "alertId"]
+            self.table.clear()
+            rows = []
+            for n in notes:
+                author = (n.get("author") or {}).get("fullName", "")
+                rows.append({"id": n.get("id", ""), "text": n.get("text", ""),
+                             "createdAt": n.get("createdAt", ""),
+                             "author": author, "type": n.get("type", ""),
+                             "alertId": n.get("alertId", "")})
+            self.table.load(rows)
+            self.info_lbl.configure(text=f"{len(notes)} notes")
+            cli_log(f"UAM: {len(notes)} notes for alert {aid}", "success")
+
+        run_async(self, do, done)
+
+    def _history(self):
+        api = _pick_api(self.app)
+        aid = self.alert_id_entry.get().strip()
+        if not api or not aid:
+            return
+        cli_log(f"UAM: fetching history for {aid}…", "cmd")
+
+        def do():
+            return api.uam_alert_history(aid)
+
+        def done(result):
+            edges = result.get("edges") or []
+            events = [e.get("node", {}) for e in edges]
+            self.table.columns = ["createdAt", "eventType", "eventText",
+                                  "name", "severity", "status"]
+            self.table.clear()
+            rows = []
+            for ev in events:
+                rows.append({"createdAt": ev.get("createdAt", ""),
+                             "eventType": ev.get("eventType", ""),
+                             "eventText": ev.get("eventText", ""),
+                             "name": "", "severity": "", "status": ""})
+            self.table.load(rows)
+            total = result.get("totalCount", len(events))
+            self.info_lbl.configure(text=f"{len(events)} history events / {total} total")
+            cli_log(f"UAM: {len(events)} history events for {aid}", "success")
+
+        run_async(self, do, done)
+
+    def _timeline(self):
+        api = _pick_api(self.app)
+        aid = self.alert_id_entry.get().strip()
+        if not api or not aid:
+            return
+        cli_log(f"UAM: fetching timeline for {aid}…", "cmd")
+
+        def do():
+            return api.uam_alert_timeline(aid)
+
+        def done(result):
+            edges = result.get("edges") or []
+            events = [e.get("node", {}) for e in edges]
+            self.table.columns = ["createdAt", "eventType", "eventText",
+                                  "name", "severity", "status"]
+            self.table.clear()
+            rows = []
+            for ev in events:
+                rows.append({"createdAt": ev.get("createdAt", ""),
+                             "eventType": ev.get("eventType", ""),
+                             "eventText": ev.get("eventText", ""),
+                             "name": "", "severity": "", "status": ""})
+            self.table.load(rows)
+            total = result.get("totalCount", len(events))
+            self.info_lbl.configure(text=f"{len(events)} timeline events / {total} total")
+            cli_log(f"UAM: {len(events)} timeline events for {aid}", "success")
+
+        run_async(self, do, done)
+
+    def _triage(self, new_status):
+        api = _pick_api(self.app)
+        aid = self.alert_id_entry.get().strip()
+        if not api:
+            return
+        ids = [aid] if aid else self._selected_ids
+        if not ids:
+            from tkinter import messagebox
+            messagebox.showwarning("No alerts", "Load alerts or enter an alert ID.")
+            return
+        from tkinter import messagebox
+        if not messagebox.askyesno("Confirm",
+                                   f"Set {len(ids)} alert(s) to {new_status}?"):
+            return
+        # need account IDs for scope
+        accounts = api.get_accounts()
+        scope_ids = [a["id"] for a in accounts[:1]] if accounts else []
+        cli_log(f"UAM: setting {len(ids)} alerts to {new_status}…", "cmd")
+
+        def do():
+            return api.uam_set_status(scope_ids, ids, new_status)
+
+        def done(r):
+            typename = r.get("__typename", "")
+            if typename == "ActionsTriggered":
+                acts = r.get("actions") or []
+                success = sum(len(a.get("success", [])) for a in acts)
+                cli_log(f"UAM: {success} alerts updated to {new_status}", "success")
+                self.info_lbl.configure(
+                    text=f"✓ {success} set to {new_status}", text_color=GREEN)
+            elif typename == "TriggerActionsScheduled":
+                cli_log(f"UAM: bulk action scheduled: {r.get('bulkActionTriggerId')}", "info")
+                self.info_lbl.configure(text="Bulk action scheduled", text_color=WARN)
+            else:
+                errors = r.get("errors") or []
+                msg = errors[0].get("errorMessage", "unknown") if errors else str(r)
+                cli_log(f"UAM triage error: {msg}", "error")
+                self.info_lbl.configure(text=f"Error: {msg[:40]}", text_color=ACCENT)
+
+        run_async(self, do, done)
+
+    def _export_csv(self):
+        api = _pick_api(self.app)
+        if not api:
+            return
+        filters = self._build_filters()
+        view = self.view_var.get()
+        cli_log("UAM: exporting alerts as CSV…", "cmd")
+
+        def do():
+            return api.uam_export_csv(filters=filters, view_type=view)
+
+        def done(csv_data):
+            if not csv_data:
+                cli_log("No CSV data returned.", "warning")
+                return
+            path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv")],
+                title="Save alerts CSV")
+            if path:
+                with open(path, "w") as f:
+                    f.write(csv_data)
+                cli_log(f"Alerts exported to {path}", "success")
+                self.info_lbl.configure(text=f"Exported to {path}",
+                                        text_color=GREEN)
+
+        run_async(self, do, done)
+
+    def on_show(self):
+        self.app.set_active_console("source")

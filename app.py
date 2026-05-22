@@ -155,9 +155,21 @@ class ConnectionsPage(ctk.CTkFrame):
         self.src_card = self._card("SOURCE", GREEN, 0)
         self.dst_card = self._card("DESTINATION", ACCENT, 1)
 
-        ctk.CTkLabel(self, text="Saved Connections",
-                     font=("Segoe UI", 15, "bold")).grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(16, 4))
+        # ── Saved Connections ──────────────────────────────────────────
+        saved_hdr = ctk.CTkFrame(self, fg_color="transparent")
+        saved_hdr.grid(row=4, column=0, columnspan=2, sticky="ew",
+                       padx=20, pady=(16, 4))
+        ctk.CTkLabel(saved_hdr, text="Saved Connections",
+                     font=("Segoe UI", 15, "bold")).pack(side="left")
+        ctk.CTkButton(saved_hdr, text="🗑  Delete All", width=110, height=28,
+                      fg_color="#c0392b", hover_color="#e74c3c",
+                      font=("Segoe UI", 12, "bold"),
+                      command=self._delete_all_connections).pack(
+            side="right")
+        _help_btn(saved_hdr,
+                  "Remove every saved connection from disk and disconnect "
+                  "both SOURCE and DESTINATION. Cannot be undone."
+                  ).pack(side="right", padx=(0, 6))
         self.list_frame = ctk.CTkScrollableFrame(
             self, fg_color=CARD, corner_radius=12, height=160)
         self.list_frame.grid(
@@ -198,18 +210,35 @@ class ConnectionsPage(ctk.CTkFrame):
             e.grid(row=i+1, column=1, padx=12, pady=4, sticky="ew")
             entries.append(e)
 
+        # Ignore-SSL-errors checkbox row (above buttons)
+        ssl_var = tk.BooleanVar(value=False)
+        ssl_row = ctk.CTkFrame(card, fg_color="transparent")
+        ssl_row.grid(row=4, column=0, columnspan=2, padx=12, pady=(2, 0),
+                     sticky="w")
+        ctk.CTkCheckBox(ssl_row, text="Ignore SSL errors",
+                        variable=ssl_var, onvalue=True, offvalue=False,
+                        font=("Segoe UI", 12),
+                        checkbox_width=18, checkbox_height=18).pack(side="left")
+        _help_btn(ssl_row,
+                  "Skip TLS certificate verification when calling this "
+                  "console. Useful for consoles behind a corporate "
+                  "MITM proxy or with self-signed certs. Leave OFF unless "
+                  "you know you need it — disabling verification weakens "
+                  "transport security."
+                  ).pack(side="left", padx=(6, 0))
+
         status = ctk.CTkLabel(card, text="Not connected",
                               font=("Segoe UI", 11), text_color="gray")
-        status.grid(row=5, column=0, columnspan=2, padx=12, pady=(0, 8),
+        status.grid(row=6, column=0, columnspan=2, padx=12, pady=(0, 8),
                     sticky="w")
 
         btns = ctk.CTkFrame(card, fg_color="transparent")
-        btns.grid(row=4, column=0, columnspan=2, padx=12, pady=6, sticky="ew")
+        btns.grid(row=5, column=0, columnspan=2, padx=12, pady=6, sticky="ew")
 
         role_lower = role.lower()
         ctk.CTkButton(btns, text="Test", width=60, height=32,
                       command=lambda: self._test(
-                          entries[1], entries[2], status)).pack(
+                          entries[1], entries[2], status, ssl_var)).pack(
             side="left", padx=(0, 2))
         _help_btn(btns,
                   "Verify the URL and API token are valid "
@@ -218,7 +247,7 @@ class ConnectionsPage(ctk.CTkFrame):
         ctk.CTkButton(btns, text="Save & Connect", width=130, height=32,
                       fg_color=color,
                       command=lambda: self._save(
-                          entries, role_lower, status)).pack(
+                          entries, role_lower, status, ssl_var)).pack(
             side="left", padx=(0, 2))
         _help_btn(btns,
                   f"Save credentials to disk and activate this "
@@ -229,19 +258,20 @@ class ConnectionsPage(ctk.CTkFrame):
                       command=lambda: self._delete(
                           entries[0], status)).pack(side="right")
 
-        return {"entries": entries, "status": status}
+        return {"entries": entries, "status": status, "ssl_var": ssl_var}
 
-    def _test(self, url_e, tok_e, status):
+    def _test(self, url_e, tok_e, status, ssl_var=None):
         url, tok = url_e.get().strip(), tok_e.get().strip()
         if not url or not tok:
             messagebox.showwarning("Missing", "Fill URL and token.")
             return
         if not url.startswith("http"):
             url = f"https://{url}.sentinelone.net"
+        verify = not (ssl_var.get() if ssl_var is not None else False)
         status.configure(text="Testing…", text_color=WARN)
 
         def do():
-            return S1API(url, tok).get_my_user()
+            return S1API(url, tok, verify_ssl=verify).get_my_user()
 
         def ok(u):
             status.configure(text=f"OK — {u.get('fullName', '?')}",
@@ -253,18 +283,23 @@ class ConnectionsPage(ctk.CTkFrame):
 
         run_async(self, do, ok, fail)
 
-    def _save(self, entries, role, status):
+    def _save(self, entries, role, status, ssl_var=None):
         n = entries[0].get().strip()
         u = entries[1].get().strip()
         t = entries[2].get().strip()
         if not all([n, u, t]):
             messagebox.showwarning("Missing", "Fill all fields.")
             return
-        self.app.cfg.upsert(n, u, t, role)
-        self.app.cfg.set_role(n, role)
-        # remove old entries that have no active role
-        self.app.cfg.contexts = [
-            c for c in self.app.cfg.contexts if c.role in ("source", "destination")]
+        ignore_ssl = bool(ssl_var.get()) if ssl_var is not None else False
+        ctx = self.app.cfg.upsert(n, u, t, role,
+                                  ignore_ssl_errors=ignore_ssl)
+        # Identify by the normalized URL (upsert may have prefixed the scheme),
+        # so saving doesn't collide with another context that happens to share
+        # the same friendly name.
+        self.app.cfg.set_role(ctx.url, role)
+        # Keep previously-active contexts in the list (their role gets demoted
+        # to "" by set_role) so the user can switch back to them later via the
+        # per-row "Use as SRC/DST" buttons.
         self.app.cfg.save()
         self.app.connect(role)
         status.configure(text="Saved & connected ✓", text_color=GREEN)
@@ -277,6 +312,37 @@ class ConnectionsPage(ctk.CTkFrame):
         self.app.cfg.remove(n)
         status.configure(text="Deleted", text_color="gray")
         self._refresh_list()
+
+    def _delete_all_connections(self):
+        """Wipe all saved connections from disk and disconnect both APIs."""
+        if not self.app.cfg.contexts:
+            cli_log("No saved connections to delete.", "info")
+            return
+        count = len(self.app.cfg.contexts)
+        if not messagebox.askyesno(
+                "Delete All Connections",
+                f"Permanently delete all {count} saved connection"
+                f"{'s' if count != 1 else ''}?\n\n"
+                "Both SOURCE and DESTINATION will be disconnected.\n"
+                "This cannot be undone."):
+            return
+        self.app.cfg.contexts = []
+        self.app.cfg.save()
+        # disconnect APIs + clear sidebar status
+        self.app.source_api = None
+        self.app.dest_api = None
+        self.app.src_lbl.configure(text="not connected", text_color="gray")
+        self.app.dst_lbl.configure(text="not connected", text_color="gray")
+        # clear connection card entries + statuses
+        for card in (self.src_card, self.dst_card):
+            for e in card["entries"]:
+                e.delete(0, "end")
+            if "ssl_var" in card:
+                card["ssl_var"].set(False)
+            card["status"].configure(text="Not connected", text_color="gray")
+        self._refresh_list()
+        cli_log(f"Deleted all {count} saved connection"
+                f"{'s' if count != 1 else ''}.", "success")
 
     def _refresh_list(self):
         for w in self.list_frame.winfo_children():
@@ -313,10 +379,69 @@ class ConnectionsPage(ctk.CTkFrame):
             ctk.CTkLabel(row, text=ctx.display_url,
                          font=("Segoe UI", 12),
                          text_color="gray").pack(side="left", padx=8)
+            # right-side actions: delete + role toggles
+            ctk.CTkButton(row, text="✕", width=26, height=24,
+                          fg_color="#555", hover_color="#c0392b",
+                          font=("Segoe UI", 11, "bold"),
+                          command=lambda u=ctx.url: self._delete_by_url(u)
+                          ).pack(side="right", padx=(4, 8))
+            ctk.CTkButton(row, text="Use as DST", width=86, height=24,
+                          font=("Segoe UI", 10, "bold"),
+                          fg_color=ACCENT if ctx.role != "destination" else "#3b0d1e",
+                          hover_color="#c0392b",
+                          state="disabled" if ctx.role == "destination" else "normal",
+                          command=lambda u=ctx.url: self._activate_as(u, "destination")
+                          ).pack(side="right", padx=2)
+            ctk.CTkButton(row, text="Use as SRC", width=86, height=24,
+                          font=("Segoe UI", 10, "bold"),
+                          fg_color=GREEN if ctx.role != "source" else "#0d3b2e",
+                          hover_color="#00875a",
+                          state="disabled" if ctx.role == "source" else "normal",
+                          command=lambda u=ctx.url: self._activate_as(u, "source")
+                          ).pack(side="right", padx=2)
             token_hint = ctx.api_token[:8] + "…" if len(ctx.api_token) > 8 else "—"
             ctk.CTkLabel(row, text=f"token: {token_hint}",
                          font=("Consolas", 10),
                          text_color="#555").pack(side="right", padx=8)
+
+    def _activate_as(self, url: str, role: str):
+        """Promote a saved context (identified by URL) to the given role."""
+        ctx = self.app.cfg.get_by_url(url)
+        if not ctx:
+            cli_log(f"Connection for {url} not found.", "error")
+            return
+        self.app.cfg.set_role(ctx.url, role)
+        # mirror into the SRC/DST card so the UI matches the active context
+        card = self.src_card if role == "source" else self.dst_card
+        self._fill_entries(card["entries"], ctx.name, ctx.url, ctx.api_token)
+        if "ssl_var" in card:
+            card["ssl_var"].set(bool(getattr(ctx, "ignore_ssl_errors", False)))
+        card["status"].configure(text="Active ✓", text_color=GREEN)
+        self.app.connect(role)
+        cli_log(f"Activated {ctx.name} ({ctx.display_url}) as {role.upper()}",
+                "success")
+        self._refresh_list()
+
+    def _delete_by_url(self, url: str):
+        """Delete a single saved connection by URL (with confirmation)."""
+        ctx = self.app.cfg.get_by_url(url)
+        if not ctx:
+            return
+        label = f"{ctx.name} ({ctx.display_url})"
+        if not messagebox.askyesno(
+                "Delete Connection",
+                f"Delete saved connection '{label}'?"):
+            return
+        self.app.cfg.remove(ctx.url)
+        # if we just deleted the active SRC/DST, disconnect that side too
+        if ctx.role == "source":
+            self.app.source_api = None
+            self.app.src_lbl.configure(text="not connected", text_color="gray")
+        elif ctx.role == "destination":
+            self.app.dest_api = None
+            self.app.dst_lbl.configure(text="not connected", text_color="gray")
+        cli_log(f"Deleted connection '{label}'.", "info")
+        self._refresh_list()
 
     def _paste_from_ticket(self):
         """Parse clipboard text and fill SOURCE + DESTINATION + Backup/Restore fields."""
@@ -423,6 +548,8 @@ class ConnectionsPage(ctk.CTkFrame):
         for card in (self.src_card, self.dst_card):
             for e in card["entries"]:
                 e.delete(0, "end")
+            if "ssl_var" in card:
+                card["ssl_var"].set(False)
             card["status"].configure(text="Not connected", text_color="gray")
 
         # disconnect APIs
@@ -477,13 +604,12 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("S1 Command Center")
-        w, h = 1200, 780
-        sx = self.winfo_screenwidth()
-        sy = self.winfo_screenheight()
-        x = (sx - w) // 2
-        y = (sy - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
+        self._win_w, self._win_h = 1200, 780
         self.minsize(900, 600)
+        self._center_on_screen()
+        # Re-assert centering after the WM has finished placing the window
+        # (some platforms ignore the first geometry call on launch).
+        self.after(50, self._center_on_screen)
         icon_path = os.path.join(os.path.dirname(__file__), "s1cc.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
@@ -503,6 +629,16 @@ class App(ctk.CTk):
         self._startup_banner()
         self.connect("source")
         self.connect("destination")
+
+    def _center_on_screen(self):
+        """Place the window centered on whichever screen Tk reports."""
+        self.update_idletasks()
+        w, h = self._win_w, self._win_h
+        sx = self.winfo_screenwidth()
+        sy = self.winfo_screenheight()
+        x = max(0, (sx - w) // 2)
+        y = max(0, (sy - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build(self):
         # sidebar
@@ -546,7 +682,15 @@ class App(ctk.CTk):
             ActivitiesPage, DeepVisibilityPage, ExclusionsBlocklistPage,
             STARRulesPage, ApplicationsCVEsPage, ThreatIntelPage,
             RangerPage, RemoteScriptsPage, TagsPage, RawAPIPage,
+            PurpleAIPage, UnifiedAlertsPage,
         )
+        # Optional private extension module is loaded only if the user has
+        # an admin marker file AND the module is actually present on disk.
+        # Public builds ship without the module, so this branch is a no-op
+        # for end users.
+        admin_flag = os.path.join(os.path.expanduser("~"),
+                                  ".s1-command-center", "admin.flag")
+        is_admin = os.path.exists(admin_flag)
 
         nav_migration = [
             ("Connections", ConnectionsPage),
@@ -554,10 +698,18 @@ class App(ctk.CTk):
             ("Restore to Dest", RestorePage),
             ("Agent Migration", AgentMigrationPage),
         ]
+        if is_admin:
+            try:
+                from jira_page import JiraPage  # noqa: F401  (optional)
+                nav_migration.insert(0, ("PSO Tickets", JiraPage))
+            except ImportError:
+                pass
         nav_ops = [
             ("Accounts & Sites", AccountsSitesPage),
             ("Agents", AgentsPage),
             ("Threats", ThreatsPage),
+            ("Unified Alerts", UnifiedAlertsPage),
+            ("Purple AI", PurpleAIPage),
             ("Exclusions & Block", ExclusionsBlocklistPage),
             ("STAR Rules", STARRulesPage),
             ("Users & Roles", UsersRolesPage),
@@ -597,7 +749,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(sb, text="Made by Ran Jacobi",
                      font=("Segoe UI", 9), text_color="#555").pack(
             side="bottom", pady=(0, 8))
-        ctk.CTkLabel(sb, text="v1.1.2",
+        ctk.CTkLabel(sb, text="v1.3.0",
                      font=("Segoe UI", 9), text_color="#444").pack(
             side="bottom", pady=(0, 2))
 
@@ -650,7 +802,7 @@ class App(ctk.CTk):
             p = cls(self.content, self)
             self.pages[label] = p
 
-        self._show("Connections")
+        self._show("PSO Tickets" if is_admin else "Connections")
 
     def _show(self, label):
         if self._current:
@@ -672,7 +824,8 @@ class App(ctk.CTk):
         ctx = self.cfg.get_by_role(role)
         if not ctx:
             return
-        api = S1API(ctx.url, ctx.api_token)
+        api = S1API(ctx.url, ctx.api_token,
+                    verify_ssl=not getattr(ctx, "ignore_ssl_errors", False))
         if role == "source":
             self.source_api = api
             self.src_lbl.configure(

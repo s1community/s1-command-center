@@ -41,6 +41,7 @@ pyinstaller \
     --hidden-import openpyxl \
     --hidden-import PIL \
     --collect-all customtkinter \
+    --exclude-module jira_page \
     --noconfirm \
     main.py
 

@@ -1,8 +1,20 @@
 """
 SentinelOne API Client — handles auth, pagination, backup/restore data retrieval.
 """
+import re
 import requests
-from typing import Any, Optional
+import time as _time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Iterable, List, Optional, Tuple
+from requests.adapters import HTTPAdapter
+
+
+def _auth_header(token: str) -> str:
+    """Return 'Bearer <token>' for JWTs, 'ApiToken <token>' for API keys."""
+    if re.match(r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$', token.strip()):
+        return f"Bearer {token}"
+    return f"ApiToken {token}"
 
 
 class S1APIError(Exception):
@@ -16,12 +28,31 @@ class S1APIError(Exception):
 class S1API:
     API_PREFIX = "/web/api/v2.1"
 
-    def __init__(self, base_url: str, api_token: str):
+    def __init__(self, base_url: str, api_token: str, pool_maxsize: int = 32,
+                 verify_ssl: bool = True):
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
+        self.verify_ssl = verify_ssl
         self.session = requests.Session()
+        self.session.verify = verify_ssl
+        if not verify_ssl:
+            # Suppress the per-request InsecureRequestWarning spam when the
+            # user has explicitly opted into ignoring SSL errors.
+            try:
+                from urllib3.exceptions import InsecureRequestWarning
+                import urllib3
+                urllib3.disable_warnings(InsecureRequestWarning)
+            except Exception:
+                pass
+        adapter = HTTPAdapter(
+            pool_connections=pool_maxsize,
+            pool_maxsize=pool_maxsize,
+            pool_block=False,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({
-            "Authorization": f"ApiToken {self.api_token}",
+            "Authorization": _auth_header(self.api_token),
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
@@ -32,56 +63,73 @@ class S1API:
 
     # ── HTTP primitives ────────────────────────────────────────────────
 
-    def _get(self, endpoint: str, params: Optional[dict] = None) -> dict:
-        import time as _time
+    def _request(self, method: str, endpoint: str, params: Optional[dict] = None,
+                 body: Optional[dict] = None, retries: int = 4) -> dict:
+        url = f"{self.api_url}{endpoint}"
         last_exc = None
-        for attempt in range(4):  # up to 4 attempts (0, 1, 2, 3)
+        for attempt in range(retries):
             try:
                 if attempt > 0:
-                    _time.sleep(1.5 * attempt)  # 1.5s, 3s, 4.5s backoff
-                resp = self.session.get(f"{self.api_url}{endpoint}", params=params, timeout=120)
-                if resp.status_code != 200:
-                    detail = ""
-                    try:
-                        detail = resp.json().get("errors", [{}])[0].get("detail", resp.text)
-                    except Exception:
-                        detail = resp.text
-                    err = S1APIError(f"GET {endpoint} → {resp.status_code}", resp.status_code, detail)
-                    # Don't retry client errors (400, 401, 403, 404, 405)
-                    if 400 <= resp.status_code < 500:
-                        raise err
-                    raise err
-                return resp.json()
+                    _time.sleep(1.5 * attempt)
+                resp = self.session.request(method, url, params=params, json=body, timeout=120)
+                if resp.status_code in (200, 201):
+                    return resp.json()
+                detail = ""
+                try:
+                    resp_body = resp.json() or {}
+                    errs = resp_body.get("errors") or []
+                    if errs:
+                        # Concatenate every error's title + detail + code so
+                        # the operator (and the error-classifier) can see the
+                        # real reason. S1 frequently populates `title` and
+                        # leaves `detail` blank for validation errors.
+                        parts = []
+                        for er in errs:
+                            t = (er.get("title") or "").strip()
+                            d = (er.get("detail") or "").strip()
+                            c = er.get("code")
+                            chunk = " :: ".join(x for x in (t, d) if x)
+                            if c and chunk:
+                                chunk = f"{chunk} (code {c})"
+                            elif c:
+                                chunk = f"code {c}"
+                            if chunk:
+                                parts.append(chunk)
+                        detail = " | ".join(parts) or str(resp_body)
+                    else:
+                        # Some endpoints return {"message": "..."} or a bare
+                        # string — keep whatever is there.
+                        detail = resp_body.get("message") \
+                                 or resp_body.get("error") or resp.text
+                except Exception:
+                    detail = resp.text or ""
+                # Retry on 429 (rate limit) and 5xx (server errors)
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        _time.sleep(int(retry_after))
+                    if attempt < retries - 1:
+                        continue
+                raise S1APIError(f"{method} {endpoint} → {resp.status_code}",
+                                 resp.status_code, detail)
             except S1APIError:
-                raise  # don't retry API errors
+                raise
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError,
                     ConnectionResetError, ConnectionAbortedError) as e:
                 last_exc = e
-                if attempt < 3:
+                if attempt < retries - 1:
                     continue
-        raise S1APIError(f"GET {endpoint} failed after 4 attempts: {last_exc}", 0, str(last_exc))
+        raise S1APIError(f"{method} {endpoint} failed after {retries} attempts: {last_exc}",
+                         0, str(last_exc))
+
+    def _get(self, endpoint: str, params: Optional[dict] = None) -> dict:
+        return self._request("GET", endpoint, params=params)
 
     def _post(self, endpoint: str, body: Optional[dict] = None, params: Optional[dict] = None) -> dict:
-        resp = self.session.post(f"{self.api_url}{endpoint}", json=body, params=params, timeout=120)
-        if resp.status_code not in (200, 201):
-            detail = ""
-            try:
-                detail = resp.json().get("errors", [{}])[0].get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise S1APIError(f"POST {endpoint} → {resp.status_code}", resp.status_code, detail)
-        return resp.json()
+        return self._request("POST", endpoint, params=params, body=body)
 
     def _put(self, endpoint: str, body: Optional[dict] = None, params: Optional[dict] = None) -> dict:
-        resp = self.session.put(f"{self.api_url}{endpoint}", json=body, params=params, timeout=120)
-        if resp.status_code not in (200, 201):
-            detail = ""
-            try:
-                detail = resp.json().get("errors", [{}])[0].get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise S1APIError(f"PUT {endpoint} → {resp.status_code}", resp.status_code, detail)
-        return resp.json()
+        return self._request("PUT", endpoint, params=params, body=body)
 
     def get_data(self, endpoint: str, params: Optional[dict] = None) -> Any:
         return self._get(endpoint, params).get("data", {})
@@ -109,6 +157,41 @@ class S1API:
                 break
         return results
 
+    # ── parallel fan-out ──────────────────────────────────────────────
+
+    def get_many(self, calls: list[tuple], max_workers: int = 8) -> list[dict]:
+        """Run many independent GETs in parallel using a thread pool.
+
+        Args:
+            calls: list of (endpoint, params) tuples
+            max_workers: thread pool size (default 8)
+
+        Returns:
+            list of result dicts in input order, each with:
+            {"endpoint", "params", "ok", "data", "error", "elapsed_ms"}
+        """
+        calls = list(calls)
+        results: list[Optional[dict]] = [None] * len(calls)
+
+        def _one(i: int, endpoint: str, params: Optional[dict]):
+            t0 = _time.time()
+            try:
+                body = self._get(endpoint, params)
+                return i, {"endpoint": endpoint, "params": params, "ok": True,
+                           "data": body, "error": None,
+                           "elapsed_ms": (_time.time() - t0) * 1000.0}
+            except Exception as e:
+                return i, {"endpoint": endpoint, "params": params, "ok": False,
+                           "data": None, "error": str(e),
+                           "elapsed_ms": (_time.time() - t0) * 1000.0}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = [ex.submit(_one, i, ep, p) for i, (ep, p) in enumerate(calls)]
+            for f in as_completed(futs):
+                i, r = f.result()
+                results[i] = r
+        return results
+
     # ── quick helpers ──────────────────────────────────────────────────
 
     def get_my_user(self) -> dict:
@@ -116,6 +199,11 @@ class S1API:
 
     def get_accounts(self, **kw) -> list[dict]:
         return self.get_all("/accounts", params={"states": "active", "sortBy": "name", "sortOrder": "asc"}, **kw)
+
+    def get_account_by_id(self, account_id: str) -> Optional[dict]:
+        """Fetch a single account by exact ID. Returns None if not found or inaccessible."""
+        results = self.get_all("/accounts", params={"ids": account_id})
+        return next((a for a in results if str(a.get("id")) == str(account_id)), None)
 
     def get_sites(self, params: Optional[dict] = None, **kw) -> list[dict]:
         # S1 Sites API returns nested structure — try multiple formats
@@ -219,16 +307,34 @@ class S1API:
     def get_policy_overrides(self, scope: dict) -> list[dict]:
         return self.get_all("/policy/overrides", params=scope)
 
-    # ── config overrides ───────────────────────────────────────────────
+    # ── config / policy overrides ──────────────────────────────────────
+    # Endpoints per S1 spec — note the path is SINGULAR (/config-override).
 
     def get_config_overrides(self, scope: dict) -> list[dict]:
-        return self.get_all("/config-overrides", params=scope)
+        """GET /config-override — list overrides matching the scope filter."""
+        return self.get_all("/config-override", params=scope)
 
-    def create_config_override(self, data: dict) -> dict:
-        return self._post("/config-overrides", body={"data": data})
+    def create_config_override(self, scope: dict, data: dict) -> dict:
+        """POST /config-override — create a new override on the destination
+        scope. S1 requires the scope filter embedded in the body alongside
+        the override data.
+        Requires Policy Override.create. Use support-actions/config to get
+        the complete syntax (Global / Support users only)."""
+        return self._post("/config-override", body={
+            "filter": scope, "data": data})
+
+    def update_config_override(self, override_id: str, data: dict) -> dict:
+        """PUT /config-override/{id} — change the value of one override."""
+        return self._put(f"/config-override/{override_id}",
+                         body={"data": data})
+
+    def delete_config_override(self, override_id: str) -> dict:
+        """DELETE /config-override/{id} — delete one override by ID."""
+        return self._delete(f"/config-override/{override_id}")
 
     def delete_config_overrides(self, ids: list[str]) -> dict:
-        return self._delete("/config-overrides", body={
+        """DELETE /config-override — bulk delete overrides matching filter."""
+        return self._delete("/config-override", body={
             "filter": {"ids": ids}})
 
     # ── locations ──────────────────────────────────────────────────────
@@ -238,6 +344,41 @@ class S1API:
 
     def delete_locations(self, ids: list[str]) -> dict:
         return self._delete("/locations", body={"filter": {"ids": ids}})
+
+    # ── webhooks (notification channels) ───────────────────────────────
+    # S1 exposes a single notification-webhooks endpoint per tenant scope.
+
+    def get_webhooks(self, scope: dict) -> list[dict]:
+        return self.get_all("/notification-webhooks", params=scope)
+
+    def create_webhook(self, scope: dict, data: dict) -> dict:
+        return self._post("/notification-webhooks", body={
+            "filter": scope, "data": data})
+
+    def delete_webhook(self, webhook_id: str) -> dict:
+        return self._delete(f"/notification-webhooks/{webhook_id}")
+
+    # ── Singularity Marketplace (installed integrations inventory) ─────
+    # NOTE: Marketplace applications cannot be re-installed via API — each
+    # one needs its own OAuth handshake / credentials. We capture them
+    # as an inventory only so the operator knows what to re-install
+    # manually on the destination.
+
+    def get_marketplace_apps(self, scope: dict) -> list[dict]:
+        return self.get_all("/singularity-marketplace/applications",
+                            params=scope)
+
+    # ── Scheduled reports ──────────────────────────────────────────────
+
+    def get_scheduled_reports(self, scope: dict) -> list[dict]:
+        return self.get_all("/reports/scheduled", params=scope)
+
+    def create_scheduled_report(self, scope: dict, data: dict) -> dict:
+        return self._post("/reports/scheduled", body={
+            "filter": scope, "data": data})
+
+    def delete_scheduled_report(self, report_id: str) -> dict:
+        return self._delete(f"/reports/scheduled/{report_id}")
 
     # ── notification / integration settings ────────────────────────────
 
@@ -403,6 +544,54 @@ class S1API:
         body["data"]["siteId"] = site_id
         return self._post("/groups", body=body)
 
+    def update_group(self, group_id: str, data: dict) -> dict:
+        """PUT /groups/{id} — update an existing group (name, type,
+        filterId, rank, description, inherits, registrationToken). Used
+        on restore to overwrite a destination group with the source's
+        settings so e.g. dynamic groups don't get stuck as static."""
+        return self._put(f"/groups/{group_id}", body={"data": dict(data)})
+
+    def move_group_to_pinned(self, group_id: str) -> dict:
+        """Convert an existing static/dynamic group into a Pinned group.
+
+        S1 has shipped a few different shapes for this operation across
+        versions. We try them in order and return the first one that
+        doesn't 404 / 4xx-unknown-route. Any 4xx from a known endpoint
+        is raised so the caller can log the real reason.
+        """
+        attempts = [
+            ("POST", f"/groups/{group_id}/move-to-pinned", {}),
+            ("POST", f"/groups/{group_id}/move-to-pin", {}),
+            ("POST", f"/groups/{group_id}/pin", {}),
+            ("PUT",  f"/groups/{group_id}",
+                {"data": {"type": "pinned", "name": None}}),
+        ]
+        last_exc = None
+        for method, path, body in attempts:
+            try:
+                if method == "POST":
+                    return self._post(path, body=body)
+                else:
+                    # Strip None values (name is filled by caller if needed)
+                    clean = {"data": {k: v for k, v in body["data"].items()
+                                       if v is not None}}
+                    return self._put(path, body=clean)
+            except S1APIError as e:
+                last_exc = e
+                # 404 / "not found" = wrong endpoint shape — try next.
+                # Other 4xx with a meaningful detail = real refusal,
+                # surface immediately so the user sees the reason.
+                if e.status_code in (404,):
+                    continue
+                msg = (str(getattr(e, "detail", "")) or str(e)).lower()
+                if "not found" in msg or "unknown" in msg \
+                        or "unrecognized" in msg:
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        return {}
+
     def reorder_groups(self, site_id: str, group_ids: list[str]) -> dict:
         return self._put("/groups/ranks", body={
             "filter": {"siteIds": [site_id]},
@@ -421,15 +610,7 @@ class S1API:
     # ── HTTP DELETE ────────────────────────────────────────────────────
 
     def _delete(self, endpoint: str, body: Optional[dict] = None, params: Optional[dict] = None) -> dict:
-        resp = self.session.delete(f"{self.api_url}{endpoint}", json=body, params=params, timeout=120)
-        if resp.status_code not in (200, 201):
-            detail = ""
-            try:
-                detail = resp.json().get("errors", [{}])[0].get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise S1APIError(f"DELETE {endpoint} → {resp.status_code}", resp.status_code, detail)
-        return resp.json()
+        return self._request("DELETE", endpoint, params=params, body=body)
 
     # ── agent actions ──────────────────────────────────────────────────
 
@@ -571,3 +752,244 @@ class S1API:
 
     def update_account(self, account_id: str, data: dict) -> dict:
         return self._put(f"/accounts/{account_id}", body={"data": data})
+
+    # ── GraphQL core ──────────────────────────────────────────────────
+
+    def _gql(self, path: str, query: str, variables: Optional[dict] = None) -> dict:
+        body = {"query": query}
+        if variables:
+            body["variables"] = variables
+        resp = self._post(path, body=body)
+        if resp.get("errors"):
+            first = resp["errors"][0].get("message", "GraphQL error")
+            raise S1APIError(f"GraphQL: {first}", 0, str(resp["errors"]))
+        return resp
+
+    # ── Purple AI ─────────────────────────────────────────────────────
+
+    PURPLE_VIEW_SELECTORS = ("EDR", "IDENTITY", "CLOUD", "NGFW", "DATA_LAKE")
+
+    def purple_query(self, user_input: str, view_selector: str = "EDR",
+                     hours: int = 24) -> dict:
+        now_ms = int(_time.time() * 1000)
+        end_ms = now_ms
+        start_ms = now_ms - hours * 60 * 60 * 1000
+        query = f"""query PurpleLaunch($input: String!) {{
+  purpleLaunchQuery(request: {{
+    isAsync: false
+    contentType: NATURAL_LANGUAGE
+    consoleDetails: {{ baseUrl: "{self.base_url}" version: "S" }}
+    conversation: {{ id: "S1CC-SESSION", messages: [], entitlements: null }}
+    inputContent: {{
+      userInput: $input
+      displayedTimeRange: {{ start: {start_ms}, end: {end_ms} }}
+      viewSelector: {view_selector}
+      contentType: NATURAL_LANGUAGE
+      userDetails: {{
+        accountId: ""
+        teamToken: ""
+        sessionId: "s1cc-session"
+        emailAddress: null
+        userAgent: "S1-Command-Center"
+        buildDate: null
+        buildHash: null
+      }}
+    }}
+  }}) {{
+    result {{
+      message
+      summary
+      powerQuery {{ query timeRange {{ start end }} viewSelector }}
+      suggestedQuestions {{ question }}
+    }}
+    resultType
+    status {{ state error {{ errorDetail errorType origin }} }}
+    stepsCompleted
+    token
+  }}
+}}"""
+        resp = self._gql("/graphql", query, {"input": user_input})
+        plq = (resp.get("data") or {}).get("purpleLaunchQuery") or {}
+        status = plq.get("status") or {}
+        err = status.get("error")
+        if err:
+            raise S1APIError(
+                f"Purple AI: {err.get('errorType', 'error')}: {err.get('errorDetail', '')}",
+                0, str(err))
+        result = plq.get("result") or {}
+        pq = result.get("powerQuery") or {}
+        tr = pq.get("timeRange") or {}
+        suggestions = [q.get("question") for q in (result.get("suggestedQuestions") or [])
+                       if q.get("question")]
+        return {
+            "state": status.get("state"),
+            "result_type": plq.get("resultType"),
+            "message": result.get("message") or "",
+            "summary": result.get("summary"),
+            "power_query": pq.get("query"),
+            "view_selector": pq.get("viewSelector"),
+            "time_range": {"start": tr.get("start"), "end": tr.get("end")} if tr else None,
+            "suggested_questions": suggestions,
+        }
+
+    # ── Unified Alert Management (UAM) ────────────────────────────────
+
+    UAM_GQL = "/unifiedalerts/graphql"
+
+    _ALERT_FIELDS = (
+        "id detectedAt createdAt updatedAt name status severity analystVerdict "
+        "externalId storylineId attackSurfaces confidenceLevel classification "
+        "detectionSource { product vendor } assignee { fullName email }"
+    )
+
+    _ALERT_DETAIL_FIELDS = _ALERT_FIELDS + (
+        " assets { id name agentUuid category subcategory osType osVersion "
+        "primary accessible decommissioned deleted status agentVersion "
+        "lastLoggedInUser } "
+        "dataSources { id name }"
+    )
+
+    def uam_list_alerts(self, filters: Optional[list] = None,
+                        sort_by: str = "detectedAt", sort_order: str = "DESC",
+                        first: int = 50, after: Optional[str] = None,
+                        view_type: Optional[str] = None) -> dict:
+        args = ["filters: $filters", "sort: {by: $sortBy, order: $sortOrder}",
+                "first: $first"]
+        var_defs = ["$filters: [FilterInput!]", "$sortBy: String!",
+                    "$sortOrder: SortOrderType!", "$first: Int"]
+        variables: dict = {"filters": filters or [], "sortBy": sort_by,
+                           "sortOrder": sort_order, "first": first}
+        if after:
+            args.append("after: $after")
+            var_defs.append("$after: String")
+            variables["after"] = after
+        if view_type:
+            args.append("viewType: $viewType")
+            var_defs.append("$viewType: ViewType")
+            variables["viewType"] = view_type
+        query = f"""query listAlerts({', '.join(var_defs)}) {{
+  alerts({', '.join(args)}) {{
+    edges {{ node {{ {self._ALERT_FIELDS} }} cursor }}
+    pageInfo {{ hasNextPage endCursor }}
+    totalCount
+  }}
+}}"""
+        r = self._gql(self.UAM_GQL, query, variables)
+        return (r.get("data") or {}).get("alerts") or {}
+
+    def uam_get_alert(self, alert_id: str) -> dict:
+        query = f"""query alertOne($id: ID!) {{
+  alert(id: $id) {{ {self._ALERT_DETAIL_FIELDS} }}
+}}"""
+        r = self._gql(self.UAM_GQL, query, {"id": alert_id})
+        return (r.get("data") or {}).get("alert") or {}
+
+    def uam_facets(self, field_ids: list[str],
+                   filters: Optional[list] = None) -> list[dict]:
+        query = """query g($fieldIds: [String!]!, $filters: [FilterInput!]) {
+  alertGroupByCount(fieldIds: $fieldIds, filters: $filters) {
+    data { fieldId hasNextPage values { value label count } }
+  }
+}"""
+        r = self._gql(self.UAM_GQL, query,
+                      {"fieldIds": field_ids, "filters": filters or []})
+        return ((r.get("data") or {}).get("alertGroupByCount") or {}).get("data") or []
+
+    def uam_alert_notes(self, alert_id: str) -> list[dict]:
+        query = """query n($id: ID!) {
+  alertNotes(alertId: $id) {
+    data { id alertId text createdAt type author { fullName email } }
+  }
+}"""
+        r = self._gql(self.UAM_GQL, query, {"id": alert_id})
+        return ((r.get("data") or {}).get("alertNotes") or {}).get("data") or []
+
+    def uam_add_note(self, alert_id: str, text: str) -> list[dict]:
+        query = """mutation add($id: ID!, $text: String!) {
+  addAlertNote(alertId: $id, text: $text) {
+    data { id alertId text createdAt author { fullName } }
+  }
+}"""
+        r = self._gql(self.UAM_GQL, query, {"id": alert_id, "text": text})
+        return ((r.get("data") or {}).get("addAlertNote") or {}).get("data") or []
+
+    def uam_alert_history(self, alert_id: str, first: int = 50) -> dict:
+        query = """query h($id: ID!, $first: Int) {
+  alertHistory(alertId: $id, first: $first) {
+    edges { node { createdAt eventType eventText } cursor }
+    pageInfo { hasNextPage endCursor }
+    totalCount
+  }
+}"""
+        r = self._gql(self.UAM_GQL, query, {"id": alert_id, "first": first})
+        return (r.get("data") or {}).get("alertHistory") or {}
+
+    def uam_alert_timeline(self, alert_id: str, first: int = 50) -> dict:
+        query = """query t($id: ID!, $first: Int) {
+  alertTimeline(alertId: $id, first: $first) {
+    edges { node { createdAt eventType eventText } cursor }
+    pageInfo { hasNextPage endCursor }
+    totalCount
+  }
+}"""
+        r = self._gql(self.UAM_GQL, query, {"id": alert_id, "first": first})
+        return (r.get("data") or {}).get("alertTimeline") or {}
+
+    def uam_set_status(self, scope_ids: list[str], alert_ids: list[str],
+                       status: str, note: Optional[str] = None) -> dict:
+        actions = [{"id": "S1/alert/statusUpdate",
+                    "payload": {"status": {"value": status}}}]
+        if note:
+            actions.append({"id": "S1/alert/addNote",
+                            "payload": {"note": {"value": note}}})
+        filt = {"or": [{"and": [{"fieldId": "id",
+                                  "stringIn": {"values": alert_ids}}]}]}
+        query = """mutation trigger($scope: ScopeSelectorInput!,
+  $filter: OrFilterSelectionInput, $actions: [TriggerActionInput!]!,
+  $viewType: ViewType!) {
+  alertTriggerActions(scope: $scope, filter: $filter, actions: $actions,
+    viewType: $viewType) {
+    __typename
+    ... on ActionsTriggered {
+      actions { actionId success { id } skip { id } failure { id } }
+    }
+    ... on TriggerActionsError { errors { errorMessage } }
+    ... on TriggerActionsScheduled { bulkActionTriggerId }
+  }
+}"""
+        variables = {"scope": {"scopeIds": scope_ids, "scopeType": "ACCOUNT"},
+                     "filter": filt, "actions": actions, "viewType": "ALL"}
+        r = self._gql(self.UAM_GQL, query, variables)
+        return (r.get("data") or {}).get("alertTriggerActions") or {}
+
+    def uam_set_verdict(self, scope_ids: list[str], alert_ids: list[str],
+                        verdict: str) -> dict:
+        filt = {"or": [{"and": [{"fieldId": "id",
+                                  "stringIn": {"values": alert_ids}}]}]}
+        actions = [{"id": "S1/alert/analystVerdictUpdate",
+                    "payload": {"analystVerdict": {"value": verdict}}}]
+        query = """mutation trigger($scope: ScopeSelectorInput!,
+  $filter: OrFilterSelectionInput, $actions: [TriggerActionInput!]!,
+  $viewType: ViewType!) {
+  alertTriggerActions(scope: $scope, filter: $filter, actions: $actions,
+    viewType: $viewType) {
+    __typename
+    ... on ActionsTriggered {
+      actions { actionId success { id } skip { id } failure { id } }
+    }
+    ... on TriggerActionsError { errors { errorMessage } }
+  }
+}"""
+        variables = {"scope": {"scopeIds": scope_ids, "scopeType": "ACCOUNT"},
+                     "filter": filt, "actions": actions, "viewType": "ALL"}
+        r = self._gql(self.UAM_GQL, query, variables)
+        return (r.get("data") or {}).get("alertTriggerActions") or {}
+
+    def uam_export_csv(self, filters: Optional[list] = None,
+                       view_type: str = "ALL") -> str:
+        query = """query ($filters: [FilterInput!], $viewType: ViewType!) {
+  alertsCsvExport(filters: $filters, viewType: $viewType) { data }
+}"""
+        r = self._gql(self.UAM_GQL, query,
+                      {"filters": filters or [], "viewType": view_type})
+        return ((r.get("data") or {}).get("alertsCsvExport") or {}).get("data") or ""
