@@ -293,6 +293,34 @@ Contributions are welcome! Please:
 
 ## Changelog
 
+### v1.3.0 — 2026-05-22
+#### New Features
+- **Live DiffPanel on Restore page** — Side-by-side comparison of every backup node vs the live destination console. Shows identity (type, filterId/filterName, inherits, etc.) and per-element counts + sample names. Snapshots the destination before and after each node during restore so the operator can see exactly what changed.
+- **Pinned-group preservation** — Groups with `type=pinned` on the source are now created as Pinned on the destination. Existing groups are converted via a multi-endpoint fallback chain with post-call verification.
+- **Dynamic-group restoration by filter name** — Backup back-fills `filterName` on every dynamic group from the source console. Restore resolves the source filter name to the destination's matching saved-filter ID and binds the group accordingly. Per-site cache prevents repeated `/filters` lookups.
+- **Resizable progress UI** — Progress table and DiffPanel sit in a draggable `PanedWindow`. Rows are numbered, paths shortened with hover-tooltips, Details column wraps, table auto-scrolls to the active row, mouse-wheel events propagate from any child widget.
+
+#### Fixes
+- **Dynamic groups silently restored as static** — `_resolve_dest_id` now overwrites an existing destination group's `filterId` when the source is dynamic and the destination is static.
+- **`PUT /groups/{id}` rejects `type` field** — Restore no longer sends `type` on group updates (S1 infers it from `filterId` presence). Fixes `4000010 Validation Error :: data: type: Unknown field`.
+- **Group create with `inherits=false`** — Now always creates with `inherits=true`; the per-node policy step decouples and pushes the source policy a moment later. Fixes `4000010 Policy should be delivered if it is not inherited`.
+- **Config overrides rejected for missing scope** — Re-injects `data.scope` after `_clean_for_restore` strips it.
+- **Unrecognised exclusion errors** — S1 API error extractor now reads `title + detail + code` from every error object. Per-item failure records keep the full message.
+- **DV / saved-filter drift across consoles** — Restore matches by name against the destination's filters per site and substitutes the destination ID.
+
+### v1.2.0 — 2026-05-08
+#### New Features
+- **Purple AI Page** — Natural language queries against SDL telemetry via GraphQL. Supports EDR, IDENTITY, CLOUD, NGFW, DATA_LAKE view selectors with configurable time windows and clickable suggested follow-up questions.
+- **Unified Alerts Page** — Modern multi-source alert triage via UAM GraphQL API. Filter by status/severity/view, paginated listing, faceted counts, alert detail/notes/history/timeline, bulk triage (Resolve/In Progress), CSV export.
+- **Connection Pooling** — `HTTPAdapter` with pool of 32 connections for better socket reuse during backup/restore.
+- **429/5xx Retry** — All HTTP methods retry on rate limit (429) and server errors (5xx), honoring `Retry-After`.
+- **Parallel Fan-out** — `get_many()` for concurrent independent GETs via ThreadPoolExecutor.
+- **GraphQL Transport** — Shared `_gql()` method for Purple AI and Unified Alert Management.
+
+### v1.1.2 — 2026-05-07
+- DMG installer now includes an **Install & Launch** script that auto-removes the macOS quarantine flag
+- Added a comprehensive **Troubleshooting** section to the README (macOS auth, connection errors, common issues)
+
 ### v1.1 — 2026-05-07
 #### New Features
 - **Set Defaults Dialog** — Edit `isDefault`, `expiration`, `unlimitedExpiration`, and `unlimitedLicenses` on accounts/sites/groups in the backup file before restoring
