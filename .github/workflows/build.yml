@@ -38,11 +38,72 @@ jobs:
             --noconfirm \
             main.py
 
+      - name: Stage DMG contents
+        # Matches the local build_macos.sh layout: ship the .app alongside
+        # an installer script that strips the Gatekeeper quarantine flag
+        # and copies the app to /Applications, plus a short README so
+        # first-time users know which file to double-click.
+        run: |
+          xattr -cr "dist/S1 Command Center.app"
+          DMG_STAGE="dist/dmg_stage"
+          rm -rf "$DMG_STAGE"
+          mkdir -p "$DMG_STAGE"
+          cp -R "dist/S1 Command Center.app" "$DMG_STAGE/"
+
+          cat > "$DMG_STAGE/Install & Launch.command" << 'SCRIPT'
+          #!/bin/bash
+          # S1 Command Center — macOS Setup
+          # Removes the quarantine flag and launches the app.
+          # Run this ONCE after downloading. After that, open the app
+          # normally from /Applications.
+          clear
+          echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo "  🛡️  S1 Command Center — Setup"
+          echo "═══════════════════════════════════════════════════"
+          echo ""
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          APP_PATH="$SCRIPT_DIR/S1 Command Center.app"
+          DEST="/Applications/S1 Command Center.app"
+          if [ ! -d "$APP_PATH" ]; then
+              echo "❌ Could not find 'S1 Command Center.app' next to this script."
+              read -p "Press Enter to close..." _
+              exit 1
+          fi
+          echo "📦 Copying to /Applications..."
+          cp -R "$APP_PATH" "/Applications/" 2>/dev/null || sudo cp -R "$APP_PATH" "/Applications/"
+          echo "🔓 Removing macOS quarantine flag..."
+          xattr -cr "$DEST" 2>/dev/null
+          sudo xattr -cr "$DEST" 2>/dev/null
+          echo "🚀 Launching S1 Command Center..."
+          echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo "  ✅ Setup complete! The app is now in /Applications."
+          echo "═══════════════════════════════════════════════════"
+          open "$DEST"
+          sleep 2
+          SCRIPT
+          chmod +x "$DMG_STAGE/Install & Launch.command"
+
+          cat > "$DMG_STAGE/README.txt" << 'README'
+          S1 Command Center — Installation
+          =================================
+
+          Double-click "Install & Launch.command" to:
+            1. Copy the app to /Applications
+            2. Remove the macOS quarantine flag
+            3. Launch the app
+
+          After the first run, open the app normally from
+          /Applications or Spotlight.
+          README
+
       - name: Create DMG
         run: |
           hdiutil create -volname "S1 Command Center" \
-            -srcfolder "dist/S1 Command Center.app" \
+            -srcfolder "dist/dmg_stage" \
             -ov -format UDZO "dist/S1-Command-Center-macOS.dmg"
+          xattr -cr "dist/S1-Command-Center-macOS.dmg"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
