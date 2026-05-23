@@ -293,6 +293,17 @@ Contributions are welcome! Please:
 
 ## Changelog
 
+### v1.3.1 — 2026-05-23
+#### Bug Fixes
+- **Exclusion paths with invisible Unicode characters** — Restore now scrubs U+200E (LTR mark), zero-width joiners, BOMs, etc. from exclusion `value`/`description` fields. Fixes destinations rejecting paths with `Invalid value <x> contains non-printable characters`.
+- **Notification recipients payload shape** — `PUT /settings/recipients` now sends the list directly (was wrapped as `{"emails": [...]}`). Includes two fallback shapes to handle tenant variants. Fixes `data: dict_values(['emails']): Unknown field`.
+- **Firewall rules with cross-console location bindings** — On `Invalid locations for this scope`, the migrator auto-retries with location fields stripped so the rule lands as location-agnostic. Operator gets a log warning to re-attach Locations manually.
+
+#### Better Error Explanations
+- "Cannot change firewall settings while inheriting from parent" → "Scope inherits from parent" with explicit decouple instructions.
+- "Invalid locations for this scope" → dedicated explanation.
+- "data: dict_values(['emails']): Unknown field" → dedicated explanation.
+
 ### v1.3.0 — 2026-05-22
 #### New Features
 - **Live DiffPanel on Restore page** — Side-by-side comparison of every backup node vs the live destination console. Shows identity (type, filterId/filterName, inherits, etc.) and per-element counts + sample names. Snapshots the destination before and after each node during restore so the operator can see exactly what changed.

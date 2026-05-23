@@ -393,8 +393,39 @@ class S1API:
         return self.get_all("/settings/recipients", params=scope)
 
     def set_notification_recipients(self, scope: dict, data: list[dict]) -> dict:
-        return self._put("/settings/recipients", body={
-            "filter": scope, "data": {"emails": data}})
+        # S1 returns `data: dict_values(['emails']): Unknown field` when
+        # we wrap the list in `{"emails": data}`. The PUT endpoint takes
+        # the raw list (matching the shape `get` returns). If the tenant
+        # rejects the bulk PUT we fall back to per-recipient POSTs.
+        if not data:
+            return {}
+        try:
+            return self._put("/settings/recipients", body={
+                "filter": scope, "data": data})
+        except S1APIError as e:
+            msg = (str(getattr(e, "detail", "")) or str(e)).lower()
+            if e.status_code != 400 or "unknown field" not in msg:
+                raise
+            # Schema-shape fallback: try the singular field name.
+            try:
+                return self._put("/settings/recipients", body={
+                    "filter": scope, "data": {"recipients": data}})
+            except S1APIError:
+                # Last resort: post each recipient individually so the
+                # ones we *can* migrate get through and the broken ones
+                # surface their own error with a name in the payload.
+                ok = 0
+                last_exc = None
+                for item in data:
+                    try:
+                        self._post("/settings/recipients", body={
+                            "filter": scope, "data": item})
+                        ok += 1
+                    except S1APIError as ie:
+                        last_exc = ie
+                if ok == 0 and last_exc is not None:
+                    raise last_exc
+                return {"data": {"affected": ok}}
 
     # ── SSO settings ───────────────────────────────────────────────────
 

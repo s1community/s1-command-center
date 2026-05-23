@@ -564,8 +564,12 @@ _ERROR_RULES = [
         "severity": "info",
     },
     {
-        "match": _re.compile(r"cannot update other settings without marking "
-                             r"scope as decoupled|marking scope.*decoupled"),
+        "match": _re.compile(
+            r"cannot update other settings without marking "
+            r"scope as decoupled|marking scope.*decoupled|"
+            r"cannot change (firewall|device control|network "
+            r"quarantine) settings while inheriting|"
+            r"inheriting settings from parent"),
         "what": "Scope inherits from parent",
         "why":  "The destination group/site inherits this configuration "
                 "(Device Control / Firewall / NQ config) from its parent. "
@@ -574,9 +578,45 @@ _ERROR_RULES = [
         "fix":  "If the source ALSO inherited at this level, ignore — the "
                 "inherited config is already correct.\n"
                 "If the source had a custom override here, open the "
-                "destination console → this scope → the relevant section → "
-                "click 'Override' / 'Decouple from parent', then re-run.",
+                "destination console → this scope → the relevant section "
+                "(Firewall Control / Device Control / Network "
+                "Quarantine) → click 'Override' / 'Decouple from "
+                "parent', then re-run the restore. The migrator now "
+                "always creates new groups with inherits=true, so this "
+                "step is required when the source overrode at group "
+                "level.",
         "severity": "info",
+    },
+    {
+        "match": _re.compile(r"invalid locations? for this scope"),
+        "what": "Firewall rule references locations that don't exist on the destination",
+        "why":  "The source rule was bound to specific Locations (location-"
+                "aware firewall rules). The destination console has "
+                "different location IDs for the same logical networks — "
+                "S1 location IDs never match across consoles.",
+        "fix":  "The migrator now auto-retries by stripping the location "
+                "binding so the rule lands as location-agnostic. "
+                "After the restore finishes, open the destination "
+                "console → Firewall Control → the affected rule → "
+                "re-attach the matching Location(s). "
+                "(If you see this error AFTER updating to v1.3.1+, the "
+                "rule is still being rejected for some other reason — "
+                "send the full error to support.)",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"dict_values\(\[.?emails.?\]\).*unknown field|"
+                             r"data:\s*emails:\s*unknown field"),
+        "what": "Notification recipients payload shape rejected",
+        "why":  "Older builds wrapped the recipients list as "
+                "`data: {emails: [...]}` but the destination tenant's "
+                "API only accepts the list directly. v1.3.1+ uses the "
+                "correct shape and falls back automatically.",
+        "fix":  "Update to S1 Command Center v1.3.1+ — the new build "
+                "sends the right payload and falls back to per-recipient "
+                "POSTs if the tenant rejects the bulk PUT. No data is "
+                "lost: the recipients list is rebuilt from the backup.",
+        "severity": "warning",
     },
     {
         "match": _re.compile(
@@ -584,6 +624,7 @@ _ERROR_RULES = [
             r"data:\s*value:|"
             r"data:\s*pathexclusiontype|"
             r"invalid (path|hash|value)|"
+            r"non-printable characters|"
             r"path must (start|end)"),
         "what": "Path / value exclusion rejected by destination validation",
         "why":  "S1 validates each exclusion's path against strict rules: "
@@ -786,6 +827,30 @@ def explain_error(label: str, detail: str, status_code: int = 0) -> dict:
         "severity": "error",
         "raw":      raw,
     }
+
+
+# Characters S1's exclusion validator treats as "non-printable" and
+# rejects with `Invalid value <x> contains non-printable characters`.
+# Source consoles sometimes accumulate these (LTR/RTL marks, zero-width
+# joiners, BOMs, etc.) when paths get copy-pasted from rich-text. We
+# scrub them on restore so the destination's stricter validator accepts.
+_NON_PRINTABLE_RE = _re.compile(
+    "[\u0000-\u0008\u000B-\u001F\u007F"   # C0/DEL control chars
+    "\u00AD"                              # soft hyphen
+    "\u200B-\u200F"                       # zero-width + LTR/RTL marks
+    "\u202A-\u202E"                       # bidi embeddings/overrides
+    "\u2060-\u206F"                       # word-joiner / invisible ops
+    "\uFEFF"                              # BOM / zero-width no-break
+    "]")
+
+
+def _strip_non_printable(s):
+    """Return `s` with invisible Unicode control marks removed. The
+    backup format keeps strings as-is, but S1's exclusion validator
+    rejects any value containing LTR/RTL/BOM/zero-width characters."""
+    if not isinstance(s, str):
+        return s
+    return _NON_PRINTABLE_RE.sub("", s)
 
 
 # Whitelists for specific element types that are strict about accepted fields
@@ -3357,7 +3422,16 @@ class RestorePage(ctk.CTkFrame):
                 for etype, items in data["exclusions"].items():
                     for item in (items or []):
                         try:
-                            api.create_exclusion(scope, _whitelist(item, _EXCL_FIELDS))
+                            payload = _whitelist(item, _EXCL_FIELDS)
+                            # Scrub invisible bidi/zero-width chars that
+                            # the destination validator rejects. Apply
+                            # to free-text fields only — the type-enum
+                            # fields are already controlled.
+                            for f in ("value", "description"):
+                                if isinstance(payload.get(f), str):
+                                    payload[f] = _strip_non_printable(
+                                        payload[f])
+                            api.create_exclusion(scope, payload)
                             e_ok += 1
                         except Exception as exc:
                             if _is_exists_error(exc):
@@ -3403,14 +3477,15 @@ class RestorePage(ctk.CTkFrame):
                 new_fw_ids = []
                 fw_ok = fw_skip = fw_fail = 0
                 fw_last_err = ""
+                fw_loc_stripped = 0
                 for rule in sorted_fw:
+                    cleaned = _whitelist(rule, _FW_RULE_FIELDS)
+                    # avoid conflict: use os_types if present, drop osType
+                    if "os_types" in cleaned and "osType" in cleaned:
+                        del cleaned["osType"]
+                    if "osTypes" in cleaned and "osType" in cleaned:
+                        del cleaned["osType"]
                     try:
-                        cleaned = _whitelist(rule, _FW_RULE_FIELDS)
-                        # avoid conflict: use os_types if present, drop osType
-                        if "os_types" in cleaned and "osType" in cleaned:
-                            del cleaned["osType"]
-                        if "osTypes" in cleaned and "osType" in cleaned:
-                            del cleaned["osType"]
                         resp = api.create_firewall_rule(scope, cleaned)
                         new_id = (resp.get("data", {}).get("id")
                                   if isinstance(resp, dict) else None)
@@ -3420,15 +3495,49 @@ class RestorePage(ctk.CTkFrame):
                     except Exception as exc:
                         if _is_exists_error(exc):
                             fw_skip += 1
-                        else:
-                            fw_fail += 1
-                            full_err = _err_detail(exc)
-                            fw_last_err = full_err[:80]
-                            failed_items.append({
-                                "element": "fw-rule",
-                                "name": rule.get("name", "?")[:80],
-                                "error": full_err[:500],
-                            })
+                            continue
+                        # Cross-console location IDs never match. When
+                        # S1 says `Invalid locations for this scope`,
+                        # drop the location binding and retry once so
+                        # the rule lands as a location-agnostic rule.
+                        err_low = _err_detail(exc).lower()
+                        had_locations = any(
+                            cleaned.get(k) for k in
+                            ("locationIds", "location_ids",
+                             "location", "locationType",
+                             "location_type"))
+                        if "invalid locations" in err_low and had_locations:
+                            for k in ("locationIds", "location_ids",
+                                      "location", "locationType",
+                                      "location_type"):
+                                cleaned.pop(k, None)
+                            try:
+                                resp = api.create_firewall_rule(
+                                    scope, cleaned)
+                                new_id = (resp.get("data", {}).get("id")
+                                          if isinstance(resp, dict)
+                                          else None)
+                                if new_id:
+                                    new_fw_ids.append(new_id)
+                                fw_ok += 1
+                                fw_loc_stripped += 1
+                                continue
+                            except Exception as exc2:
+                                exc = exc2  # fall through to fail branch
+                        fw_fail += 1
+                        full_err = _err_detail(exc)
+                        fw_last_err = full_err[:80]
+                        failed_items.append({
+                            "element": "fw-rule",
+                            "name": rule.get("name", "?")[:80],
+                            "error": full_err[:500],
+                        })
+                if fw_loc_stripped:
+                    self._operation_log.append(
+                        f"    ⚠ fw-rules: {fw_loc_stripped} rule(s) "
+                        f"created without their original location "
+                        f"binding (source location IDs don't exist on "
+                        f"this destination — re-attach manually).")
                 parts = []
                 if fw_ok: parts.append(f"{fw_ok} new")
                 if fw_skip: parts.append(f"{fw_skip} exist")
@@ -4404,7 +4513,7 @@ class RestorePage(ctk.CTkFrame):
             f"Destination console: {meta.get('dest_url', '?')}",
             f"Started:             {meta.get('start_time', '?')}",
             f"Finished:            {meta.get('end_time', '?')}",
-            f"Tool version:        v1.3.0",
+            f"Tool version:        v1.3.1",
             "",
             f"{sum(len(g['items']) for g in groups.values())} item(s) "
             f"failed across {len(groups)} error type(s):",
