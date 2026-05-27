@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.3 — 2026-05-28
+
+### Packaging
+- **Windows full installer** — Releases now ship `S1-Command-Center-Windows-Setup.exe` alongside the portable ZIP. The installer (built with Inno Setup 6) installs to `Program Files\S1 Command Center`, creates Start Menu and optional desktop shortcuts, and registers a proper uninstaller in *Add or Remove Programs*. The portable ZIP remains available for users who can't run installers.
+
 ## v1.3.2 — 2026-05-28
 
 ### Bug Fixes

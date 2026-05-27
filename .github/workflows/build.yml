@@ -101,11 +101,37 @@ jobs:
         run: |
           Compress-Archive -Path "dist\S1 Command Center" -DestinationPath "dist\S1-Command-Center-Windows.zip"
 
-      - name: Upload Windows artifact
+      - name: Resolve installer version
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          if ($ref -match '^v(.+)$') { $v = $Matches[1] } else { $v = "0.0.0" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Installer version: $v"
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup 6 not found at $iscc"
+          }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" "installer\windows.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Rename-Item -Path "dist\S1-Command-Center-Setup.exe" -NewName "S1-Command-Center-Windows-Setup.exe"
+
+      - name: Upload Windows ZIP artifact
         uses: actions/upload-artifact@v4
         with:
           name: S1-Command-Center-Windows
           path: dist/S1-Command-Center-Windows.zip
+
+      - name: Upload Windows Installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: S1-Command-Center-Windows-Setup
+          path: dist/S1-Command-Center-Windows-Setup.exe
 
   release:
     needs: [build-macos, build-windows]
@@ -119,10 +145,15 @@ jobs:
         with:
           name: S1-Command-Center-macOS
 
-      - name: Download Windows artifact
+      - name: Download Windows ZIP artifact
         uses: actions/download-artifact@v4
         with:
           name: S1-Command-Center-Windows
+
+      - name: Download Windows Installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: S1-Command-Center-Windows-Setup
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -133,7 +164,8 @@ jobs:
 
             ### Downloads
             - **macOS**: `S1-Command-Center-macOS.dmg` — Double-click to install
-            - **Windows**: `S1-Command-Center-Windows.zip` — Extract and run `S1 Command Center.exe`
+            - **Windows (installer, recommended)**: `S1-Command-Center-Windows-Setup.exe` — Full installer; installs to `Program Files`, creates Start Menu + optional desktop shortcuts, and registers an uninstaller in *Add or Remove Programs*.
+            - **Windows (portable ZIP)**: `S1-Command-Center-Windows.zip` — Extract anywhere and run `S1 Command Center.exe`. No install, no Start Menu entry.
 
             ### Requirements
             - No Python installation needed — fully standalone
@@ -142,3 +174,4 @@ jobs:
           files: |
             S1-Command-Center-macOS.dmg
             S1-Command-Center-Windows.zip
+            S1-Command-Center-Windows-Setup.exe

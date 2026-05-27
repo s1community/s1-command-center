@@ -293,6 +293,10 @@ Contributions are welcome! Please:
 
 ## Changelog
 
+### v1.3.3 — 2026-05-28
+#### Packaging
+- **Windows full installer** — Releases now ship `S1-Command-Center-Windows-Setup.exe` (built with Inno Setup 6) alongside the portable ZIP. Installs to `Program Files\S1 Command Center`, creates Start Menu + optional desktop shortcuts, and registers a proper uninstaller in *Add or Remove Programs*.
+
 ### v1.3.2 — 2026-05-28
 #### Bug Fixes
 - **Windows EDR false-positive on export** — Auto-opening exported reports via `os.startfile()` (Windows) / `subprocess.Popen(["open"|"xdg-open", ...])` (macOS/Linux) was tripping behavioral-detection thresholds in some endpoint agents (including S1 itself), causing the app to be quarantined immediately after the first export. Export now writes the file and logs its full path to the OUTPUT console instead of spawning a child process. Open exported files manually from the logged path.
