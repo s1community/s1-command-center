@@ -250,13 +250,7 @@ def export_report(title: str, columns: list[str], rows: list[dict],
 
         cli_log(f"Exported {len(rows)} records → {os.path.basename(path)}",
                 "success")
-        import subprocess, sys
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        elif sys.platform == "win32":
-            os.startfile(path)
-        else:
-            subprocess.Popen(["xdg-open", path])
+        cli_log(f"File saved to: {path}", "info")
     except Exception as e:
         cli_log(f"Export error: {e}", "error")
         messagebox.showerror("Export Error", str(e))

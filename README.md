@@ -293,6 +293,13 @@ Contributions are welcome! Please:
 
 ## Changelog
 
+### v1.3.2 — 2026-05-28
+#### Bug Fixes
+- **Windows EDR false-positive on export** — Auto-opening exported reports via `os.startfile()` (Windows) / `subprocess.Popen(["open"|"xdg-open", ...])` (macOS/Linux) was tripping behavioral-detection thresholds in some endpoint agents (including S1 itself), causing the app to be quarantined immediately after the first export. Export now writes the file and logs its full path to the OUTPUT console instead of spawning a child process. Open exported files manually from the logged path.
+
+#### Dependencies
+- Bumped `customtkinter` (>= 5.2.2), `requests` (>= 2.32.3), `openpyxl` (>= 3.1.5), `Pillow` (>= 11.0.0).
+
 ### v1.3.1 — 2026-05-23
 #### Bug Fixes
 - **Exclusion paths with invisible Unicode characters** — Restore now scrubs U+200E (LTR mark), zero-width joiners, BOMs, etc. from exclusion `value`/`description` fields. Fixes destinations rejecting paths with `Invalid value <x> contains non-printable characters`.
