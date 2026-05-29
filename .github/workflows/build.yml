@@ -40,18 +40,19 @@ jobs:
             main.py
 
       - name: Stage DMG contents
-        # Mirror build_macos.sh exactly. Pull the installer script and
-        # README from installer/ in the repo so the bytes are identical
-        # whether you build locally or via CI — that preserves macOS's
-        # content-hash Gatekeeper "Open Anyway" approval across rebuilds.
+        # Drag-to-Applications layout: the user drags the .app onto the
+        # Applications symlink we ship inside the DMG. We strip the
+        # quarantine xattr from the .app first so the bytes inside the
+        # DMG are clean (macOS will re-apply quarantine on download,
+        # but at least the DMG itself isn't carrying stale xattrs that
+        # confuse Gatekeeper's content-hash "Open Anyway" memory).
         run: |
           xattr -cr "dist/S1 Command Center.app"
           DMG_STAGE="dist/dmg_stage"
           rm -rf "$DMG_STAGE"
           mkdir -p "$DMG_STAGE"
           cp -R "dist/S1 Command Center.app" "$DMG_STAGE/"
-          cp "installer/Install & Launch.command" "$DMG_STAGE/Install & Launch.command"
-          chmod +x "$DMG_STAGE/Install & Launch.command"
+          ln -s /Applications "$DMG_STAGE/Applications"
           cp "installer/README.txt" "$DMG_STAGE/README.txt"
 
       - name: Create DMG

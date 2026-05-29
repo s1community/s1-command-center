@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.5 — 2026-05-29
+
+### Packaging (macOS)
+- **Dropped the `Install & Launch.command` script** — In macOS Sequoia (15.x) Apple removed the right-click → Open Gatekeeper bypass for unsigned shell scripts, so the very script that was meant to *work around* Gatekeeper was itself being blocked by Gatekeeper ("Apple could not verify Install & Launch.command"). The DMG now uses the canonical drag-to-Applications layout: `S1 Command Center.app` sits next to an `Applications` symlink. Users drag the app across, then unblock on first launch via *System Settings → Privacy & Security → Open Anyway* (one time, then macOS remembers). Removes one Gatekeeper prompt from the install flow entirely.
+- **DMG `README.txt` rewritten** with explicit Sequoia / Sonoma / Ventura bypass steps and a Terminal `xattr -cr` fallback for stubborn cases.
+
 ## v1.3.4 — 2026-05-29
 
 ### UI
