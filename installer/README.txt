@@ -19,29 +19,37 @@ again.
 If macOS says "Apple could not verify…":
 
   macOS Sonoma (14) / Sequoia (15) and newer:
-    → Click "Done" on the warning.
-    → Open System Settings → Privacy & Security.
-    → Scroll to the bottom — you'll see
-      "S1 Command Center was blocked…".
-    → Click "Open Anyway".
-    → Enter your password / Touch ID.
-    → The app launches and is permanently
-      whitelisted on this Mac.
+    1. Click "Done" on the warning.
+    2. Open System Settings → Privacy & Security.
+       (Tip: type "Privacy & Security" into
+        Spotlight, or paste this into Terminal:
+            open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+       )
+    3. Scroll to the bottom of that pane —
+       you'll see "S1 Command Center was
+       blocked…".
+    4. Click "Open Anyway".
+    5. Enter your password / Touch ID.
+    6. The app launches and is permanently
+       whitelisted on this Mac.
 
   macOS Ventura (13) and older:
     → Right-click "S1 Command Center.app" in
       /Applications and choose "Open".
     → Click "Open" on the warning dialog.
 
-TROUBLESHOOTING
-  If the app still refuses to launch, open
-  Terminal and run:
+FASTEST PATH (one Terminal command)
+  Skip the Settings dance entirely. Drag the
+  app to /Applications, then open Terminal
+  (Spotlight → "Terminal") and paste:
 
       xattr -cr "/Applications/S1 Command Center.app"
 
-  Then open the app normally. This strips the
-  quarantine flag that macOS attaches to every
-  file downloaded from the internet.
+  Then double-click the app normally. That one
+  command strips the quarantine flag macOS
+  attaches to anything downloaded from the
+  internet, which is what Gatekeeper checks
+  against on first launch.
 
 ────────────────────────────────────────────
 Source & support:
