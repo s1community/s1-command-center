@@ -338,6 +338,10 @@ Contributions are welcome! Please:
 
 ## Changelog
 
+### v1.3.7 — 2026-05-29
+#### Documentation (macOS)
+- **DMG `README.txt` and GitHub release notes now lead with the one-liner installer**, instead of "double-click the DMG to install" which sent users straight into the Gatekeeper trap. The drag-to-Applications flow stays as the fallback below.
+
 ### v1.3.6 — 2026-05-29
 #### Packaging (macOS)
 - **One-line installer** — New recommended install path: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"`. Downloads the latest DMG, copies to `/Applications`, strips `com.apple.quarantine`, launches. **Zero Gatekeeper prompts** because Terminal-invoked scripts bypass Gatekeeper, and the quarantine flag is cleared before any `open` call. Supports `S1CC_VERSION=vX.Y.Z` (pin) and `S1CC_NO_LAUNCH=1` (don't auto-launch).

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.7 — 2026-05-29
+
+### Documentation (macOS)
+- **DMG `README.txt` leads with the one-liner installer.** v1.3.6 introduced the one-line Terminal installer but only mentioned it in the repo `README.md`, so users who downloaded the DMG had no idea it existed and were still doing the drag-to-Applications + Gatekeeper-bypass dance. The DMG README now leads with "FASTEST INSTALL" featuring the curl-pipe-bash command, framed as the recommended path. The drag-to-Applications flow is preserved underneath as a fallback.
+- **GitHub release notes** now lead with the one-liner installer at the very top of every release page, instead of "`.dmg` — Double-click to install" (which led users straight into the Gatekeeper trap).
+
 ## v1.3.6 — 2026-05-29
 
 ### Packaging (macOS)
