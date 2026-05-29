@@ -4513,7 +4513,7 @@ class RestorePage(ctk.CTkFrame):
             f"Destination console: {meta.get('dest_url', '?')}",
             f"Started:             {meta.get('start_time', '?')}",
             f"Finished:            {meta.get('end_time', '?')}",
-            f"Tool version:        v1.3.3",
+            f"Tool version:        v1.3.4",
             "",
             f"{sum(len(g['items']) for g in groups.values())} item(s) "
             f"failed across {len(groups)} error type(s):",

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.4 — 2026-05-29
+
+### UI
+- **New app icon** — Replaced the legacy icon with a command-center radar scope in SentinelOne brand purple. Built from scratch (`scripts/build_icon.py`) at native resolutions for every platform target: Windows `.ico` ships 16/32/48/64/128/256, macOS `.icns` ships 16…512@2x (1024px). macOS build now consumes the native `.icns` directly instead of letting PyInstaller convert the Windows `.ico`.
+
 ## v1.3.3 — 2026-05-28
 
 ### Packaging
