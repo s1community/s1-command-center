@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>S1 Command Center — Usage Dashboard</title>
+  <link rel="icon" type="image/png"
+        href="https://raw.githubusercontent.com/s1community/s1-command-center/main/s1cc.icns" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg:           #0f0f14;
+      --bg-elev:      #181821;
+      --bg-elev-2:    #21212c;
+      --border:       #2a2a38;
+      --text:         #e8e8f0;
+      --text-dim:     #a0a0b0;
+      --text-dimmer:  #66667a;
+      --brand:        #7C3AED;
+      --brand-dim:    #5b25bd;
+      --accent-1:     #06b6d4;
+      --accent-2:     #10b981;
+      --accent-3:     #f59e0b;
+      --accent-4:     #ef4444;
+      --radius:       12px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+    }
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: var(--bg-elev-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font: 12px/1.4 "SF Mono", Menlo, monospace;
+      color: #e0e0ff;
+    }
+
+    /* ─── layout ─── */
+    .container {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 32px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .brand-logo {
+      width: 48px; height: 48px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-dim));
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; font-weight: 800;
+      color: white;
+      box-shadow: 0 4px 16px rgba(124,58,237,0.35);
+    }
+    .brand-text h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .brand-text p {
+      margin: 2px 0 0;
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+    .header-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .header-meta button {
+      background: var(--brand);
+      color: white;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .header-meta button:hover {
+      background: var(--brand-dim);
+      transform: translateY(-1px);
+    }
+    .header-meta button:disabled {
+      opacity: 0.5; cursor: not-allowed; transform: none;
+    }
+
+    /* ─── stat cards ─── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .stat {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .stat::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 3px;
+      background: var(--brand);
+    }
+    .stat.macos::before  { background: var(--accent-1); }
+    .stat.win::before    { background: var(--accent-2); }
+    .stat.latest::before { background: var(--accent-3); }
+    .stat-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+    .stat-value {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1;
+      margin-bottom: 6px;
+    }
+    .stat-sub {
+      font-size: 12px;
+      color: var(--text-dimmer);
+    }
+
+    /* ─── chart grid ─── */
+    .grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px;
+      margin-bottom: 32px;
+    }
+    @media (max-width: 880px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
+    .card h2 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.005em;
+    }
+    .card .sub {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 16px;
+    }
+    .chart-host {
+      position: relative;
+      height: 320px;
+    }
+    .chart-host.tall { height: 380px; }
+
+    /* ─── release table ─── */
+    .releases {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .releases h2 {
+      margin: 0;
+      padding: 18px 20px 6px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .releases .sub {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 0 20px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      text-align: left;
+      padding: 12px 20px;
+      font-weight: 600;
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: var(--bg-elev-2);
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    tr:last-child td { border-bottom: 0; }
+    tr:hover td { background: rgba(124,58,237,0.04); }
+    .ver {
+      font-weight: 700;
+      color: var(--brand);
+    }
+    .ver.latest::after {
+      content: 'latest';
+      font-size: 10px;
+      font-weight: 600;
+      background: var(--accent-2);
+      color: #042820;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-left: 8px;
+      vertical-align: middle;
+      letter-spacing: 0.03em;
+    }
+    .asset-list {
+      display: flex; flex-direction: column; gap: 4px;
+      font-size: 12px;
+    }
+    .asset-row {
+      display: flex; justify-content: space-between;
+      gap: 12px;
+      color: var(--text-dim);
+    }
+    .asset-row strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .dl-bar {
+      background: var(--bg);
+      height: 4px;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .dl-bar > div {
+      height: 100%;
+      background: var(--brand);
+      transition: width 0.4s ease;
+    }
+    .pill {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 10px;
+      background: var(--bg-elev-2);
+      color: var(--text-dim);
+    }
+    .pill.macos { color: var(--accent-1); background: rgba(6,182,212,0.12); }
+    .pill.win   { color: var(--accent-2); background: rgba(16,185,129,0.12); }
+
+    /* ─── empty / loading / error ─── */
+    .state {
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--text-dim);
+    }
+    .state.error { color: var(--accent-4); }
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid var(--border);
+      border-top-color: var(--brand);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 12px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── footer ─── */
+    footer {
+      margin-top: 32px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-dimmer);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <div class="brand">
+        <div class="brand-logo">S1</div>
+        <div class="brand-text">
+          <h1>S1 Command Center — Usage</h1>
+          <p>Download analytics from GitHub Releases · public data only</p>
+        </div>
+      </div>
+      <div class="header-meta">
+        <button id="refresh">↻ Refresh</button>
+        <span id="lastFetched">—</span>
+      </div>
+    </header>
+
+    <div id="content">
+      <div class="state">
+        <div class="spinner"></div>
+        Loading release data from GitHub…
+      </div>
+    </div>
+
+    <footer>
+      <span>
+        Data: <a href="https://api.github.com/repos/s1community/s1-command-center/releases"
+                target="_blank" rel="noopener">GitHub Releases API</a>
+        (public, anonymous)
+      </span>
+      <span>
+        <a href="https://github.com/s1community/s1-command-center"
+           target="_blank" rel="noopener">github.com/s1community/s1-command-center</a>
+      </span>
+    </footer>
+  </div>
+
+<script>
+const REPO   = 's1community/s1-command-center';
+const API    = `https://api.github.com/repos/${REPO}/releases?per_page=100`;
+const CONTENT= document.getElementById('content');
+const LAST   = document.getElementById('lastFetched');
+const BTN    = document.getElementById('refresh');
+
+let charts = [];
+
+const fmt = {
+  num: n => n.toLocaleString('en-US'),
+  date: iso => new Date(iso).toLocaleDateString('en-US',
+    { year: 'numeric', month: 'short', day: 'numeric' }),
+  dt: iso => new Date(iso).toLocaleString('en-US',
+    { year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit' }),
+  bytes: b => {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b/1024).toFixed(0) + ' KB';
+    return (b/1048576).toFixed(1) + ' MB';
+  },
+};
+
+function classify(assetName) {
+  const n = assetName.toLowerCase();
+  if (n.endsWith('.dmg'))               return { plat: 'macOS',   key: 'macos' };
+  if (n.includes('setup') && n.endsWith('.exe'))
+                                         return { plat: 'Windows installer', key: 'win-exe' };
+  if (n.endsWith('.zip'))               return { plat: 'Windows ZIP', key: 'win-zip' };
+  if (n.endsWith('.exe'))               return { plat: 'Windows',  key: 'win-exe' };
+  return { plat: 'Other', key: 'other' };
+}
+
+function destroyCharts() {
+  charts.forEach(c => c.destroy());
+  charts = [];
+}
+
+async function load() {
+  BTN.disabled = true;
+  CONTENT.innerHTML = `<div class="state">
+      <div class="spinner"></div>
+      Loading release data from GitHub…
+    </div>`;
+
+  try {
+    const r = await fetch(API, {
+      headers: { 'Accept': 'application/vnd.github+json' },
+      cache: 'no-store',
+    });
+    if (!r.ok) throw new Error(`GitHub API ${r.status}: ${await r.text()}`);
+    const releases = (await r.json())
+      .filter(rel => !rel.draft)
+      .sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+    if (!releases.length) {
+      CONTENT.innerHTML = `<div class="state">No published releases found.</div>`;
+      return;
+    }
+    render(releases);
+    LAST.textContent = 'updated ' + fmt.dt(new Date());
+  } catch (e) {
+    CONTENT.innerHTML = `<div class="state error">
+      <strong>Couldn't load data.</strong><br>${e.message}
+    </div>`;
+  } finally {
+    BTN.disabled = false;
+  }
+}
+
+function render(releases) {
+  destroyCharts();
+
+  // ── aggregate ──
+  let totalDl = 0;
+  let macDl = 0, winDl = 0;
+  const platformTotals = {};
+  const perRelease = [];
+
+  for (const rel of releases) {
+    let relDl = 0;
+    const perAsset = [];
+    for (const a of rel.assets) {
+      const c = classify(a.name);
+      totalDl += a.download_count;
+      relDl   += a.download_count;
+      platformTotals[c.plat] = (platformTotals[c.plat] || 0) + a.download_count;
+      if (c.key === 'macos') macDl += a.download_count;
+      else                   winDl += a.download_count;
+      perAsset.push({ name: a.name, dl: a.download_count, size: a.size, plat: c });
+    }
+    perRelease.push({
+      tag: rel.tag_name,
+      published: rel.published_at,
+      url: rel.html_url,
+      dl: relDl,
+      assets: perAsset,
+    });
+  }
+
+  const latest = perRelease[0];
+  const latestPct = totalDl ? Math.round(100 * latest.dl / totalDl) : 0;
+
+  // ── build DOM ──
+  CONTENT.innerHTML = `
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Total downloads</div>
+        <div class="stat-value">${fmt.num(totalDl)}</div>
+        <div class="stat-sub">across ${releases.length} release${releases.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="stat macos">
+        <div class="stat-label">macOS</div>
+        <div class="stat-value">${fmt.num(macDl)}</div>
+        <div class="stat-sub">${totalDl ? Math.round(100*macDl/totalDl) : 0}% of total</div>
+      </div>
+      <div class="stat win">
+        <div class="stat-label">Windows</div>
+        <div class="stat-value">${fmt.num(winDl)}</div>
+        <div class="stat-sub">${totalDl ? Math.round(100*winDl/totalDl) : 0}% of total</div>
+      </div>
+      <div class="stat latest">
+        <div class="stat-label">Latest (${latest.tag})</div>
+        <div class="stat-value">${fmt.num(latest.dl)}</div>
+        <div class="stat-sub">${latestPct}% adoption · published ${fmt.date(latest.published)}</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Downloads by version</h2>
+        <div class="sub">Total downloads per tagged release (newest on the right)</div>
+        <div class="chart-host tall"><canvas id="chVersion"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Platform split</h2>
+        <div class="sub">Share of all downloads by artifact type</div>
+        <div class="chart-host tall"><canvas id="chPlat"></canvas></div>
+      </div>
+    </div>
+
+    <div class="releases">
+      <h2>All releases</h2>
+      <div class="sub">Per-asset download breakdown, newest first</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:140px">Version</th>
+            <th style="width:120px">Published</th>
+            <th style="width:120px">Downloads</th>
+            <th>Assets</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${perRelease.map((r, i) => `
+            <tr>
+              <td>
+                <a href="${r.url}" target="_blank" rel="noopener"
+                   class="ver ${i === 0 ? 'latest' : ''}">${r.tag}</a>
+              </td>
+              <td>${fmt.date(r.published)}</td>
+              <td><strong>${fmt.num(r.dl)}</strong></td>
+              <td>
+                <div class="asset-list">
+                  ${r.assets.map(a => `
+                    <div class="asset-row">
+                      <div>
+                        <span class="pill ${a.plat.key.startsWith('mac') ? 'macos' : 'win'}">${a.plat.plat}</span>
+                        <strong style="margin-left:6px">${a.name}</strong>
+                        <span style="color:var(--text-dimmer); margin-left:6px">${fmt.bytes(a.size)}</span>
+                      </div>
+                      <div><strong>${fmt.num(a.dl)}</strong> dl</div>
+                    </div>
+                    <div class="dl-bar"><div style="width:${
+                      r.dl ? Math.max(2, 100 * a.dl / Math.max(...r.assets.map(x => x.dl), 1)) : 0
+                    }%"></div></div>
+                  `).join('')}
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  // ── charts ──
+  const chartTextColor   = 'rgba(232,232,240,0.85)';
+  const chartGridColor   = 'rgba(255,255,255,0.06)';
+  const chartTooltipBg   = '#21212c';
+
+  Chart.defaults.color = chartTextColor;
+  Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  Chart.defaults.font.size = 12;
+
+  // chart 1: downloads by version (stacked bar mac/win)
+  const versions = [...perRelease].reverse();   // oldest left → newest right
+  const labels = versions.map(v => v.tag);
+  const macSeries = versions.map(v =>
+    v.assets.filter(a => a.plat.key === 'macos').reduce((s, a) => s + a.dl, 0));
+  const winSeries = versions.map(v =>
+    v.assets.filter(a => a.plat.key !== 'macos').reduce((s, a) => s + a.dl, 0));
+
+  charts.push(new Chart(document.getElementById('chVersion'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'macOS',   data: macSeries, backgroundColor: 'rgba(6,182,212,0.85)',  borderRadius: 4 },
+        { label: 'Windows', data: winSeries, backgroundColor: 'rgba(16,185,129,0.85)', borderRadius: 4 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: chartTextColor }, position: 'bottom' },
+        tooltip: {
+          backgroundColor: chartTooltipBg, titleColor: '#fff', bodyColor: '#fff',
+          borderColor: 'rgba(124,58,237,0.4)', borderWidth: 1,
+        },
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: chartTextColor } },
+        y: { stacked: true, grid: { color: chartGridColor }, ticks: { color: chartTextColor, precision: 0 } },
+      },
+    },
+  }));
+
+  // chart 2: platform doughnut
+  const platLabels = Object.keys(platformTotals);
+  const platValues = platLabels.map(k => platformTotals[k]);
+  const platColors = ['rgba(6,182,212,0.85)','rgba(16,185,129,0.85)','rgba(245,158,11,0.85)','rgba(239,68,68,0.85)'];
+
+  charts.push(new Chart(document.getElementById('chPlat'), {
+    type: 'doughnut',
+    data: {
+      labels: platLabels,
+      datasets: [{
+        data: platValues,
+        backgroundColor: platColors.slice(0, platLabels.length),
+        borderColor: '#181821', borderWidth: 3,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: { labels: { color: chartTextColor }, position: 'bottom' },
+        tooltip: {
+          backgroundColor: chartTooltipBg, titleColor: '#fff', bodyColor: '#fff',
+          callbacks: {
+            label: ctx => {
+              const t = ctx.dataset.data.reduce((a,b)=>a+b,0);
+              const p = t ? Math.round(100 * ctx.parsed / t) : 0;
+              return ` ${ctx.label}: ${fmt.num(ctx.parsed)} (${p}%)`;
+            },
+          },
+        },
+      },
+    },
+  }));
+}
+
+BTN.addEventListener('click', load);
+load();
+// auto-refresh every 5 minutes
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

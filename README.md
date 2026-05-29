@@ -336,7 +336,19 @@ Contributions are welcome! Please:
 4. Push to the branch (`git push origin feature/my-feature`)
 5. Open a Pull Request
 
+## Usage Dashboard
+
+Live download analytics for every release, broken down by version and platform:
+
+**[s1community.github.io/s1-command-center](https://s1community.github.io/s1-command-center/)**
+
+Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
+
 ## Changelog
+
+### v1.3.8 — 2026-05-29
+#### Analytics
+- **Usage dashboard** — New static dashboard at [`docs/index.html`](docs/index.html) (live at [s1community.github.io/s1-command-center](https://s1community.github.io/s1-command-center/) once GitHub Pages is enabled). Reads the public GitHub Releases API and renders total downloads, macOS-vs-Windows split, per-version stacked-bar chart, platform doughnut, and a per-asset breakdown table. Auto-refreshes every 5 minutes. Zero client-side telemetry — no event collection from the app itself, just public release-download counts that GitHub already publishes.
 
 ### v1.3.7 — 2026-05-29
 #### Documentation (macOS)

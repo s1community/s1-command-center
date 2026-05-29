@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.8 — 2026-05-29
+
+### Analytics
+- **Public usage dashboard** at `docs/index.html` (live at `https://s1community.github.io/s1-command-center/` once GitHub Pages is enabled on the repo). Single static page that reads the public GitHub Releases API and renders:
+  - Total-downloads stat card, macOS vs Windows split, latest-version adoption %.
+  - Per-version stacked bar chart (macOS / Windows series).
+  - Platform-split doughnut chart.
+  - Full per-release table with per-asset download counts and size, including a horizontal bar for relative-share-within-release.
+  - Auto-refreshes every 5 minutes; manual refresh button.
+- Chosen approach: **zero client-side telemetry**. The app itself sends nothing — no event collection, no opt-in dialog, no third-party processor. The dashboard reads only what GitHub already publishes publicly (download counts on release assets), so there is no AppSec / privacy / EDR-false-positive exposure. This is the safest first step toward usage insight; a fuller Tier-2 telemetry path (Cloudflare Worker + anonymous device events) was scoped and rejected in favor of this for now.
+
 ## v1.3.7 — 2026-05-29
 
 ### Documentation (macOS)
