@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3.6 — 2026-05-29
+
+### Packaging (macOS)
+- **One-line installer** — New recommended install path for macOS:
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+  ```
+  Resolves the latest GitHub release, downloads the DMG, mounts it, copies the app to `/Applications`, strips the `com.apple.quarantine` xattr, and launches it. **Zero Gatekeeper prompts** — because Gatekeeper only enforces on Finder double-clicks (LaunchServices), not on Terminal-invoked binaries, and we strip the quarantine flag before any `open` call. Supports `S1CC_VERSION=vX.Y.Z` to pin a version and `S1CC_NO_LAUNCH=1` to skip the final auto-launch. Manual DMG install is still supported for users who prefer GUI.
+- **README install section restructured** — Featured one-line install at the top, manual DMG install below, with cross-links between the install path and the Troubleshooting section. The troubleshooting `xattr -cr` command is now called out explicitly as the fastest GUI-install fix.
+
 ## v1.3.5 — 2026-05-29
 
 ### Packaging (macOS)

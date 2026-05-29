@@ -89,11 +89,47 @@ Built with Python and CustomTkinter, it delivers a modern dark-themed UI with re
 
 ## Installation
 
-### Prerequisites
+### macOS — one-line install (recommended)
+
+Open Terminal and paste:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+```
+
+That's it. The installer downloads the latest DMG, copies the app to `/Applications`, strips the macOS quarantine flag, and launches it. **No Gatekeeper prompts, no System Settings hunting** — because the script runs entirely inside Terminal (Gatekeeper only enforces on Finder double-clicks), and the quarantine flag is cleared before the app's first launch.
+
+<details>
+<summary>Optional flags</summary>
+
+```bash
+# pin a specific version
+S1CC_VERSION=v1.3.5 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+
+# install but don't auto-launch
+S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+```
+</details>
+
+### macOS — manual DMG install
+
+1. Download the latest `S1-Command-Center-macOS.dmg` from [Releases](https://github.com/s1community/s1-command-center/releases/latest).
+2. Open the DMG, drag `S1 Command Center.app` onto the `Applications` shortcut.
+3. First launch: see [Troubleshooting → macOS](#macos--app-is-not-from-an-identified-developer) below.
+
+### Windows
+
+Download either:
+- `S1-Command-Center-Windows-Setup.exe` — full installer (Start Menu + uninstaller).
+- `S1-Command-Center-Windows.zip` — portable, unzip and run.
+
+### Run from source (any platform)
+
+#### Prerequisites
 - **Python 3.10+** (tested on 3.11, 3.12, 3.13)
 - **macOS**, **Windows**, or **Linux**
 
-### Setup
+#### Setup
 
 ```bash
 # Clone the repository
@@ -202,15 +238,24 @@ The restore process handles common issues automatically:
 
 ### macOS — "App is not from an identified developer"
 
-If macOS blocks the app on first launch, authorize it through System Preferences:
+Only applies if you installed manually from the DMG. If you used the [one-line installer](#macos--one-line-install-recommended), Gatekeeper is bypassed entirely and you'll never see this prompt.
 
-1. Click the **Apple Menu ()** in the top-left corner and select **System Settings** (or System Preferences)
-2. Navigate to **Privacy & Security**
-3. Scroll down to the **Security** section
-4. You should see a message: *"S1 Command Center" was blocked from use because it is not from an identified developer*
-5. Click **Open Anyway**
-6. Enter your Mac password or use Touch ID when prompted
-7. Click **Open** on the final confirmation pop-up
+**Fastest fix** — one Terminal command:
+
+```bash
+xattr -cr "/Applications/S1 Command Center.app"
+```
+
+Then double-click the app normally. That strips the `com.apple.quarantine` flag macOS attaches to anything downloaded from the internet, which is what Gatekeeper checks against.
+
+**GUI fix** — authorize through Settings:
+
+1. Click the **Apple Menu ()** in the top-left corner and select **System Settings** (or System Preferences).
+2. Navigate to **Privacy & Security**.
+3. Scroll to the bottom — you'll see *"S1 Command Center" was blocked from use because it is not from an identified developer*.
+4. Click **Open Anyway**.
+5. Enter your Mac password or use Touch ID when prompted.
+6. Click **Open** on the final confirmation pop-up.
 
 > After this one-time step, the app will open normally going forward.
 
@@ -292,6 +337,10 @@ Contributions are welcome! Please:
 5. Open a Pull Request
 
 ## Changelog
+
+### v1.3.6 — 2026-05-29
+#### Packaging (macOS)
+- **One-line installer** — New recommended install path: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"`. Downloads the latest DMG, copies to `/Applications`, strips `com.apple.quarantine`, launches. **Zero Gatekeeper prompts** because Terminal-invoked scripts bypass Gatekeeper, and the quarantine flag is cleared before any `open` call. Supports `S1CC_VERSION=vX.Y.Z` (pin) and `S1CC_NO_LAUNCH=1` (don't auto-launch).
 
 ### v1.3.5 — 2026-05-29
 #### Packaging (macOS)
