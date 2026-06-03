@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.4.0 — 2026-06-03
+
+### New Features
+- **Migration Validation page** — New MIGRATION tab that compares the **live source** console against the **live destination** and explains every difference in plain English.
+  - Matches accounts/sites/groups by name (rename-aware: when one account/site exists per side, source names are remapped to destination names so renamed scopes still pair up).
+  - Diffs every config element (policy, exclusions, blocklist, firewall rules/locations, device control, network quarantine, saved filters, config overrides) by count **and** by item name, using a multiset comparison so duplicate names (e.g. firewall rules) surface the exact extra/missing items.
+  - GUI shows a compact per-node summary listing the exact missing (red) and extra (yellow) item names. The HTML **Export Report** elaborates: every differing item is listed by name with a per-row "why" and "what to do".
+  - Source/Destination URLs and scope entries are shown inline and auto-filled by **Paste from Clipboard** (ticket).
+
+### Dependencies
+- Bumped `requests` (>= 2.34.2) and `Pillow` (>= 12.2.0). `customtkinter` (>= 5.2.2) and `openpyxl` (>= 3.1.5) unchanged (already latest).
+
 ## v1.3.8 — 2026-05-29
 
 ### Analytics

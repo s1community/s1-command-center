@@ -4,6 +4,7 @@ Backup, Restore, and Agent Migration pages.
 import customtkinter as ctk
 import json
 import os
+from collections import Counter
 from tkinter import filedialog, messagebox
 from datetime import datetime, timezone
 from typing import Optional
@@ -52,6 +53,7 @@ BACKUP_ELEMENTS = [
     # ── Users & Roles ──
     "roles",
     "service_users",
+    "console_users",
     # ── Other ──
     "gateways",
     "marketplace_apps",
@@ -87,6 +89,10 @@ ELEMENT_HELP = {
     "scheduled_reports": "Scheduled / saved console reports",
     "roles": "RBAC custom role definitions (account level only)",
     "service_users": "API service user accounts (account level only)",
+    "console_users": "Console (human) login users — only locally-created "
+                      "users are migrated; SSO/SCIM users auto-provision on "
+                      "login. Each created user is sent an invitation email "
+                      "by SentinelOne (account level only).",
     "gateways": "Management proxy / gateway configurations",
     "marketplace_apps": "Inventory of installed Singularity Marketplace apps "
                        "(read-only — re-install manually on destination as "
@@ -525,6 +531,53 @@ def _clean_for_restore(obj: dict) -> dict:
     return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
 
 
+def _scope_inherits_config(node: dict, cfg) -> bool:
+    """True when the SOURCE scope inherited this config (Firewall / Device
+    Control / Network Quarantine) from its parent.
+
+    Re-pushing an inherited config onto a destination scope that also
+    inherits is unnecessary AND rejected by S1 with:
+      "Cannot change firewall settings while inheriting settings from
+       parent (code 4000010)".
+    Two signals, either of which means "inherited":
+      * the source group node carries `inherits: true` (it inherits all
+        config from its parent group/site), or
+      * the config object itself names an `inheritedFrom` scope.
+    """
+    grp = node.get("group") or {}
+    if grp.get("inherits") is True:
+        return True
+    if isinstance(cfg, dict) and cfg.get("inheritedFrom"):
+        return True
+    return False
+
+
+def _clean_sso_for_restore(obj: dict) -> dict:
+    """Clean SSO settings for restore.
+
+    On top of the normal source-field stripping, this drops any key whose
+    value is `null`. The /settings/sso endpoint validates nullable fields
+    strictly: a disabled feature comes back from the source as
+    `autoProvisioning: null`, but PUTting that null back is rejected with
+    "data: autoProvisioning: Field may not be null. (code 4000010)".
+    Omitting the key entirely lets the destination keep its own default.
+    """
+    return {k: v for k, v in _clean_for_restore(obj).items() if v is not None}
+
+
+# SSO fields that are bound to the SOURCE tenant's console URL / SP identity.
+# These are generated per-tenant by SentinelOne, so copying a source value to
+# a different destination tenant makes /settings/sso return a 5xx. They are
+# stripped on a retry so the destination keeps its own SP-side values while
+# the portable IdP-side values (certificate, login URL, issuer) still apply.
+_SSO_SP_BOUND = {
+    "spEntityId", "spAcsUrl", "acsUrl", "samlAcsUrl",
+    "spMetadataUrl", "metadataUrl", "spInitiatedLoginUrl",
+    "samlSpInitiatedUrl", "redirectUrl", "consoleUrl",
+    "audience", "audienceUri", "spIssuer", "replyUrl",
+}
+
+
 # ── Error explanation knowledge base ───────────────────────────────────
 # Each entry maps a regex (matched against the lowercased error text) to a
 # structured explanation the GUI can show the operator.
@@ -645,6 +698,22 @@ _ERROR_RULES = [
         "severity": "error",
     },
     {
+        "match": _re.compile(r"field may not be null|"
+                             r"may not be null.*4000010|"
+                             r"autoprovisioning.*null"),
+        "what": "SSO setting sent a null field the destination rejects",
+        "why":  "The source tenant returned an SSO sub-setting (e.g. "
+                "`autoProvisioning`) as null because that feature was "
+                "disabled there. Older builds PUT that null straight back, "
+                "and the destination's /settings/sso validation refuses "
+                "null values (code 4000010).",
+        "fix":  "Update to S1 Command Center v1.3.9+ — the restore now "
+                "drops null-valued SSO fields so the destination keeps its "
+                "own default. No data is lost: a null field means the "
+                "feature was off on the source. Re-run the restore.",
+        "severity": "warning",
+    },
+    {
         "match": _re.compile(r"put /settings/sso.*→ 5\d\d|"
                              r"sso.*server could not process"),
         "what": "SSO configuration rejected by destination",
@@ -653,14 +722,67 @@ _ERROR_RULES = [
                 "no SSO provisioned yet, the SAML certificate is bound to "
                 "the source tenant's URL, or your token lacks the SSO "
                 "edit permission.",
-        "fix":  "1) Confirm SSO is enabled for the destination tenant.\n"
+        "fix":  "The restore already retries SSO once with the source-"
+                "tenant-bound SP fields stripped; this error means even "
+                "that was rejected.\n"
+                "1) Confirm SSO is enabled for the destination tenant.\n"
                 "2) Re-issue the SAML cert/metadata using the destination "
                 "URL.\n"
                 "3) If you don't need to migrate SSO right now, uncheck "
                 "the 'settings_sso' element and re-run.\n"
                 "4) If it still fails, copy this error and send it to "
                 "SentinelOne Support — server-side log lookup is needed.",
-        "severity": "error",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"expiration date must be within the next "
+                             r"six months"),
+        "what": "STAR rule expiration date out of range",
+        "why":  "SentinelOne requires a temporary STAR custom-detection "
+                "rule's expiration to fall within the next six months. The "
+                "source rule carried a date that is already in the past or "
+                "more than six months out, which the destination rejects "
+                "(code 4000010).",
+        "fix":  "Update to the current build — the restore now clamps any "
+                "out-of-range STAR expiration to ~5 months ahead before "
+                "creating the rule, then re-run. Adjust the date afterwards "
+                "in the console if you need a specific expiry.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"filter:\s*accountids:\s*unknown field"),
+        "what": "Config override filter rejected accountIds",
+        "why":  "The POST /config-override endpoint's scope filter does not "
+                "accept `accountIds` for account-scoped overrides (code "
+                "4000010). The scope is conveyed in the override body "
+                "instead.",
+        "fix":  "Update to the current build — the restore now retries the "
+                "override create with the rejected filter key removed, then "
+                "re-run. If it still fails, the override may need to be "
+                "recreated manually (Policy Override.create permission and "
+                "Global/Support scope are required).",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"name rename|default-site set/rename|"
+                             r"site.*rename"),
+        "what": "Default site could not be renamed",
+        "why":  "You chose to map the source site onto an existing "
+                "destination site (e.g. the auto-created 'Default site') "
+                "and have it renamed to the source site name, but the "
+                "rename PUT /sites/{id} was rejected. Common causes: the "
+                "destination already has another site with that exact name, "
+                "the token lacks 'Site Settings.edit', or the site is in a "
+                "non-editable state (expiring/deleted).",
+        "fix":  "1) Check the destination account for an existing site that "
+                "already uses the source name — rename or remove it, then "
+                "re-run.\n"
+                "2) Confirm your destination token has the Site Settings "
+                "edit permission.\n"
+                "3) The settings were still restored onto the mapped site; "
+                "only the rename failed, so you can also just rename the "
+                "site manually in the console.",
+        "severity": "warning",
     },
     {
         "match": _re.compile(r"at least one identifier must be defined"),
@@ -985,6 +1107,12 @@ def _summarize_node_payload(data: dict) -> list:
     ovrs = ((data or {}).get("config", {}) or {}).get("overrides") or []
     out.append(("config_overrides", len(ovrs),
                 [str(o.get("name", ""))[:60] for o in ovrs[:50]]))
+
+    cusers = (data or {}).get("consoleUsers") or []
+    if cusers:
+        out.append(("console_users", len(cusers),
+                    [str(u.get("email") or u.get("fullName", ""))[:60]
+                     for u in cusers[:50]]))
     return out
 
 
@@ -1117,6 +1245,145 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str) -> dict:
         except Exception:
             pass
     return data
+
+
+# ─── Migration-validation helpers ──────────────────────────────────────
+# Reused by ValidationPage to enumerate the scope tree on BOTH consoles
+# and explain, in plain English, every difference found between them.
+
+# Friendly labels for the categories produced by _summarize_node_payload.
+_CAT_LABELS = {
+    "policy": "Policy",
+    "blocklist": "Blocklist / restrictions",
+    "fw-rules": "Firewall rules",
+    "fw-locations": "Firewall locations",
+    "dc-rules": "Device-control rules",
+    "nq-rules": "Network-quarantine rules",
+    "saved_filters": "Saved filters (Deep Visibility)",
+    "config_overrides": "Config overrides",
+    "console_users": "Console users",
+}
+
+
+def _cat_label(cat: str) -> str:
+    if cat in _CAT_LABELS:
+        return _CAT_LABELS[cat]
+    if cat.startswith("excl/"):
+        return f"Exclusions · {cat.split('/', 1)[1]}"
+    return cat
+
+
+def _enumerate_tree(api, filters: dict, levels: dict) -> list:
+    """List every scope node (global/account/site/group) on a console,
+    honouring the same name filters as backup/restore. Each entry carries
+    the names of its ancestors so two consoles can be matched by NAME
+    (IDs are tenant-specific and never line up across consoles)."""
+    acct_f = (filters.get("account") or "").lower()
+    site_f = (filters.get("site") or "").lower()
+    group_f = (filters.get("group") or "").lower()
+
+    def nm(name, f):
+        return (not f) or (f in (name or "").lower())
+
+    out = []
+    if levels.get("global"):
+        out.append({"type": "global", "path": "/", "name": "global",
+                    "id": "", "account_name": "", "site_name": ""})
+    try:
+        accounts = api.get_accounts()
+    except Exception:
+        accounts = []
+    for acct in accounts:
+        aname = acct.get("name", "?")
+        aid = acct.get("id", "")
+        if not nm(aname, acct_f):
+            continue
+        if levels.get("accounts"):
+            out.append({"type": "account", "path": f"{aname}/",
+                        "name": aname, "id": aid,
+                        "account_name": aname, "site_name": ""})
+        if not (levels.get("sites") or levels.get("groups")):
+            continue
+        try:
+            sites = api.get_sites(params={
+                "accountIds": aid, "sortBy": "name", "sortOrder": "asc"})
+        except Exception:
+            sites = []
+        for site in sites:
+            sname = site.get("name", "?")
+            sid = site.get("id", "")
+            if not nm(sname, site_f):
+                continue
+            if levels.get("sites"):
+                out.append({"type": "site", "path": f"{aname}/{sname}",
+                            "name": sname, "id": sid,
+                            "account_name": aname, "site_name": sname})
+            if not levels.get("groups"):
+                continue
+            try:
+                groups = api.get_groups(params={
+                    "siteIds": sid, "sortBy": "name", "sortOrder": "asc"})
+            except Exception:
+                groups = []
+            for g in groups:
+                gname = g.get("name", "?")
+                gid = g.get("id", "")
+                if not nm(gname, group_f):
+                    continue
+                out.append({"type": "group",
+                            "path": f"{aname}/{sname}/{gname}",
+                            "name": gname, "id": gid,
+                            "account_name": aname, "site_name": sname})
+    return out
+
+
+def _explain_diff(cat: str, src: int, dst: int,
+                  missing: list, extra: list) -> tuple:
+    """Return (headline, why, fix) explaining a single element difference
+    in language a non-expert can act on."""
+    label = _cat_label(cat)
+    miss_s = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+    extra_s = ", ".join(extra[:5]) + (" …" if len(extra) > 5 else "")
+    if src and not dst:
+        return ("Nothing migrated",
+                f"The destination has NONE of the {src} {label} item(s) "
+                f"that exist on the source. They were probably excluded "
+                f"from the restore, filtered out by scope, or the restore "
+                f"of this element failed.",
+                "Re-run the Restore for this element at this scope, then "
+                "validate again.")
+    if missing and not extra:
+        return ("Missing on destination",
+                f"{len(missing)} {label} item(s) exist on the source but "
+                f"are absent on the destination: {miss_s}.",
+                "Re-run the Restore for these item(s), or confirm they were "
+                "intentionally skipped.")
+    if extra and not missing:
+        inherit_note = ""
+        if cat in ("fw-rules", "dc-rules", "nq-rules"):
+            inherit_note = (" For rules, extra items are often inherited "
+                            "from a parent scope (account/site) and are "
+                            "expected.")
+        return ("Extra on destination",
+                f"The destination has {len(extra)} {label} item(s) that the "
+                f"source does not: {extra_s}.{inherit_note}",
+                "Usually safe — these pre-existed on the destination, were "
+                "added manually, or are inherited from a parent scope. "
+                "Delete them only if the destination must mirror the source "
+                "exactly.")
+    if missing and extra:
+        return ("Items differ",
+                f"{len(missing)} item(s) missing ({miss_s}) and "
+                f"{len(extra)} extra ({extra_s}). The items may have been "
+                f"renamed during migration, or it's a mix of failed and "
+                f"pre-existing items.",
+                "Compare the names, then re-run the Restore for the missing "
+                "item(s).")
+    # Same names but different counts (rare — duplicate names).
+    return ("Count differs",
+            f"Source has {src} {label} item(s), destination has {dst}, "
+            f"but the names overlap — likely duplicate names on one side.",
+            "Open both consoles and reconcile the duplicates manually.")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1822,6 +2089,11 @@ class BackupPage(ctk.CTkFrame):
         if "service_users" in elements and scope_type == "account":
             _fetch("serviceUsers", "svc-users", api.get_service_users,
                    params={"accountIds": scope_id})
+
+        # ── Console (human) users ──
+        if "console_users" in elements and scope_type == "account":
+            _fetch("consoleUsers", "users", api.get_users,
+                   params={"accountIds": scope_id}, max_items=500)
 
         # ── Gateways ──
         if "gateways" in elements and scope_type in ("account", "site"):
@@ -2997,11 +3269,23 @@ class RestorePage(ctk.CTkFrame):
         self.ptable.clear()
         self._operation_log = []
         self._skip_make_default_ids: set = set()  # sites created as Scenario B (no default override)
+        # Maps a resolved site's backup path -> destination site id. Groups
+        # use this to find their parent site by the SAME identity that was
+        # actually resolved/created — instead of re-looking-up by source name,
+        # which breaks when the site was mapped onto (or renamed from) the
+        # destination's existing "Default site".
+        self._resolved_site_ids: dict = {}
+        # Maps a backup node path -> list of failed_item dicts raised during
+        # destination resolution (e.g. a default-site rename that the API
+        # rejected). Merged into the node's failed_items so they show up in
+        # the "Explain Errors" issues report instead of only the verbose log.
+        self._resolve_issues: dict = {}
         self._report_nodes = []   # structured per-node report data
         self._report_meta = {     # report metadata
             "source_url": "",
             "dest_url": api.base_url,
             "dest_console": target,
+            "customer": (ctx.name if ctx else target),
             "total_nodes": len(self.backup_data),
             "elements": elements,
             "filters": scope_filters,
@@ -3053,6 +3337,11 @@ class RestorePage(ctk.CTkFrame):
             self.progress.set(1)
             self.app.set_status("Restore complete")
             cli_log(f"Restore: {count} nodes in {m}m {s}s", "success")
+            if not self._cancelled:
+                try:
+                    self._show_completion_popup()
+                except Exception as _e:
+                    cli_log(f"Completion popup error: {_e}", "warning")
 
         def fail(e):
             self._timer_running = False
@@ -3063,6 +3352,152 @@ class RestorePage(ctk.CTkFrame):
             cli_log(f"Restore failed: {e}", "error")
 
         run_async(self, do, done, fail)
+
+    def _show_completion_popup(self):
+        """Show a celebratory 'Migration Completed' dialog summarising the
+        run for the destination customer. Triggered automatically when a
+        restore finishes (not cancelled)."""
+        meta = getattr(self, "_report_meta", {}) or {}
+        nodes = getattr(self, "_report_nodes", []) or []
+        total_failed = sum(len(n.get("failed_items", [])) for n in nodes)
+        error_nodes = sum(1 for n in nodes if n.get("status") == "error")
+        restored = meta.get("restored_count", 0)
+        total = meta.get("total_nodes", 0)
+        customer = (meta.get("customer") or meta.get("dest_console")
+                    or "the destination")
+        elements = meta.get("elements", []) or []
+        elapsed = meta.get("elapsed", "?")
+        clean = total_failed == 0
+
+        def _fmt_ts(iso: str) -> str:
+            if not iso:
+                return "?"
+            try:
+                return (datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                        .astimezone()
+                        .strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                return iso
+
+        win = ctk.CTkToplevel(self)
+        win.title("Migration Complete")
+        win.configure(fg_color="#1a1a2e")
+        win.resizable(False, False)
+        w, h = 560, 600
+
+        # ── Header banner ──
+        accent = GREEN if clean else WARN
+        banner = ctk.CTkFrame(win, fg_color=CARD, corner_radius=0)
+        banner.pack(fill="x")
+        ctk.CTkLabel(
+            banner,
+            text="✓  Migration Completed Successfully" if clean
+            else "✓  Migration Completed — with warnings",
+            font=("Segoe UI", 19, "bold"), text_color=accent).pack(
+            anchor="w", padx=24, pady=(18, 0))
+        ctk.CTkLabel(
+            banner, text=f"for  {customer}",
+            font=("Segoe UI", 15), text_color="white").pack(
+            anchor="w", padx=24, pady=(2, 18))
+
+        rows = [
+            ("Destination", meta.get("dest_console", "?")),
+            ("Destination URL", meta.get("dest_url", "?")),
+            ("Source", meta.get("source_url", "?") or "—"),
+            ("Nodes restored", f"{restored} of {total}"),
+            ("Elements migrated", f"{len(elements)} type(s)"),
+            ("Duration", elapsed),
+            ("Failures",
+             "None 🎉" if clean
+             else f"{total_failed} item(s) across {error_nodes} node(s)"),
+            ("Started", _fmt_ts(meta.get("start_time", ""))),
+            ("Finished", _fmt_ts(meta.get("end_time", ""))),
+        ]
+
+        # Plain-text version of the whole report for one-click copy.
+        report_text = "\n".join(
+            [f"Migration {'Completed Successfully' if clean else 'Completed — with warnings'}",
+             f"for {customer}", ""]
+            + [f"{k}: {v}" for k, v in rows]
+            + (["", "Elements: " + ", ".join(elements)] if elements else []))
+
+        # ── Buttons (packed at the bottom FIRST so they are always
+        #    visible — the expanding card below takes the remaining space) ──
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(side="bottom", fill="x", padx=20, pady=(0, 16))
+
+        copy_status = ctk.CTkLabel(btns, text="", font=("Segoe UI", 11),
+                                   text_color=GREEN)
+        copy_status.pack(side="left", padx=(2, 0))
+
+        def _copy_report():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(report_text)
+                copy_status.configure(text="Copied ✓")
+                win.after(2000, lambda: copy_status.configure(text=""))
+            except Exception as _e:
+                copy_status.configure(text=f"Copy failed: {_e}",
+                                      text_color=ACCENT)
+
+        ctk.CTkButton(
+            btns, text="Close", width=90, height=38,
+            fg_color="#555", hover_color="#666",
+            command=win.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            btns, text="📋  Copy All", width=130, height=38,
+            fg_color=GREEN, hover_color="#00a37e",
+            command=_copy_report).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            btns, text="📄  Export Log", width=130, height=38,
+            fg_color="#2980b9", hover_color="#2471a3",
+            command=self._export).pack(side="right", padx=(8, 0))
+        if total_failed:
+            ctk.CTkButton(
+                btns, text="🛟  Explain Errors", width=150, height=38,
+                fg_color="#e67e22", hover_color="#d35400",
+                command=self._show_errors_dialog).pack(
+                side="right", padx=(8, 0))
+
+        # ── Detail card (fills the space between banner and buttons) ──
+        card = ctk.CTkFrame(win, fg_color=CARD, corner_radius=12)
+        card.pack(fill="both", expand=True, padx=20, pady=(16, 8))
+        card.grid_columnconfigure(1, weight=1)
+
+        for r, (k, v) in enumerate(rows):
+            ctk.CTkLabel(card, text=k, font=("Segoe UI", 12, "bold"),
+                         text_color="#8aa0c0", anchor="w").grid(
+                row=r, column=0, sticky="w", padx=(16, 10),
+                pady=5)
+            val_color = (WARN if k == "Failures" and not clean
+                         else GREEN if k == "Failures" else "white")
+            ctk.CTkLabel(card, text=str(v), font=("Segoe UI", 12),
+                         text_color=val_color, anchor="w",
+                         wraplength=320, justify="left").grid(
+                row=r, column=1, sticky="w", pady=5)
+
+        if elements:
+            ctk.CTkLabel(
+                card, text="• " + ", ".join(elements),
+                font=("Segoe UI", 10), text_color="#777",
+                wraplength=500, justify="left").grid(
+                row=len(rows), column=0, columnspan=2,
+                sticky="w", padx=16, pady=(8, 12))
+
+        # center over the main window
+        win.update_idletasks()
+        try:
+            root = self.winfo_toplevel()
+            rx, ry = root.winfo_rootx(), root.winfo_rooty()
+            rw, rh = root.winfo_width(), root.winfo_height()
+            x = rx + max(0, (rw - w) // 2)
+            y = ry + max(0, (rh - h) // 2)
+        except Exception:
+            x = y = 100
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        win.transient(self.winfo_toplevel())
+        win.after(120, win.lift)
+        win.after(150, win.grab_set)
 
     def _run_restore(self, api, backup, elements,
                      levels=None, scope_filters=None):
@@ -3293,15 +3728,31 @@ class RestorePage(ctk.CTkFrame):
                                     f"  ✓ Set default + renamed: "
                                     f"'{sname}' (id={dest_id})")
                     except Exception as exc:
-                        detail = str(exc)[:80]
-                        log(f"  ⚠ Default override failed: {detail}")
+                        detail = str(getattr(exc, "detail", "") or exc)
+                        log(f"  ⚠ Default override failed: {detail[:80]}")
                         self._operation_log.append(
-                            f"  ⚠ Default override failed: {detail}")
+                            f"  ⚠ Default override failed: {detail[:80]}")
+                        self._resolve_issues.setdefault(npath, []).append({
+                            "element": "site-rename",
+                            "name": f"{site_obj.get('name', '?')} "
+                                    f"(default site)",
+                            "error": (f"default-site set/rename: "
+                                      f"{detail[:300]}"),
+                        })
+
+            # Remember which destination site this backup path resolved to so
+            # child groups can anchor to the SAME site even if it was mapped
+            # onto (or renamed from) the destination's existing default site.
+            if ntype == "site" and dest_id:
+                self._resolved_site_ids[npath.strip("/")] = str(dest_id)
 
             scope = _scope(ntype, dest_id or "")
             restored += 1
             results = []
             failed_items = []  # collect per-item failures for report
+            # Surface any failures raised during resolution (e.g. a default-
+            # site rename the API rejected) in the issues report.
+            failed_items.extend(self._resolve_issues.pop(npath, []))
 
             def _is_exists_error(exc):
                 """Treat duplicate-create and scope-inheritance errors as
@@ -3342,7 +3793,7 @@ class RestorePage(ctk.CTkFrame):
             def _item_id(item, label=""):
                 """Extract a human-readable identifier from an item."""
                 for key in ("name", "ruleName", "value", "s1ql",
-                            "description", "type"):
+                            "email", "fullName", "description", "type"):
                     v = item.get(key)
                     if v and isinstance(v, str):
                         return v[:80]
@@ -3410,6 +3861,44 @@ class RestorePage(ctk.CTkFrame):
                         f"    ✗ {label} last error: {last_err_msg}")
                     cli_log(f"{npath} {label}: {last_err_msg}", "error")
 
+            def _set_cfg_decoupled(setter, cfg_data):
+                """Apply a module (Firewall / Device Control / Network
+                Quarantine) configuration, auto-decoupling the scope first if
+                needed.
+
+                When the destination scope still inherits from its parent, S1
+                rejects the write with "...while inheriting settings from
+                parent (code 4000010)". This helper is only reached when the
+                SOURCE had a genuine override (the inherited-source case is
+                skipped earlier), so we retry with inheritance explicitly
+                broken to land the override. If decoupling can't be done, the
+                ORIGINAL error is re-raised so the operator still gets the
+                actionable 'decouple manually' guidance."""
+                try:
+                    return setter(scope, cfg_data)
+                except Exception as exc:
+                    msg = (str(exc) + " "
+                           + str(getattr(exc, "detail", ""))).lower()
+                    inheriting = any(w in msg for w in (
+                        "inheriting settings from parent",
+                        "while inheriting", "marking scope", "decoupled"))
+                    if not inheriting:
+                        raise
+                    for breaker in ({"inheritedFrom": None},
+                                    {"inherits": False},
+                                    {"inheritedFrom": None,
+                                     "inherits": False}):
+                        try:
+                            resp = setter(scope, {**cfg_data, **breaker})
+                            self._operation_log.append(
+                                f"    ↳ decoupled scope from parent and "
+                                f"applied source override "
+                                f"(via {'+'.join(breaker)})")
+                            return resp
+                        except Exception:
+                            continue
+                    raise exc  # decouple failed — surface the original reason
+
             # ── Policy ──
             if "policy" in elements and data.get("policy"):
                 _r("policy", api.set_policy, ntype, dest_id or "",
@@ -3468,8 +3957,15 @@ class RestorePage(ctk.CTkFrame):
             # ── Firewall ──
             fw = data.get("firewall", {})
             if "firewall_config" in elements and (fw.get("config") or data.get("firewall_config")):
-                _r("fw-cfg", api.set_firewall_config, scope,
-                   fw.get("config") or data.get("firewall_config"))
+                fw_cfg = fw.get("config") or data.get("firewall_config")
+                if ntype == "group" and _scope_inherits_config(node, fw_cfg):
+                    self._operation_log.append(
+                        "  ↻ fw-config skipped at group scope — source group "
+                        "inherits from parent (destination already inherits)")
+                    results.append(("fw-cfg", "inherited"))
+                else:
+                    _r("fw-cfg", _set_cfg_decoupled,
+                       api.set_firewall_config, fw_cfg)
             fw_r = fw.get("rules") or data.get("firewall_rules") or []
             if "firewall_rules" in elements and fw_r:
                 sorted_fw = sorted(fw_r,
@@ -3557,7 +4053,14 @@ class RestorePage(ctk.CTkFrame):
             # ── NQ ──
             nq = data.get("networkQuarantine", {})
             if "nq_config" in elements and nq.get("config"):
-                _r("nq-cfg", api.set_nq_config, scope, nq["config"])
+                if ntype == "group" and _scope_inherits_config(node, nq["config"]):
+                    self._operation_log.append(
+                        "  ↻ nq-config skipped at group scope — source group "
+                        "inherits from parent (destination already inherits)")
+                    results.append(("nq-cfg", "inherited"))
+                else:
+                    _r("nq-cfg", _set_cfg_decoupled,
+                       api.set_nq_config, nq["config"])
             if "nq_rules" in elements and nq.get("rules"):
                 _r_bulk("nq-rules", nq["rules"],
                         lambda rule: api.create_nq_rule(scope, _clean_for_restore(rule)))
@@ -3565,8 +4068,15 @@ class RestorePage(ctk.CTkFrame):
             # ── Device Control ──
             dc = data.get("deviceControl", {})
             if "device_control_config" in elements and (dc.get("config") or data.get("device_control_config")):
-                _r("dc-cfg", api.set_device_control_config, scope,
-                   dc.get("config") or data.get("device_control_config"))
+                dc_cfg = dc.get("config") or data.get("device_control_config")
+                if ntype == "group" and _scope_inherits_config(node, dc_cfg):
+                    self._operation_log.append(
+                        "  ↻ dc-config skipped at group scope — source group "
+                        "inherits from parent (destination already inherits)")
+                    results.append(("dc-cfg", "inherited"))
+                else:
+                    _r("dc-cfg", _set_cfg_decoupled,
+                       api.set_device_control_config, dc_cfg)
             dc_r = dc.get("rules") or data.get("device_control_rules") or []
             if "device_control_rules" in elements and dc_r:
                 # Only restore rules that actually belong to this node's scope.
@@ -3635,16 +4145,23 @@ class RestorePage(ctk.CTkFrame):
             if "star_rules" in elements and star:
                 def _create_star(rule):
                     cleaned = _whitelist(rule, _STAR_RULE_FIELDS)
-                    # fix expired dates — set to 1 year from now
+                    # S1 requires a temporary STAR rule's expiration to be
+                    # WITHIN THE NEXT SIX MONTHS. Source rules routinely carry
+                    # a date that's already in the past (expired) or further
+                    # out than six months — both rejected with "Expiration
+                    # date must be within the next six months (code 4000010)".
+                    # Clamp any out-of-range date to ~5 months ahead so it
+                    # always satisfies the constraint with margin to spare.
                     if cleaned.get("expiration"):
                         try:
                             from datetime import timedelta
+                            now = datetime.now(timezone.utc)
                             exp = datetime.fromisoformat(
                                 cleaned["expiration"].replace("Z", "+00:00"))
-                            if exp < datetime.now(timezone.utc):
+                            six_months = now + timedelta(days=180)
+                            if exp <= now or exp > six_months:
                                 cleaned["expiration"] = (
-                                    datetime.now(timezone.utc) + timedelta(days=365)
-                                ).isoformat()
+                                    now + timedelta(days=150)).isoformat()
                         except Exception:
                             pass
                     api.create_star_rule(scope, cleaned)
@@ -3671,15 +4188,30 @@ class RestorePage(ctk.CTkFrame):
                     body = _clean_for_restore(o)
                     body["scope"] = ntype
                     return body
-                _r_bulk("overrides", ovr,
-                        lambda o: api.create_config_override(
-                            scope, _build_override(o)))
+
+                def _create_override(o):
+                    body = _build_override(o)
+                    try:
+                        return api.create_config_override(scope, body)
+                    except Exception as exc:
+                        msg = (str(exc) + " "
+                               + str(getattr(exc, "detail", ""))).lower()
+                        # The POST /config-override filter does not accept
+                        # `accountIds` ("filter: accountIds: Unknown field").
+                        # The scope binding already travels in `data.scope`,
+                        # so retry once with the rejected key dropped from
+                        # the filter.
+                        if "accountids" in msg and "unknown field" in msg:
+                            alt = {k: v for k, v in scope.items()
+                                   if k != "accountIds"}
+                            return api.create_config_override(alt, body)
+                        raise
+                _r_bulk("overrides", ovr, _create_override)
 
             # ── Settings ──
             stg = data.get("settings", {})
             for skey, setter in [
                 ("notifications", api.set_notification_settings),
-                ("sso", api.set_sso_settings),
                 ("smtp", api.set_smtp_settings),
                 ("syslog", api.set_syslog_settings),
                 ("activeDirectory", api.set_ad_settings),
@@ -3687,6 +4219,47 @@ class RestorePage(ctk.CTkFrame):
                 if stg.get(skey):
                     _r(f"set-{skey[:4]}", setter, scope,
                        _clean_for_restore(stg[skey]))
+
+            # ── SSO (handled separately) ──
+            # SSO is tenant-specific and the most failure-prone setting: the
+            # destination often returns a 5xx when fed the source tenant's
+            # SP/console-bound values. Try the full payload first, then retry
+            # without the source-bound SP fields so the portable IdP-side
+            # config (certificate, login URL, issuer) still lands.
+            if stg.get("sso"):
+                def _set_sso(cfg):
+                    cleaned = _clean_sso_for_restore(cfg)
+                    try:
+                        return api.set_sso_settings(scope, cleaned)
+                    except Exception:
+                        stripped = {k: v for k, v in cleaned.items()
+                                    if k not in _SSO_SP_BOUND}
+                        if stripped != cleaned:
+                            dropped = sorted(set(cleaned) & _SSO_SP_BOUND)
+                            self._operation_log.append(
+                                "    ↳ retrying SSO without source-tenant-"
+                                f"bound field(s): {', '.join(dropped)}")
+                            return api.set_sso_settings(scope, stripped)
+                        raise
+                # SSO is tenant-specific and frequently un-migratable (the
+                # destination returns a 5xx because the SAML cert/URLs are
+                # bound to the source tenant). Per operator request: try it
+                # (with the SP-field retry above), but if it still fails just
+                # SKIP it — keep the destination's own SSO config and do NOT
+                # pollute the run with an SSO failure. The destination's
+                # existing SSO is left untouched.
+                try:
+                    _set_sso(stg["sso"])
+                    results.append(("set-sso", "ok"))
+                except Exception as exc:
+                    detail = _err_detail(exc)
+                    results.append(("set-sso", "skipped"))
+                    self._operation_log.append(
+                        f"  ⊘ SSO not migrated — destination rejected it "
+                        f"({detail[:100]}). Keeping the destination's own "
+                        f"SSO config; configure SSO manually if needed.")
+                    cli_log(f"{npath} set-sso skipped (not migratable): "
+                            f"{detail[:120]}", "warning")
             if stg.get("recipients"):
                 _r("recipients", api.set_notification_recipients,
                    scope, stg["recipients"])
@@ -3779,6 +4352,69 @@ class RestorePage(ctk.CTkFrame):
                     f"  ℹ Marketplace apps to re-install manually "
                     f"({len(mkt)}): {names}{more}")
                 results.append(("mkt-apps", f"{len(mkt)} listed"))
+
+            # ── Console (human) users ──
+            # Only locally-created users can be provisioned via API. SSO/SCIM
+            # users auto-provision on first login, so re-creating them here is
+            # wrong (and the destination rejects it). Creating a user makes S1
+            # send an invitation email — the operator opted in by ticking the
+            # 'console_users' element.
+            cusers = data.get("consoleUsers") or []
+            if "console_users" in elements and cusers and ntype == "account":
+                acct_id = dest_id or ""
+                # Existing destination users (by email) so we skip duplicates.
+                try:
+                    existing = api.get_users(
+                        params={"accountIds": acct_id}, max_items=500)
+                    existing_emails = {
+                        (u.get("email") or "").strip().lower()
+                        for u in existing}
+                except Exception:
+                    existing_emails = set()
+                # Destination roles by name → id, for role remapping (role IDs
+                # never match across consoles, but built-in names do).
+                try:
+                    dest_roles = {
+                        (r.get("name") or "").strip().lower(): r.get("id")
+                        for r in (api.get_roles() or [])}
+                except Exception:
+                    dest_roles = {}
+
+                migratable = []
+                skipped_remote = 0
+                for u in cusers:
+                    src = str(u.get("source") or u.get("origin") or "").lower()
+                    if src and src != "local":
+                        skipped_remote += 1  # sso / scim — auto-provisioned
+                        continue
+                    email = (u.get("email") or "").strip()
+                    if not email or email.lower() in existing_emails:
+                        continue
+                    migratable.append(u)
+
+                if skipped_remote:
+                    self._operation_log.append(
+                        f"  ℹ Skipped {skipped_remote} SSO/SCIM user(s) — "
+                        f"they auto-provision on first login once SSO works")
+                if migratable:
+                    self._operation_log.append(
+                        f"  ✉ Creating {len(migratable)} console user(s) — "
+                        f"SentinelOne emails each one an invitation to log in")
+
+                    def _create_user(u):
+                        payload = {
+                            "email": (u.get("email") or "").strip(),
+                            "fullName": (u.get("fullName")
+                                         or u.get("email") or ""),
+                            "accountId": acct_id,
+                        }
+                        role_name = u.get("role")
+                        if isinstance(role_name, str) and role_name.strip():
+                            rid = dest_roles.get(role_name.strip().lower())
+                            payload["role"] = rid or role_name
+                        return api.create_user(payload)
+
+                    _r_bulk("users", migratable, _create_user)
 
             # ── Build summary and update table ──
             ok_parts = []
@@ -4070,12 +4706,44 @@ class RestorePage(ctk.CTkFrame):
                         self.after(0, _ask_map)
                         evt.wait()
                         if answer[0] is True:
-                            # YES: map onto the existing site
-                            _p(f"mapping to '{ed_name}' → id={candidate['id']}")
-                            self._operation_log.append(
-                                f"  ↻ Mapped '{sname}' → existing "
-                                f"'{ed_name}' (id={candidate['id']})")
-                            return candidate["id"]
+                            # YES: map onto the existing site AND rename it to
+                            # the source site name. The post-resolve default
+                            # block only renames when the SOURCE site is the
+                            # default, so a non-default mapping must be renamed
+                            # here — otherwise the destination keeps its old
+                            # name (e.g. stays 'Default site') even though the
+                            # dialog promised to rename it.
+                            cand_id = candidate["id"]
+                            cand_name = candidate.get("name", "")
+                            _p(f"mapping to '{ed_name}' → id={cand_id}")
+                            if sname and sname != cand_name:
+                                try:
+                                    api.update_site(cand_id, {"name": sname})
+                                    self._operation_log.append(
+                                        f"  ↻ Mapped + renamed '{cand_name}' "
+                                        f"→ '{sname}' (id={cand_id})")
+                                except Exception as exc:
+                                    detail = getattr(exc, "detail", str(exc))
+                                    self._operation_log.append(
+                                        f"  ⚠ Mapped '{sname}' onto "
+                                        f"'{cand_name}' (id={cand_id}) but "
+                                        f"RENAME FAILED: {str(detail)[:120]}")
+                                    cli_log(f"Site rename '{cand_name}' → "
+                                            f"'{sname}' failed: {detail}",
+                                            "error")
+                                    self._resolve_issues.setdefault(
+                                        npath, []).append({
+                                            "element": "site-rename",
+                                            "name": f"{cand_name} → {sname}",
+                                            "error": (f"PUT /sites/{cand_id} "
+                                                      f"name rename: "
+                                                      f"{str(detail)[:300]}"),
+                                        })
+                            else:
+                                self._operation_log.append(
+                                    f"  ↻ Mapped '{sname}' → existing "
+                                    f"'{ed_name}' (id={cand_id})")
+                            return cand_id
                         elif answer[0] is False:
                             # NO: create a new site — fall through to creation below
                             _p(f"creating '{sname}' as new site…")
@@ -4145,12 +4813,27 @@ class RestorePage(ctk.CTkFrame):
             acct_id = acct_match[0]["id"]
             _p(f"finding site '{site_name}'…")
             all_sites = api.get_sites(params={"accountIds": acct_id})
-            site_match = [s for s in all_sites if s.get("name") == site_name]
-            if not site_match:
+            # Prefer the destination site this group's parent path already
+            # resolved to during the site phase. This correctly follows a
+            # site that was mapped onto (or renamed from) the destination's
+            # existing "Default site", where a name lookup would fail.
+            parent_site_path = "/".join(path_parts[:2])
+            cached_site_id = self._resolved_site_ids.get(parent_site_path)
+            site_id = None
+            if cached_site_id and any(
+                    str(s.get("id")) == str(cached_site_id) for s in all_sites):
+                site_id = cached_site_id
+                _p(f"using parent site resolved earlier → id={site_id}")
                 self._operation_log.append(
-                    f"  Group '{gname}': parent site '{site_name}' not found")
-                return None
-            site_id = site_match[0]["id"]
+                    f"  ↳ Group '{gname}': anchored to parent site "
+                    f"'{site_name}' (id={site_id}, resolved during site phase)")
+            if site_id is None:
+                site_match = [s for s in all_sites if s.get("name") == site_name]
+                if not site_match:
+                    self._operation_log.append(
+                        f"  Group '{gname}': parent site '{site_name}' not found")
+                    return None
+                site_id = site_match[0]["id"]
 
             # ── Inspect the source group from the backup ──
             src_grp = node.get("group", {}) or {}
@@ -4513,7 +5196,7 @@ class RestorePage(ctk.CTkFrame):
             f"Destination console: {meta.get('dest_url', '?')}",
             f"Started:             {meta.get('start_time', '?')}",
             f"Finished:            {meta.get('end_time', '?')}",
-            f"Tool version:        v1.3.8",
+            f"Tool version:        v1.4.0",
             "",
             f"{sum(len(g['items']) for g in groups.values())} item(s) "
             f"failed across {len(groups)} error type(s):",
@@ -4955,6 +5638,634 @@ class RestorePage(ctk.CTkFrame):
                 "success")
         messagebox.showinfo("Report Exported",
                             f"Restore report saved to:\n{path}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Migration Validation Page
+# ═══════════════════════════════════════════════════════════════════════
+
+class ValidationPage(ctk.CTkFrame):
+    """Post-migration validation: compares every setting on the SOURCE
+    console against the DESTINATION (live ↔ live) and explains, in plain
+    English, anything that still differs. Exportable as an HTML report."""
+
+    def __init__(self, master, app, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.app = app
+        self._cancelled = False
+        self._results: list = []
+        self._meta: dict = {}
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(6, weight=1)
+
+        ctk.CTkLabel(self, text="Migration Validation",
+                     font=("Segoe UI", 22, "bold")).grid(
+            row=0, column=0, sticky="w", padx=20, pady=(20, 2))
+        ctk.CTkLabel(
+            self,
+            text="Compare every setting on the SOURCE against the "
+                 "DESTINATION to confirm nothing was missed after a "
+                 "migration. Any difference is explained in plain English.",
+            font=("Segoe UI", 13), text_color="gray").grid(
+            row=1, column=0, sticky="w", padx=20, pady=(0, 12))
+
+        # ── Controls card ──
+        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
+        card.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        card.grid_columnconfigure(0, weight=1, uniform="cols")
+        card.grid_columnconfigure(1, weight=1, uniform="cols")
+
+        # Two clearly separated panels: SOURCE (left) and DESTINATION (right)
+        def _scope_panel(col, title, tint, accent, url_attr, acct_attr,
+                         site_attr, site_ph):
+            box = ctk.CTkFrame(card, fg_color=tint, corner_radius=10)
+            box.grid(row=0, column=col, sticky="nsew",
+                     padx=(12, 6) if col == 0 else (6, 12), pady=12)
+            box.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(box, text=title, font=("Segoe UI", 14, "bold"),
+                         text_color=accent).grid(
+                row=0, column=0, columnspan=2, sticky="w",
+                padx=12, pady=(10, 6))
+
+            ctk.CTkLabel(box, text="URL", font=("Segoe UI", 11),
+                         text_color="#999").grid(
+                row=1, column=0, sticky="w", padx=(12, 8), pady=4)
+            url_lbl = ctk.CTkLabel(box, text="—", font=("Consolas", 12),
+                                   text_color="#ccc", anchor="w")
+            url_lbl.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
+            setattr(self, url_attr, url_lbl)
+
+            ctk.CTkLabel(box, text="Account", font=("Segoe UI", 11),
+                         text_color="#999").grid(
+                row=2, column=0, sticky="w", padx=(12, 8), pady=4)
+            acct_e = ctk.CTkEntry(box, placeholder_text="(blank = all)",
+                                  height=32)
+            acct_e.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=4)
+            setattr(self, acct_attr, acct_e)
+
+            ctk.CTkLabel(box, text="Site", font=("Segoe UI", 11),
+                         text_color="#999").grid(
+                row=3, column=0, sticky="w", padx=(12, 8), pady=(4, 12))
+            site_e = ctk.CTkEntry(box, placeholder_text=site_ph, height=32)
+            site_e.grid(row=3, column=1, sticky="ew", padx=(0, 12),
+                        pady=(4, 12))
+            setattr(self, site_attr, site_e)
+
+        _scope_panel(0, "📤  SOURCE", "#16241c", GREEN,
+                     "_src_url_lbl", "_src_acct", "_src_site",
+                     "(blank = all)")
+        _scope_panel(1, "📥  DESTINATION", "#2a141b", ACCENT,
+                     "_dst_url_lbl", "_dst_acct", "_dst_site",
+                     "(blank = same as source)")
+        # Dest account placeholder hint (created above with generic text)
+        self._dst_acct.configure(placeholder_text="(blank = same as source)")
+
+        # Shared row: levels + group filter
+        shared = ctk.CTkFrame(card, fg_color="transparent")
+        shared.grid(row=1, column=0, columnspan=2, sticky="ew",
+                    padx=12, pady=(0, 12))
+        shared.grid_columnconfigure(3, weight=1)
+        ctk.CTkLabel(shared, text="Compare levels:",
+                     font=("Segoe UI", 13, "bold"), text_color="#8aa0c0").grid(
+            row=0, column=0, padx=(0, 8), sticky="w")
+        lv_inner = ctk.CTkFrame(shared, fg_color="transparent")
+        lv_inner.grid(row=0, column=1, sticky="w")
+        self._level_vars = {}
+        for lv, default in [("accounts", True), ("sites", True),
+                            ("groups", True)]:
+            v = ctk.BooleanVar(value=default)
+            self._level_vars[lv] = v
+            ctk.CTkCheckBox(lv_inner, text=lv.capitalize(), variable=v,
+                            font=("Segoe UI", 12)).pack(
+                side="left", padx=(0, 12))
+        ctk.CTkLabel(shared, text="Group filter:", font=("Segoe UI", 13),
+                     text_color="#8aa0c0").grid(
+            row=0, column=2, padx=(20, 8), sticky="e")
+        self._group_f = ctk.CTkEntry(shared, placeholder_text="(blank = all)",
+                                     height=32)
+        self._group_f.grid(row=0, column=3, sticky="ew")
+
+        # ── Buttons ──
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.grid(row=3, column=0, sticky="ew", padx=20, pady=8)
+        self._run_btn = ctk.CTkButton(
+            btn_row, text="▶ Run Validation", height=38,
+            fg_color=GREEN, hover_color="#00a37e",
+            font=("Segoe UI", 14, "bold"), command=self._start)
+        self._run_btn.pack(side="left")
+        self._stop_btn = ctk.CTkButton(
+            btn_row, text="■ Stop", height=38, width=80,
+            fg_color="#c0392b", hover_color="#e74c3c", state="disabled",
+            font=("Segoe UI", 13, "bold"), command=self._stop)
+        self._stop_btn.pack(side="left", padx=6)
+        self._export_btn = ctk.CTkButton(
+            btn_row, text="📄 Export Report", height=38, width=150,
+            fg_color="#2980b9", hover_color="#2471a3", state="disabled",
+            font=("Segoe UI", 13, "bold"), command=self._export_report)
+        self._export_btn.pack(side="left", padx=6)
+        self._status_lbl = ctk.CTkLabel(btn_row, text="",
+                                        font=("Segoe UI", 12),
+                                        text_color="gray")
+        self._status_lbl.pack(side="left", padx=12)
+
+        self.progress = ctk.CTkProgressBar(self, height=8)
+        self.progress.set(0)
+        self.progress.grid(row=4, column=0, sticky="ew", padx=20,
+                           pady=(0, 4))
+
+        # ── Summary bar ──
+        self._summary = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        self._summary.grid(row=5, column=0, sticky="ew", padx=20, pady=4)
+        self._summary_lbl = ctk.CTkLabel(
+            self._summary,
+            text="Connect both consoles, choose a scope, then run a "
+                 "validation. Results appear below.",
+            font=("Segoe UI", 12), text_color="#999", anchor="w",
+            justify="left", wraplength=900)
+        self._summary_lbl.pack(fill="x", padx=14, pady=10)
+
+        # ── Results ──
+        self._results_frame = ctk.CTkScrollableFrame(
+            self, fg_color="transparent")
+        self._results_frame.grid(row=6, column=0, sticky="nsew",
+                                 padx=16, pady=(0, 12))
+
+    # ── Lifecycle ───────────────────────────────────────────────────────
+    def on_show(self):
+        """Refresh the read-only URL labels from the live connections."""
+        src = getattr(self.app.source_api, "base_url", None)
+        dst = getattr(self.app.dest_api, "base_url", None)
+        self._src_url_lbl.configure(
+            text=src or "(not connected)",
+            text_color="#ccc" if src else "#777")
+        self._dst_url_lbl.configure(
+            text=dst or "(not connected)",
+            text_color="#ccc" if dst else "#777")
+
+    # ── UI state ────────────────────────────────────────────────────────
+    def _set_running(self, running: bool):
+        self._run_btn.configure(state="disabled" if running else "normal")
+        self._stop_btn.configure(state="normal" if running else "disabled")
+        if running:
+            self._export_btn.configure(state="disabled")
+
+    def _stop(self):
+        self._cancelled = True
+        self._stop_btn.configure(state="disabled")
+        self._status_lbl.configure(text="Stopping…", text_color=WARN)
+
+    # ── Run ─────────────────────────────────────────────────────────────
+    def _start(self):
+        src = self.app.source_api
+        dst = self.app.dest_api
+        if not src or not dst:
+            messagebox.showwarning(
+                "Not connected",
+                "Connect BOTH the SOURCE and DESTINATION consoles on the "
+                "Connections page before validating.")
+            return
+        levels = {k: v.get() for k, v in self._level_vars.items()}
+        if not any(levels.values()):
+            messagebox.showwarning(
+                "No levels", "Select at least one level to compare.")
+            return
+        group = self._group_f.get().strip()
+        src_acct = self._src_acct.get().strip()
+        src_site = self._src_site.get().strip()
+        dst_acct = self._dst_acct.get().strip() or src_acct
+        dst_site = self._dst_site.get().strip() or src_site
+        src_filters = {"account": src_acct, "site": src_site, "group": group}
+        dst_filters = {"account": dst_acct, "site": dst_site, "group": group}
+        self._cancelled = False
+        self._results = []
+        self._meta = {}
+        self.progress.set(0)
+        self._set_running(True)
+        for w in self._results_frame.winfo_children():
+            w.destroy()
+        self._summary_lbl.configure(
+            text="Validation running…", text_color="#4da6ff")
+        self._status_lbl.configure(text="Starting…", text_color="gray")
+        cli_log("Starting migration validation (source vs destination)…",
+                "cmd")
+
+        def do():
+            return self._run_validation(src, dst, src_filters, dst_filters,
+                                        levels)
+
+        def done(payload):
+            self._results = payload["results"]
+            self._meta = payload["meta"]
+            self.progress.set(1)
+            self._set_running(False)
+            self._render_results()
+            n = len(self._results)
+            diffnodes = sum(1 for r in self._results
+                            if r["matched"] and r["diffs"] > 0)
+            missing = sum(1 for r in self._results if not r["matched"])
+            identical = n - diffnodes - missing
+            total_diffs = sum(r["diffs"] for r in self._results
+                              if r["matched"])
+            verdict = ("✓ Destination matches the source — nothing missing."
+                       if (diffnodes == 0 and missing == 0)
+                       else f"⚠ {total_diffs} difference(s) found across "
+                            f"{diffnodes + missing} node(s) — see below.")
+            scroll_hint = ("   ↓ scroll the list below for every node"
+                           if n > 2 else "")
+            self._summary_lbl.configure(
+                text=f"{verdict}\nCompared {n} node(s):  "
+                     f"{identical} identical  ·  {diffnodes} with differences "
+                     f"·  {missing} missing on destination.{scroll_hint}",
+                text_color=(GREEN if (diffnodes == 0 and missing == 0)
+                            else WARN))
+            self._status_lbl.configure(text="Done", text_color=GREEN)
+            self._export_btn.configure(
+                state="normal" if self._results else "disabled")
+            cli_log(f"Validation: {identical}/{n} identical, "
+                    f"{diffnodes} differ, {missing} missing.", "success")
+
+        def fail(e):
+            self._set_running(False)
+            self.progress.set(0)
+            self._status_lbl.configure(text=f"Error: {str(e)[:50]}",
+                                       text_color=ACCENT)
+            self._summary_lbl.configure(
+                text=f"Validation failed: {e}", text_color=ACCENT)
+            cli_log(f"Validation failed: {e}", "error")
+
+        run_async(self, do, done, fail)
+
+    def _run_validation(self, src_api, dst_api, src_filters, dst_filters,
+                        levels):
+        def ui(fn):
+            self.after(0, fn)
+
+        # verify both reachable
+        for api, label in [(src_api, "SOURCE"), (dst_api, "DESTINATION")]:
+            try:
+                api.get_my_user()
+            except Exception:
+                raise S1APIError(
+                    f"Cannot reach the {label} console — check its "
+                    f"connection on the Connections page.")
+
+        ui(lambda: self._status_lbl.configure(
+            text="Listing source scopes…", text_color="#4da6ff"))
+        src_nodes = _enumerate_tree(src_api, src_filters, levels)
+        ui(lambda: self._status_lbl.configure(
+            text="Listing destination scopes…"))
+        dst_nodes = _enumerate_tree(dst_api, dst_filters, levels)
+
+        def keyof(t, a, s, n):
+            return (t, (a or "").lower(), (s or "").lower(), (n or "").lower())
+
+        dst_index = {
+            keyof(n["type"], n["account_name"], n["site_name"], n["name"]):
+            n["id"] for n in dst_nodes}
+
+        # Build name remaps so renamed scopes (e.g. mangle rename during
+        # migration) still line up. When exactly one distinct account/site
+        # exists on each side, map source-name → destination-name.
+        def _remap(field):
+            sv = list(dict.fromkeys(
+                n[field] for n in src_nodes if n.get(field)))
+            dv = list(dict.fromkeys(
+                n[field] for n in dst_nodes if n.get(field)))
+            if len(sv) == 1 and len(dv) == 1 and sv[0] != dv[0]:
+                return {sv[0].lower(): dv[0]}
+            return {}
+
+        acct_remap = _remap("account_name")
+        site_remap = _remap("site_name")
+
+        def lookup(sn):
+            a = acct_remap.get((sn["account_name"] or "").lower(),
+                               sn["account_name"])
+            s = site_remap.get((sn["site_name"] or "").lower(),
+                               sn["site_name"])
+            nm = sn["name"]
+            if sn["type"] == "account":
+                nm = a
+            elif sn["type"] == "site":
+                nm = s
+            return dst_index.get(keyof(sn["type"], a, s, nm))
+
+        results = []
+        total = len(src_nodes)
+        for i, sn in enumerate(src_nodes):
+            if self._cancelled:
+                break
+            ui(lambda i=i, p=sn["path"]: (
+                self.progress.set(i / max(total, 1)),
+                self._status_lbl.configure(
+                    text=f"Comparing {i + 1}/{total}: {p}")))
+            dst_id = lookup(sn)
+            if dst_id is None:
+                results.append({"type": sn["type"], "path": sn["path"],
+                                "matched": False, "rows": [], "diffs": 0})
+                continue
+            src_data = _fetch_dest_snapshot(src_api, sn["type"], sn["id"])
+            dst_data = _fetch_dest_snapshot(dst_api, sn["type"], dst_id)
+            src_sum = _summarize_node_payload(src_data)
+            dst_sum = _summarize_node_payload(dst_data)
+            dst_by = {c: (cnt, names) for c, cnt, names in dst_sum}
+            rows = []
+            diffs = 0
+            for cat, scnt, snames in src_sum:
+                dcnt, dnames = dst_by.get(cat, (0, []))
+                if scnt == 0 and dcnt == 0:
+                    continue
+                # Multiset diff so duplicate names (e.g. firewall rules)
+                # surface the exact extra/missing items instead of a vague
+                # "count differs".
+                sc_ctr, dc_ctr = Counter(snames), Counter(dnames)
+                missing = sorted((sc_ctr - dc_ctr).elements())
+                extra = sorted((dc_ctr - sc_ctr).elements())
+                if scnt == dcnt and not missing and not extra:
+                    rows.append({"cat": cat, "src": scnt, "dst": dcnt,
+                                 "status": "match"})
+                else:
+                    what, why, fix = _explain_diff(
+                        cat, scnt, dcnt, missing, extra)
+                    rows.append({"cat": cat, "src": scnt, "dst": dcnt,
+                                 "status": "diff", "missing": missing,
+                                 "extra": extra, "what": what, "why": why,
+                                 "fix": fix})
+                    diffs += 1
+            results.append({"type": sn["type"], "path": sn["path"],
+                            "matched": True, "rows": rows, "diffs": diffs})
+
+        meta = {
+            "src_url": getattr(src_api, "base_url", "?"),
+            "dst_url": getattr(dst_api, "base_url", "?"),
+            "when": datetime.now(timezone.utc).isoformat(),
+            "levels": [k for k, v in levels.items() if v],
+            "src_filters": src_filters,
+            "dst_filters": dst_filters,
+            "cancelled": self._cancelled,
+        }
+        return {"results": results, "meta": meta}
+
+    # ── Rendering ───────────────────────────────────────────────────────
+    def _render_results(self):
+        frame = self._results_frame
+        for w in frame.winfo_children():
+            w.destroy()
+        if not self._results:
+            ctk.CTkLabel(frame, text="No nodes were compared.",
+                         text_color="#888").pack(pady=16)
+            return
+        for r in self._results:
+            card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=10)
+            card.pack(fill="x", padx=4, pady=6)
+
+            if not r["matched"]:
+                badge, color = "✗ MISSING ON DESTINATION", ACCENT
+            elif r["diffs"] == 0:
+                badge, color = "✓ Identical", GREEN
+            else:
+                badge, color = f"⚠ {r['diffs']} difference(s)", WARN
+
+            hdr = ctk.CTkFrame(card, fg_color="transparent")
+            hdr.pack(fill="x", padx=12, pady=(10, 4))
+            ctk.CTkLabel(hdr, text=f"[{r['type'].upper()}]  {r['path']}",
+                         font=("Segoe UI", 13, "bold"), anchor="w").pack(
+                side="left")
+            ctk.CTkLabel(hdr, text=badge, font=("Segoe UI", 12, "bold"),
+                         text_color=color).pack(side="right")
+
+            if not r["matched"]:
+                ctk.CTkLabel(
+                    card,
+                    text="No destination scope with this name was found. "
+                         "The account/site/group may have been renamed "
+                         "during migration, or it was never created. Names "
+                         "must match for a comparison.",
+                    font=("Segoe UI", 11), text_color="#aaa",
+                    wraplength=860, justify="left", anchor="w").pack(
+                    fill="x", padx=16, pady=(0, 10))
+                continue
+
+            diff_rows = [x for x in r["rows"] if x["status"] == "diff"]
+            match_rows = [x for x in r["rows"] if x["status"] == "match"]
+
+            if not diff_rows:
+                ctk.CTkLabel(
+                    card,
+                    text=f"All {len(match_rows)} element group(s) match "
+                         f"between source and destination.",
+                    font=("Segoe UI", 11), text_color=GREEN, anchor="w").pack(
+                    fill="x", padx=16, pady=(0, 10))
+                continue
+
+            def _names_line(label, names, color):
+                shown = ", ".join(names[:6])
+                if len(names) > 6:
+                    shown += f"  (+{len(names) - 6} more)"
+                ctk.CTkLabel(
+                    box, text=f"{label} {shown}", font=("Consolas", 11),
+                    text_color=color, anchor="w", wraplength=860,
+                    justify="left").pack(fill="x", padx=16, pady=(0, 2))
+
+            for x in diff_rows:
+                box = ctk.CTkFrame(card, fg_color="#15171c", corner_radius=8)
+                box.pack(fill="x", padx=12, pady=3)
+                ctk.CTkLabel(
+                    box,
+                    text=f"{_cat_label(x['cat'])}   {x['src']} → {x['dst']}",
+                    font=("Segoe UI", 12, "bold"), text_color=WARN,
+                    anchor="w").pack(fill="x", padx=12, pady=(6, 2))
+                if x.get("missing"):
+                    _names_line("− Missing on dest:", x["missing"], "#ff7675")
+                if x.get("extra"):
+                    _names_line("+ Extra on dest:", x["extra"], "#fdcb6e")
+                if not x.get("missing") and not x.get("extra"):
+                    ctk.CTkLabel(
+                        box, text=f"  {x['what']}", font=("Segoe UI", 11),
+                        text_color="#aaa", anchor="w").pack(
+                        fill="x", padx=16, pady=(0, 2))
+                ctk.CTkFrame(box, height=4, fg_color="transparent").pack()
+            if match_rows:
+                ctk.CTkLabel(
+                    card,
+                    text=f"✓ {len(match_rows)} other element group(s) match.",
+                    font=("Segoe UI", 11), text_color="#5fae7f",
+                    anchor="w").pack(fill="x", padx=16, pady=(2, 10))
+            ctk.CTkLabel(
+                card,
+                text="Full item names & fix steps → Export Report",
+                font=("Segoe UI", 10, "italic"), text_color="#667",
+                anchor="w").pack(fill="x", padx=16, pady=(0, 8))
+
+    # ── Export ──────────────────────────────────────────────────────────
+    def _export_report(self):
+        if not self._results:
+            cli_log("Run a validation first.", "warning")
+            return
+        from export_utils import _CSS
+
+        meta, res = self._meta, self._results
+        n = len(res)
+        diffnodes = sum(1 for r in res if r["matched"] and r["diffs"] > 0)
+        missing = sum(1 for r in res if not r["matched"])
+        identical = n - diffnodes - missing
+        total_diffs = sum(r["diffs"] for r in res if r["matched"])
+
+        stats_html = f"""<div class="stats">
+          <div class="stat-card"><div class="label">Nodes Compared</div>
+            <div class="value" style="color:#74b9ff">{n}</div></div>
+          <div class="stat-card"><div class="label">Identical</div>
+            <div class="value">{identical}</div></div>
+          <div class="stat-card"><div class="label">With Differences</div>
+            <div class="value warn">{diffnodes}</div></div>
+          <div class="stat-card"><div class="label">Missing on Dest</div>
+            <div class="value accent">{missing}</div></div>
+          <div class="stat-card"><div class="label">Total Differences</div>
+            <div class="value warn">{total_diffs}</div></div>
+        </div>"""
+
+        when = meta.get("when", "")[:19].replace("T", " ")
+        info_html = f"""<div style="background:#1a1a2e; border:1px solid #2d2d44;
+          border-radius:12px; padding:20px 28px; margin-bottom:24px;">
+          <table style="border:none; background:transparent;">
+            <tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">Source Console</td>
+                <td style="color:#e0e0e0; border:none;">{meta.get('src_url','?')}</td></tr>
+            <tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">Destination Console</td>
+                <td style="color:#e0e0e0; border:none;">{meta.get('dst_url','?')}</td></tr>
+            <tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">Generated</td>
+                <td style="color:#e0e0e0; border:none;">{when} UTC</td></tr>
+            <tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">Levels</td>
+                <td style="color:#e0e0e0; border:none;">{', '.join(meta.get('levels', [])) or '—'}</td></tr>
+            <tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">Source scope</td>
+                <td style="color:#e0e0e0; border:none;">account: {meta.get('src_filters',{}).get('account') or 'all'} &bull; site: {meta.get('src_filters',{}).get('site') or 'all'}</td></tr>
+            <tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">Destination scope</td>
+                <td style="color:#e0e0e0; border:none;">account: {meta.get('dst_filters',{}).get('account') or 'all'} &bull; site: {meta.get('dst_filters',{}).get('site') or 'all'}</td></tr>
+          </table>
+        </div>"""
+
+        # node status table
+        node_rows = ""
+        for r in res:
+            if not r["matched"]:
+                cls, txt = "badge-red", "missing on destination"
+            elif r["diffs"] == 0:
+                cls, txt = "badge-green", "identical"
+            else:
+                cls, txt = "badge-yellow", f"{r['diffs']} difference(s)"
+            node_rows += (
+                f'<tr><td style="white-space:nowrap">{r["type"].upper()}</td>'
+                f'<td>{r["path"]}</td>'
+                f'<td><span class="badge {cls}">{txt}</span></td></tr>')
+        node_table = f"""<h2 style="color:#fff; margin:28px 0 12px; font-size:18px;">
+          Node Comparison</h2>
+        <table><thead><tr><th>Type</th><th>Path</th><th>Result</th></tr></thead>
+        <tbody>{node_rows}</tbody></table>"""
+
+        # differences table
+        diff_rows_html = ""
+        for r in res:
+            if not r["matched"]:
+                diff_rows_html += (
+                    f'<tr><td style="color:#aaa">{r["path"]}</td>'
+                    f'<td><span class="badge badge-red">scope</span></td>'
+                    f'<td style="color:#888">—</td><td style="color:#888">—</td>'
+                    f'<td style="color:#e94560; font-weight:bold;">Missing on destination</td>'
+                    f'<td style="color:#ddd;">No destination scope with this '
+                    f'name was found (renamed or not created).</td>'
+                    f'<td style="color:#ddd;">Create/rename the scope, then '
+                    f're-run the restore.</td></tr>')
+                continue
+            for x in r["rows"]:
+                if x["status"] != "diff":
+                    continue
+                # Full, explicit item lists — every missing/extra name.
+                items_html = ""
+                if x.get("missing"):
+                    lis = "".join(
+                        f'<li style="color:#ff9a9a;">{m}</li>'
+                        for m in x["missing"])
+                    items_html += (
+                        f'<div style="margin-bottom:6px;"><span '
+                        f'style="color:#e94560; font-weight:bold;">✗ Missing '
+                        f'on destination ({len(x["missing"])}):</span>'
+                        f'<ul style="margin:4px 0 0 18px; padding:0;">'
+                        f'{lis}</ul></div>')
+                if x.get("extra"):
+                    lis = "".join(
+                        f'<li style="color:#ffe08a;">{e}</li>'
+                        for e in x["extra"])
+                    items_html += (
+                        f'<div><span style="color:#fdcb6e; font-weight:bold;">'
+                        f'＋ Extra on destination ({len(x["extra"])}):</span>'
+                        f'<ul style="margin:4px 0 0 18px; padding:0;">'
+                        f'{lis}</ul></div>')
+                if not items_html:
+                    items_html = '<span style="color:#888;">—</span>'
+                diff_rows_html += (
+                    f'<tr><td style="color:#aaa; vertical-align:top;">{r["path"]}</td>'
+                    f'<td style="vertical-align:top;"><span class="badge badge-yellow">{_cat_label(x["cat"])}</span></td>'
+                    f'<td style="text-align:center; vertical-align:top;">{x["src"]}</td>'
+                    f'<td style="text-align:center; vertical-align:top;">{x["dst"]}</td>'
+                    f'<td style="vertical-align:top; white-space:normal;">{items_html}</td>'
+                    f'<td style="color:#ddd; white-space:normal; vertical-align:top;">{x["why"]}</td>'
+                    f'<td style="color:#ddd; white-space:normal; vertical-align:top;">{x["fix"]}</td>'
+                    f'</tr>')
+        if not diff_rows_html:
+            diff_section = """<h2 style="color:#00b894; margin:28px 0 12px;
+              font-size:18px;">✓ No differences found</h2>
+            <p style="color:#888;">The destination matches the source across
+            every compared element. Nothing was missed.</p>"""
+        else:
+            diff_section = f"""<h2 style="color:#fdcb6e; margin:28px 0 12px;
+              font-size:18px;">Differences &amp; What To Do ({total_diffs + missing})</h2>
+            <p style="color:#888; font-size:13px; margin-bottom:12px;">
+              Every differing item is listed by name below. Red = present on
+              the source but missing on the destination; yellow = present on
+              the destination but not the source.</p>
+            <table><thead><tr>
+              <th>Node Path</th><th>Element</th><th>Src</th><th>Dst</th>
+              <th style="min-width:260px;">Item names (missing / extra)</th>
+              <th>Why</th><th>What to do</th>
+            </tr></thead><tbody>{diff_rows_html}</tbody></table>"""
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        html = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Migration Validation Report — S1 Command Center</title>
+<style>{_CSS}</style></head><body>
+<div class="header">
+  <h1>✅ Migration Validation Report</h1>
+  <div class="subtitle">S1 Command Center — Source vs Destination comparison</div>
+  <div class="meta">Generated {now} &bull; {n} nodes compared
+    &bull; {identical} identical &bull; {diffnodes + missing} with issues</div>
+</div>
+{stats_html}
+{info_html}
+{node_table}
+{diff_section}
+<div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
+</body></html>"""
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        path = filedialog.asksaveasfilename(
+            title="Export Validation Report",
+            initialfile=f"s1-validation-report-{ts}",
+            defaultextension=".html",
+            filetypes=[("HTML Report", "*.html"), ("JSON Data", "*.json")])
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".json":
+            with open(path, "w") as f:
+                json.dump({"meta": meta, "results": res}, f, indent=2,
+                          default=str)
+        else:
+            with open(path, "w") as f:
+                f.write(html)
+        cli_log(f"Validation report exported → {os.path.basename(path)}",
+                "success")
+        messagebox.showinfo("Report Exported",
+                            f"Validation report saved to:\n{path}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

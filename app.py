@@ -511,6 +511,25 @@ class ConnectionsPage(ctk.CTkFrame):
             cli_log(f"Pasted Restore filters: account={tgt_acct}, "
                     f"mangle={src_acct}→{tgt_acct}", "info")
 
+        # Fill Migration Validation page (source + destination entries)
+        val_page = self.app.pages.get("Migration Validation")
+        if val_page:
+            if src_acct:
+                self._set_entry(val_page._src_acct, src_acct)
+            if src_site and src_site.lower() != "all sites":
+                self._set_entry(val_page._src_site, src_site)
+            if tgt_acct:
+                self._set_entry(val_page._dst_acct, tgt_acct)
+            if src_site and src_site.lower() != "all sites":
+                self._set_entry(val_page._dst_site, src_site)
+            if hasattr(val_page, "on_show"):
+                try:
+                    val_page.on_show()
+                except Exception:
+                    pass
+            cli_log(f"Pasted Validation filters: source={src_acct}/{src_site}, "
+                    f"dest={tgt_acct}/{src_site}", "info")
+
         if filled or src_acct or tgt_acct:
             self._paste_status.configure(text="Ticket pasted to all pages",
                                          text_color=GREEN)
@@ -676,7 +695,8 @@ class App(ctk.CTk):
         self._active_lbl.pack(fill="x", pady=(4, 0))
 
         # import pages lazily here to avoid circular issues
-        from pages import BackupPage, RestorePage, AgentMigrationPage
+        from pages import (BackupPage, RestorePage, AgentMigrationPage,
+                           ValidationPage)
         from pages_extra import (
             AccountsSitesPage, AgentsPage, ThreatsPage, UsersRolesPage,
             ActivitiesPage, DeepVisibilityPage, ExclusionsBlocklistPage,
@@ -697,6 +717,7 @@ class App(ctk.CTk):
             ("Backup Source", BackupPage),
             ("Restore to Dest", RestorePage),
             ("Agent Migration", AgentMigrationPage),
+            ("Migration Validation", ValidationPage),
         ]
         if is_admin:
             try:
@@ -729,27 +750,40 @@ class App(ctk.CTk):
             scrollbar_button_hover_color="#555")
         nav_scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
+        # Distinct, highlighted container for the MIGRATION workflow so it
+        # stands apart from the OPERATIONS tools below it.
+        mig_box = ctk.CTkFrame(nav_scroll, fg_color="#22244a",
+                               corner_radius=10)
+        mig_box.pack(fill="x", padx=8, pady=(2, 6))
+        ctk.CTkLabel(mig_box, text="MIGRATION",
+                     font=("Segoe UI", 9, "bold"),
+                     text_color="#9aa6d4").pack(
+            anchor="w", padx=12, pady=(8, 2))
+
         for i, (label, cls) in enumerate(nav):
             if i == len(nav_migration):
-                sep = ctk.CTkFrame(nav_scroll, height=1, fg_color="#444")
-                sep.pack(fill="x", padx=14, pady=6)
                 ctk.CTkLabel(nav_scroll, text="OPERATIONS",
                              font=("Segoe UI", 9, "bold"),
                              text_color="#666").pack(
-                    anchor="w", padx=14, pady=(0, 2))
-            b = ctk.CTkButton(nav_scroll, text=label, anchor="w", height=34,
+                    anchor="w", padx=14, pady=(8, 2))
+            # Migration items live inside the highlighted box; ops items go
+            # directly into the scroll frame.
+            parent = mig_box if i < len(nav_migration) else nav_scroll
+            pad = (8, 6) if i < len(nav_migration) else 10
+            b = ctk.CTkButton(parent, text=label, anchor="w", height=34,
                               font=("Segoe UI", 12), fg_color="transparent",
                               text_color="white", hover_color=SIDEBAR_HOVER,
                               corner_radius=8,
                               command=lambda l=label: self._show(l))
-            b.pack(fill="x", padx=10, pady=1)
+            bottom = 8 if i == len(nav_migration) - 1 else 1
+            b.pack(fill="x", padx=pad, pady=(1, bottom))
             self._btns.append((label, b))
 
         # credit at bottom of sidebar
         ctk.CTkLabel(sb, text="Made by Ran Jacobi",
                      font=("Segoe UI", 9), text_color="#555").pack(
             side="bottom", pady=(0, 8))
-        ctk.CTkLabel(sb, text="v1.3.8",
+        ctk.CTkLabel(sb, text="v1.4.0",
                      font=("Segoe UI", 9), text_color="#444").pack(
             side="bottom", pady=(0, 2))
 
