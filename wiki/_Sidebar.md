@@ -5,6 +5,7 @@
 - [[API Token Permissions]]
 
 ### Migration
+- [[Migration Guide]]
 - [[Connections]]
 - [[Backup]]
 - [[Restore]]

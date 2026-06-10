@@ -11,6 +11,7 @@ Built with Python and CustomTkinter — modern dark-themed UI with real-time pro
 | Page | Description |
 |------|-------------|
 | [[Installation]] | Setup guide for macOS, Windows, and Linux |
+| [[Migration Guide]] | Complete step-by-step migration procedure |
 | [[Quick Start]] | Get up and running in 5 minutes |
 | [[Connections]] | Configuring SOURCE and DESTINATION consoles |
 | [[Backup]] | Full configuration backup guide |
