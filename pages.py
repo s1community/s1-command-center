@@ -4144,7 +4144,7 @@ class RestorePage(ctk.CTkFrame):
             star = data.get("star") or data.get("star_rules") or []
             if "star_rules" in elements and star:
                 def _create_star(rule):
-                    cleaned = _whitelist(rule, _STAR_RULE_FIELDS)
+                    cleaned = _clean_for_restore(rule)
                     # S1 requires a temporary STAR rule's expiration to be
                     # WITHIN THE NEXT SIX MONTHS. Source rules routinely carry
                     # a date that's already in the past (expired) or further
@@ -5196,7 +5196,7 @@ class RestorePage(ctk.CTkFrame):
             f"Destination console: {meta.get('dest_url', '?')}",
             f"Started:             {meta.get('start_time', '?')}",
             f"Finished:            {meta.get('end_time', '?')}",
-            f"Tool version:        v1.4.0",
+            f"Tool version:        v1.4.1",
             "",
             f"{sum(len(g['items']) for g in groups.values())} item(s) "
             f"failed across {len(groups)} error type(s):",

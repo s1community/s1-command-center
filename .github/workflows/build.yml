@@ -116,6 +116,9 @@ jobs:
           echo "Using signing identity: $IDENTITY"
 
       - name: Build macOS app
+        env:
+          SOURCE_DATE_EPOCH: '1750000000'
+          PYTHONHASHSEED: '0'
         run: |
           pyinstaller \
             --name "S1 Command Center" \
@@ -237,12 +240,16 @@ jobs:
           pip install pyinstaller
 
       - name: Build Windows exe
+        env:
+          SOURCE_DATE_EPOCH: '1750000000'
+          PYTHONHASHSEED: '0'
         run: |
           pyinstaller `
             --name "S1 Command Center" `
             --windowed `
             --onedir `
             --icon s1cc.ico `
+            --version-file version_info.txt `
             --add-data "s1cc.ico;." `
             --add-data "export_utils.py;." `
             --hidden-import customtkinter `

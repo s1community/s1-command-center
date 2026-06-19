@@ -783,7 +783,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(sb, text="Made by Ran Jacobi",
                      font=("Segoe UI", 9), text_color="#555").pack(
             side="bottom", pady=(0, 8))
-        ctk.CTkLabel(sb, text="v1.4.0",
+        ctk.CTkLabel(sb, text="v1.4.1",
                      font=("Segoe UI", 9), text_color="#444").pack(
             side="bottom", pady=(0, 2))
 

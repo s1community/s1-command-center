@@ -13,6 +13,10 @@ echo "════════════════════════�
 echo "  Building ${APP_NAME} for macOS"
 echo "═══════════════════════════════════════════════════"
 
+# ── Reproducible build: same code = same hash every time ──
+export SOURCE_DATE_EPOCH=1750000000
+export PYTHONHASHSEED=0
+
 # ensure venv
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
