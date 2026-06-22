@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.5.0 — 2026-06-22
+
+### New Features
+- **⚡ Auto Restore** — New button that runs a fully automatic migration with zero prompts. Automatically creates all missing accounts, sites, and groups on the destination. No confirmation dialogs, no filters — click and walk away.
+- **↻ Resume** — New button to resume a previously stopped or failed restore from exactly where it left off. Already-completed nodes are skipped; cancelled and errored nodes are retried automatically.
+- **Auto-create accounts** — When an account doesn't exist on the destination, a custom dialog offers three choices: **Create** (this account), **Create All** (all remaining missing accounts), or **Skip** (skip this account and its children). Replaces the old system Yes/No/Cancel dialog with clear labels.
+- **Auto-create sites & groups** — Sites and groups under auto-created accounts are created automatically during migration. Parent site "not found" errors for child groups are resolved.
+- **Filter bypass for global restores** — When the Global checkbox is checked (or Auto Restore / Create All is used), account/site/group name filters are automatically bypassed. Prevents accidental filtering from leftover ticket-paste values.
+
+### UI
+- **Reorganized button layout** — Buttons are now arranged in two clear rows with color-coded groups:
+  - **Row 1**: Launch (green — Restore, Auto Restore, Resume), Control (red/orange — Stop, Skip Element), Progress bar + timer (right-aligned)
+  - **Row 2**: Results (blue — Export Log, Explain Errors), Setup (gray — Set Defaults)
+
+### Improvements
+- **Smarter license handling** — Account creation now uses only the primary bundle from the destination, stripping add-on bundles (Purple AI, Ranger, etc.) that cause "not available in your scope" errors. Retries with progressively simpler bundle configurations if the first attempt fails.
+- **Auto-mode for site conflicts** — In Auto Restore mode, default-site conflicts are auto-resolved (Scenario A: overwrite placeholder) and missing sites are auto-created without prompts.
+- **SKU fix auto-accept** — In Auto Restore mode, SKU/bundle mismatch fixes are applied automatically.
+
 ## v1.4.0 — 2026-06-03
 
 ### New Features
