@@ -1,7 +1,7 @@
 <h1 align="center">🛡️ S1 Command Center</h1>
 
 <p align="center">
-  <strong>A professional GUI tool for SentinelOne console management, backup, restore, and migration, and many more console-related actions.</strong>
+  <strong>A professional GUI tool for SentinelOne console management, backup, restore, migration, and many more console-related actions.</strong>
 </p>
 
 <p align="center">
