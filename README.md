@@ -346,6 +346,22 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v1.5.0 — 2026-06-22
+#### New Features
+- **⚡ Auto Restore** — New button that runs a fully automatic migration with zero prompts. Automatically creates all missing accounts, sites, and groups on the destination. No confirmation dialogs, no filters — click and walk away.
+- **↻ Resume** — New button to resume a previously stopped or failed restore from exactly where it left off. Already-completed nodes are skipped; cancelled and errored nodes are retried automatically.
+- **Auto-create accounts** — When an account doesn't exist on the destination, a custom dialog offers three choices: **Create** (this account), **Create All** (all remaining), or **Skip**. Replaces the old system Yes/No/Cancel dialog with clear labels.
+- **Auto-create sites & groups** — Sites and groups under auto-created accounts are created automatically during migration.
+- **Filter bypass for global restores** — When the Global checkbox is checked (or Auto Restore / Create All is used), account/site/group name filters are automatically bypassed.
+
+#### UI
+- **Reorganized button layout** — Two clear rows with color-coded groups: Launch (green — Restore, Auto Restore, Resume), Control (red/orange — Stop, Skip Element), Results (blue — Export Log, Explain Errors), Setup (gray — Set Defaults).
+
+#### Improvements
+- **Smarter license handling** — Account creation strips add-on bundles (Purple AI, Ranger, etc.) and retries with fallbacks.
+- **Auto-mode for site conflicts** — In Auto Restore mode, default-site conflicts and missing sites are resolved without prompts.
+- **SKU fix auto-accept** — In Auto Restore mode, SKU/bundle mismatch fixes are applied automatically.
+
 ### v1.4.0 — 2026-06-03
 #### New Features
 - **Migration Validation page** — New MIGRATION tab that compares the **live source** console against the **live destination** and explains every difference in plain English. Matches accounts/sites/groups by name (rename-aware), then diffs every config element (policy, exclusions, blocklist, firewall rules/locations, device control, network quarantine, saved filters, config overrides) by count **and** by item name. The GUI shows a compact per-node summary with the exact missing/extra item names; the **Export Report** (HTML) lists every differing item by name with a "why" and "what to do" for each. Source/Destination URLs and scope entries are shown inline and auto-filled by **Paste from Clipboard** (ticket).
