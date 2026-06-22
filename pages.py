@@ -698,8 +698,55 @@ _ERROR_RULES = [
         "severity": "error",
     },
     {
-        "match": _re.compile(r"field may not be null|"
-                             r"may not be null.*4000010|"
+        "match": _re.compile(
+            r"(templateruleid|treatasthre).*may not be null|star.*field may not be null",
+            _re.IGNORECASE),
+        "what": "STAR rule sent a null field the destination rejects",
+        "why":  "The source STAR custom-detection rule carried "
+                "`templateRuleId` or `treatAsThreat` as null (the rule "
+                "wasn't based on a template / didn't have a treat-as-"
+                "threat action). Older builds POST that null straight "
+                "back, and the destination's API refuses it (code "
+                "4000010).",
+        "fix":  "Update to S1 Command Center v1.4.2+ — the restore now "
+                "strips null-valued fields from STAR payloads so the "
+                "destination uses its own defaults. Re-run the restore.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(
+            r'scope.*"global".*not a valid choice|'
+            r'overrides.*tenant.*unknown field',
+            _re.IGNORECASE),
+        "what": "Config override rejected — global scope not supported",
+        "why":  "The source console had tenant-wide (global) config "
+                "overrides, but the destination console is a single-"
+                "account tenant that doesn't accept `scope=\"global\"` "
+                "or `filter.tenant`. The override needs to be re-scoped "
+                "to account level.",
+        "fix":  "Update to S1 Command Center v1.4.2+ — the restore now "
+                "auto-retries global overrides at account scope using the "
+                "destination account ID. Re-run the restore.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(
+            r"password is missing|smtp.*password",
+            _re.IGNORECASE),
+        "what": "SMTP password cannot be migrated",
+        "why":  "The S1 API never returns SMTP passwords in GET "
+                "responses (they are write-only secrets). The migrator "
+                "therefore cannot capture or replay the password, so the "
+                "destination rejects the PUT with 'Password is missing'.",
+        "fix":  "After the restore finishes, open the destination "
+                "console → Settings → SMTP → re-enter the SMTP password "
+                "manually. All other SMTP fields (host, port, sender) "
+                "were migrated successfully.",
+        "severity": "info",
+    },
+    {
+        "match": _re.compile(r"set-sso.*field may not be null|"
+                             r"sso.*may not be null.*4000010|"
                              r"autoprovisioning.*null"),
         "what": "SSO setting sent a null field the destination rejects",
         "why":  "The source tenant returned an SSO sub-setting (e.g. "
@@ -1493,6 +1540,7 @@ class BackupPage(ctk.CTkFrame):
         self._timer_start = 0.0
         self._operation_log = []
         self._cancelled = False
+        self._skip_element = False
         self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
 
     def _tick_timer(self):
@@ -2813,50 +2861,86 @@ class RestorePage(ctk.CTkFrame):
         _, self.restore_vars = _build_elements_section(
             self._restore_el_frame, row=0, title="Restore Elements")
 
-        # buttons
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.grid(row=6, column=0, sticky="ew", padx=20, pady=8)
+        # ── Row 1: Start / Control buttons ──
+        row1 = ctk.CTkFrame(self, fg_color="transparent")
+        row1.grid(row=6, column=0, sticky="ew", padx=20, pady=(8, 2))
+
+        # GROUP 1 – Launch (green tones)
         self._start_btn = ctk.CTkButton(
-            btn_row, text="▶ Restore Now", height=38,
-            fg_color=ACCENT, hover_color="#c0392b",
+            row1, text="▶  Restore", height=38, width=130,
+            fg_color="#00b894", hover_color="#00a37e",
             font=("Segoe UI", 14, "bold"),
-            command=self._start_restore)
+            command=lambda: self._start_restore(auto=False))
         self._start_btn.pack(side="left", padx=(0, 4))
+        self._auto_btn = ctk.CTkButton(
+            row1, text="⚡ Auto Restore", height=38, width=150,
+            fg_color="#00897b", hover_color="#00695c",
+            font=("Segoe UI", 14, "bold"),
+            command=lambda: self._start_restore(auto=True))
+        self._auto_btn.pack(side="left", padx=(0, 4))
+        self._resume_btn = ctk.CTkButton(
+            row1, text="↻  Resume", height=38, width=120,
+            fg_color="#555", hover_color="#777",
+            font=("Segoe UI", 14, "bold"),
+            command=self._resume_restore, state="disabled")
+        self._resume_btn.pack(side="left", padx=(0, 12))
+
+        # GROUP 2 – Runtime control (red/orange tones, disabled until running)
         self._stop_btn = ctk.CTkButton(
-            btn_row, text="■ Stop", height=38, width=80,
+            row1, text="■  Stop", height=38, width=90,
             fg_color="#c0392b", hover_color="#e74c3c",
             font=("Segoe UI", 13, "bold"),
             command=self._stop, state="disabled")
-        self._stop_btn.pack(side="left", padx=(0, 8))
+        self._stop_btn.pack(side="left", padx=(0, 4))
+        self._skip_btn = ctk.CTkButton(
+            row1, text="⏭  Skip Element", height=38, width=140,
+            fg_color="#d35400", hover_color="#e67e22",
+            font=("Segoe UI", 13, "bold"),
+            command=self._skip_current_element, state="disabled")
+        self._skip_btn.pack(side="left", padx=(0, 12))
+
+        # Progress + timer (right-aligned)
+        self._status_lbl = ctk.CTkLabel(row1, text="",
+                                         font=("Segoe UI", 12, "bold"),
+                                         text_color="#888")
+        self._status_lbl.pack(side="right", padx=(8, 0))
+        self._timer_lbl = ctk.CTkLabel(row1, text="",
+                                        font=("Consolas", 12),
+                                        text_color="#888")
+        self._timer_lbl.pack(side="right", padx=(8, 0))
+        self.progress = ctk.CTkProgressBar(row1, width=200)
+        self.progress.pack(side="right", padx=8)
+        self.progress.set(0)
+
+        # ── Row 2: Post-restore tools (blue tones) ──
+        row2 = ctk.CTkFrame(self, fg_color="transparent")
+        row2.grid(row=7, column=0, sticky="ew", padx=20, pady=(2, 4))
+
+        # GROUP 3 – Results (blue tones, enabled after restore)
         self._export_btn = ctk.CTkButton(
-            btn_row, text="Export Log", height=38,
-            fg_color="#2980b9", command=self._export, state="disabled")
+            row2, text="📋  Export Log", height=34, width=130,
+            fg_color="#2980b9", hover_color="#2471a3",
+            font=("Segoe UI", 12, "bold"),
+            command=self._export, state="disabled")
         self._export_btn.pack(side="left", padx=(0, 4))
         self._explain_btn = ctk.CTkButton(
-            btn_row, text="🛟  Explain Errors", height=38,
-            fg_color="#e67e22", hover_color="#d35400",
+            row2, text="🛟  Explain Errors", height=34, width=150,
+            fg_color="#2c3e50", hover_color="#34495e",
+            font=("Segoe UI", 12, "bold"),
             command=self._show_errors_dialog, state="disabled")
         self._explain_btn.pack(side="left", padx=(0, 4))
-        _help_btn(btn_row,
+        _help_btn(row2,
                   "After a restore, click this to see plain-English "
                   "explanations of every failure — what it means, why it "
                   "happened, what to do, and how to copy the error to send "
                   "to support."
-                  ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Set Defaults", height=38,
-                      fg_color="#8e44ad", hover_color="#9b59b6",
+                  ).pack(side="left", padx=(0, 12))
+
+        # GROUP 4 – Pre-restore tools (muted purple)
+        ctk.CTkButton(row2, text="⚙  Set Defaults", height=34, width=140,
+                      fg_color="#555", hover_color="#777",
+                      font=("Segoe UI", 12),
                       command=self._open_set_defaults).pack(side="left", padx=(0, 4))
-        self.progress = ctk.CTkProgressBar(btn_row, width=200)
-        self.progress.pack(side="left", padx=8)
-        self.progress.set(0)
-        self._timer_lbl = ctk.CTkLabel(btn_row, text="",
-                                        font=("Consolas", 12),
-                                        text_color="#888")
-        self._timer_lbl.pack(side="left", padx=(8, 0))
-        self._status_lbl = ctk.CTkLabel(btn_row, text="",
-                                         font=("Segoe UI", 12, "bold"),
-                                         text_color="#888")
-        self._status_lbl.pack(side="left", padx=(8, 0))
 
         # progress table + diff panel (resizable side by side).
         # Use a tk.PanedWindow so the user can drag the divider to give
@@ -2865,14 +2949,14 @@ class RestorePage(ctk.CTkFrame):
         # an internal canvas (its real Tk path is `…!canvas.!progresstable`,
         # not `…!progresstable`). So we add plain tk.Frame holders and
         # nest the actual widgets inside them.
-        self.grid_rowconfigure(7, weight=1)
+        self.grid_rowconfigure(8, weight=1)
         import tkinter as _tk
         split = _tk.PanedWindow(
             self, orient="horizontal",
             sashwidth=8, sashrelief="raised",
             bg=CARD, bd=0, sashpad=0,
             opaqueresize=True)
-        split.grid(row=7, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        split.grid(row=8, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
         # CRITICAL: PanedWindow doesn't constrain its children's heights —
         # without pack_propagate(False) the inner CTkScrollableFrame would
@@ -2899,6 +2983,7 @@ class RestorePage(ctk.CTkFrame):
         self._timer_start = 0.0
         self._operation_log = []
         self._cancelled = False
+        self._skip_element = False
         self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
 
     def _tick_timer(self):
@@ -3195,23 +3280,34 @@ class RestorePage(ctk.CTkFrame):
                 return None
             return api
 
+    def _skip_current_element(self):
+        self._skip_element = True
+        self._skip_btn.configure(state="disabled")
+        cli_log("Skip requested — jumping to next element…", "warning")
+
     def _stop(self):
         self._cancelled = True
         self._stop_btn.configure(state="disabled")
+        self._skip_btn.configure(state="disabled")
         self._status_lbl.configure(text="Stopping…", text_color=WARN)
         cli_log("Restore stop requested — finishing current node…", "warning")
 
     def _set_ui_running(self, running: bool):
         if running:
             self._start_btn.configure(state="disabled")
+            self._auto_btn.configure(state="disabled")
+            self._resume_btn.configure(state="disabled")
             self._stop_btn.configure(state="normal")
+            self._skip_btn.configure(state="normal")
             self._export_btn.configure(state="disabled")
             self._explain_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
                                         text_color="#4da6ff")
         else:
             self._start_btn.configure(state="normal")
+            self._auto_btn.configure(state="normal")
             self._stop_btn.configure(state="disabled")
+            self._skip_btn.configure(state="disabled")
             self._export_btn.configure(state="normal")
             # enable Explain Errors only if the last run produced any
             has_failures = any(
@@ -3219,8 +3315,16 @@ class RestorePage(ctk.CTkFrame):
                 for n in getattr(self, "_report_nodes", []))
             self._explain_btn.configure(
                 state="normal" if has_failures else "disabled")
+            # enable Resume if the run was incomplete (cancelled / had errors)
+            cp = getattr(self, "_checkpoint", {})
+            has_remaining = any(
+                v in ("cancelled", "error")
+                for v in cp.values())
+            self._resume_btn.configure(
+                state="normal" if has_remaining else "disabled",
+                fg_color="#e67e22" if has_remaining else "#555")
 
-    def _start_restore(self):
+    def _start_restore(self, auto=False):
         api = self._get_restore_api()
         if not api:
             return
@@ -3243,32 +3347,49 @@ class RestorePage(ctk.CTkFrame):
             cli_log(f"Auto-set target context → {ctx.name} ({choice})", "info")
 
         levels = {k: v.get() for k, v in self.restore_level_vars.items()}
-        if levels.get("global"):
-            if not messagebox.askyesno(
-                    "⚠️ Global Restore",
-                    "Global is checked — this will restore the ENTIRE console's "
-                    "global-level configuration.\n\n"
-                    "Are you sure you want to include Global?"):
-                return
+        if not auto:
+            if levels.get("global"):
+                if not messagebox.askyesno(
+                        "⚠️ Global Restore",
+                        "Global is checked — this will restore the ENTIRE console's "
+                        "global-level configuration.\n\n"
+                        "Are you sure you want to include Global?"):
+                    return
 
-        target = self._console_var.get()
-        if not messagebox.askyesno(
-                "⚠️ Confirm Restore",
-                f"This will OVERWRITE settings on the {target} console.\n\n"
-                "This is potentially destructive. Only do this on a target "
-                "you intend to configure.\n\nProceed?"):
-            return
+            target = self._console_var.get()
+            if not messagebox.askyesno(
+                    "⚠️ Confirm Restore",
+                    f"This will OVERWRITE settings on the {target} console.\n\n"
+                    "This is potentially destructive. Only do this on a target "
+                    "you intend to configure.\n\nProceed?"):
+                return
+        else:
+            target = self._console_var.get()
+            cli_log(f"⚡ Auto Restore — no prompts, creating everything "
+                    f"on {target}.", "cmd")
 
         elements = [k for k, v in self.restore_vars.items() if v.get()]
-        scope_filters = {
-            "account": self.restore_acct.get().strip().lower(),
-            "site": self.restore_site.get().strip().lower(),
-            "group": self.restore_group.get().strip().lower(),
-        }
+        # In auto mode, clear name filters so nothing is skipped
+        if auto:
+            scope_filters = {"account": "", "site": "", "group": ""}
+        else:
+            scope_filters = {
+                "account": self.restore_acct.get().strip().lower(),
+                "site": self.restore_site.get().strip().lower(),
+                "group": self.restore_group.get().strip().lower(),
+            }
         import time as _time
         self.ptable.clear()
         self._operation_log = []
         self._skip_make_default_ids: set = set()  # sites created as Scenario B (no default override)
+        self._auto_create_accounts = auto  # auto mode creates all accounts without asking
+        self._auto_mode = auto  # suppresses all interactive prompts
+        # _resume_checkpoint is set by _resume_restore() before calling
+        # _start_restore(). For fresh starts, clear it so nothing is skipped.
+        if not hasattr(self, "_resume_checkpoint") or \
+           not getattr(self, "_is_resuming", False):
+            self._resume_checkpoint = {}
+        self._is_resuming = False
         # Maps a resolved site's backup path -> destination site id. Groups
         # use this to find their parent site by the SAME identity that was
         # actually resolved/created — instead of re-looking-up by source name,
@@ -3299,6 +3420,7 @@ class RestorePage(ctk.CTkFrame):
                 self._report_meta["source_url"] = m["url"]
                 break
         self._cancelled = False
+        self._skip_element = False
         self.progress.set(0)
         self._timer_start = _time.time()
         self._timer_running = True
@@ -3352,6 +3474,33 @@ class RestorePage(ctk.CTkFrame):
             cli_log(f"Restore failed: {e}", "error")
 
         run_async(self, do, done, fail)
+
+    def _resume_restore(self):
+        """Resume a previously stopped/failed restore from where it left off.
+        Nodes marked 'done' in the checkpoint are skipped; everything else
+        (cancelled, error, skipped) is retried."""
+        cp = getattr(self, "_checkpoint", {})
+        if not cp:
+            messagebox.showinfo("Nothing to Resume",
+                                "No previous restore run to resume from.")
+            return
+        done_count = sum(1 for v in cp.values() if v == "done")
+        remaining = sum(1 for v in cp.values() if v in ("cancelled", "error"))
+        if remaining == 0:
+            messagebox.showinfo("Nothing to Resume",
+                                "All nodes completed — nothing to resume.")
+            return
+        if not messagebox.askyesno(
+                "↻ Resume Restore",
+                f"Previous run: {done_count} done, {remaining} remaining "
+                f"(cancelled/error).\n\n"
+                f"Resume will skip already-completed nodes and retry "
+                f"the rest.\n\nContinue?"):
+            return
+        # Store checkpoint as resume source and re-launch with auto mode
+        self._resume_checkpoint = dict(cp)
+        self._is_resuming = True
+        self._start_restore(auto=True)
 
     def _show_completion_popup(self):
         """Show a celebratory 'Migration Completed' dialog summarising the
@@ -3550,6 +3699,11 @@ class RestorePage(ctk.CTkFrame):
         import time as _time
         _time.sleep(0.1)  # let UI render
 
+        # Checkpoint: maps node index → status. Populated during the run
+        # and reused by Resume to skip already-completed nodes.
+        checkpoint = getattr(self, "_resume_checkpoint", {})
+        self._checkpoint = {}  # fresh checkpoint for this run
+
         restored = 0
         skipped = 0
         for i, node in enumerate(backup):
@@ -3562,9 +3716,18 @@ class RestorePage(ctk.CTkFrame):
             if self._cancelled:
                 for j in range(i, len(backup)):
                     ui(lambda n=f"r-{j}": pt.set_skipped(n, "cancelled"))
+                    self._checkpoint[j] = "cancelled"
                 self._operation_log.append(
                     f"— Restore cancelled after {restored} nodes —")
                 break
+
+            # ── Resume: skip nodes already completed in a previous run ──
+            prev = checkpoint.get(i)
+            if prev == "done":
+                ui(lambda n=nid: pt.set_skipped(n, "already done (resumed)"))
+                skipped += 1
+                self._checkpoint[i] = "done"
+                continue
 
             ui(lambda v=(i+1)/total: self.progress.set(v * 0.95))
 
@@ -3574,6 +3737,7 @@ class RestorePage(ctk.CTkFrame):
             if state in ("expired", "deleted", "disabled"):
                 ui(lambda n=nid, s=state: pt.set_skipped(n, s))
                 skipped += 1
+                self._checkpoint[i] = "skipped"
                 continue
 
             # ── level + name filter ──
@@ -3583,24 +3747,31 @@ class RestorePage(ctk.CTkFrame):
             if level_key and not levels.get(level_key):
                 ui(lambda n=nid: pt.set_skipped(n, "level unchecked"))
                 skipped += 1
+                self._checkpoint[i] = "skipped"
                 continue
+            # When restoring at global level or auto-creating accounts,
+            # the user wants a full migration — bypass name filters so
+            # everything is restored (filters are usually ticket-paste
+            # leftovers that don't apply to a global restore).
+            _bypass_filters = (levels.get("global")
+                               or getattr(self, "_auto_create_accounts", False))
             if ntype == "account":
                 # Prefer npath (already updated by mangle-rename) over the
                 # nested name field which is NOT updated by mangle-rename.
                 nm = npath.strip("/").split("/")[0]
-                if acct_f and acct_f not in nm.lower():
+                if acct_f and acct_f not in nm.lower() and not _bypass_filters:
                     ui(lambda n=nid: pt.set_skipped(n, "filtered"))
-                    skipped += 1; continue
+                    skipped += 1; self._checkpoint[i] = "skipped"; continue
             elif ntype == "site":
                 nm = node.get("site", {}).get("name", "")
-                if site_f and site_f not in nm.lower():
+                if site_f and site_f not in nm.lower() and not _bypass_filters:
                     ui(lambda n=nid: pt.set_skipped(n, "filtered"))
-                    skipped += 1; continue
+                    skipped += 1; self._checkpoint[i] = "skipped"; continue
             elif ntype == "group":
                 nm = node.get("group", {}).get("name", "")
-                if group_f and group_f not in nm.lower():
+                if group_f and group_f not in nm.lower() and not _bypass_filters:
                     ui(lambda n=nid: pt.set_skipped(n, "filtered"))
-                    skipped += 1; continue
+                    skipped += 1; self._checkpoint[i] = "skipped"; continue
 
             # ── resolve destination (auto-create if needed) ──
             ui(lambda n=nid: pt.set_running(n))
@@ -3620,6 +3791,7 @@ class RestorePage(ctk.CTkFrame):
                 reason = errs[-1].strip() if errs else "resolve failed"
                 ui(lambda n=nid, r=reason: pt.set_error(n, r))
                 skipped += 1
+                self._checkpoint[i] = "error"
                 continue
 
             # ── Diff-panel: snapshot destination BEFORE we write to it ──
@@ -3828,6 +4000,15 @@ class RestorePage(ctk.CTkFrame):
                 ok = skip = fail = 0
                 last_err_msg = ""
                 for idx, item in enumerate(item_list, 1):
+                    if self._skip_element or self._cancelled:
+                        skipped_remaining = total_items - idx + 1
+                        skip += skipped_remaining
+                        self._operation_log.append(
+                            f"    ⏭ {label}: skipped {skipped_remaining} "
+                            f"remaining item(s) by user request")
+                        self._skip_element = False
+                        ui(lambda: self._skip_btn.configure(state="normal"))
+                        break
                     if idx % 5 == 1 or idx == total_items:
                         ui(lambda n=nid, l=label, x=idx, t=total_items:
                            pt.set_detail(n, f"restoring {l} ({x}/{t})…"))
@@ -4145,6 +4326,12 @@ class RestorePage(ctk.CTkFrame):
             if "star_rules" in elements and star:
                 def _create_star(rule):
                     cleaned = _clean_for_restore(rule)
+                    # Drop null-valued fields — the destination API rejects
+                    # e.g. templateRuleId=null and treatAsThreat=null with
+                    # "Field may not be null" (code 4000010). Nulls mean
+                    # "use default", so dropping them is safe.
+                    cleaned = {k: v for k, v in cleaned.items()
+                               if v is not None}
                     # S1 requires a temporary STAR rule's expiration to be
                     # WITHIN THE NEXT SIX MONTHS. Source rules routinely carry
                     # a date that's already in the past (expired) or further
@@ -4205,6 +4392,35 @@ class RestorePage(ctk.CTkFrame):
                             alt = {k: v for k, v in scope.items()
                                    if k != "accountIds"}
                             return api.create_config_override(alt, body)
+                        # Single-account consoles reject scope="global" and
+                        # filter.tenant.  Map the override to account scope
+                        # and retry with the destination account ID.
+                        if (("global" in msg
+                             and "not a valid choice" in msg)
+                                or ("tenant" in msg
+                                    and "unknown field" in msg)):
+                            body["scope"] = "account"
+                            alt = {k: v for k, v in scope.items()
+                                   if k != "tenant"}
+                            acct_id = getattr(self, "_acct_id", "").strip()
+                            if acct_id:
+                                alt["accountIds"] = [acct_id]
+                            self._operation_log.append(
+                                f"    ↳ retrying override at account scope "
+                                f"(destination has no global scope)")
+                            try:
+                                return api.create_config_override(alt, body)
+                            except Exception as exc2:
+                                m2 = (str(exc2) + " "
+                                      + str(getattr(exc2, "detail",
+                                                    ""))).lower()
+                                if ("accountids" in m2
+                                        and "unknown field" in m2):
+                                    alt2 = {k: v for k, v in alt.items()
+                                            if k != "accountIds"}
+                                    return api.create_config_override(
+                                        alt2, body)
+                                raise
                         raise
                 _r_bulk("overrides", ovr, _create_override)
 
@@ -4212,13 +4428,39 @@ class RestorePage(ctk.CTkFrame):
             stg = data.get("settings", {})
             for skey, setter in [
                 ("notifications", api.set_notification_settings),
-                ("smtp", api.set_smtp_settings),
                 ("syslog", api.set_syslog_settings),
                 ("activeDirectory", api.set_ad_settings),
             ]:
                 if stg.get(skey):
                     _r(f"set-{skey[:4]}", setter, scope,
                        _clean_for_restore(stg[skey]))
+            # SMTP: the API never returns passwords, so the PUT always
+            # fails with "Password is missing". Show a gentle skip
+            # instead of a scary error.
+            if stg.get("smtp"):
+                ui(lambda n=nid: pt.set_detail(n, "restoring set-smtp…"))
+                try:
+                    api.set_smtp_settings(scope,
+                                          _clean_for_restore(stg["smtp"]))
+                    results.append(("set-smtp", "ok"))
+                except Exception as exc:
+                    detail = _err_detail(exc).lower()
+                    if "password" in detail and "missing" in detail:
+                        results.append(("set-smtp",
+                                        "skipped (password is write-only"
+                                        " — re-enter manually)"))
+                        self._operation_log.append(
+                            "    ℹ SMTP: password not migrated (API "
+                            "never returns it). Re-enter in destination "
+                            "console → Settings → SMTP.")
+                    else:
+                        results.append(("set-smtp",
+                                        f"ERR: {_err_detail(exc)}"))
+                        failed_items.append({
+                            "element": "set-smtp",
+                            "name": "set-smtp",
+                            "error": _err_detail(exc)[:500],
+                        })
 
             # ── SSO (handled separately) ──
             # SSO is tenant-specific and the most failure-prone setting: the
@@ -4444,8 +4686,10 @@ class RestorePage(ctk.CTkFrame):
 
             if err_parts and not ok_parts:
                 ui(lambda n=nid, s=summary: pt.set_error(n, s))
+                self._checkpoint[i] = "error"
             else:
                 ui(lambda n=nid, s=summary: pt.set_done(n, s))
+                self._checkpoint[i] = "done"
 
             # ── Diff-panel: snapshot destination AFTER the writes land ──
             # This is the "after" state the operator wants to compare to
@@ -4565,7 +4809,128 @@ class RestorePage(ctk.CTkFrame):
                         f"expected {dest_acct_id} — verify this is the correct account!")
                 _p(f"found account → id={found['id']}")
                 return found["id"]
-            _p(f"account '{name}' not found")
+
+            # ── Account not found — offer to create it ──
+            if not self._auto_create_accounts:
+                import threading as _thr
+                # "create" | "create_all" | "skip"
+                answer = [None]
+                evt = _thr.Event()
+                def _ask_create_acct(n=name):
+                    dlg = ctk.CTkToplevel(self)
+                    dlg.title("Account Not Found")
+                    dlg.geometry("420x200")
+                    dlg.resizable(False, False)
+                    dlg.transient(self.winfo_toplevel())
+                    try:
+                        dlg.grab_set()
+                    except Exception:
+                        pass
+                    ctk.CTkLabel(
+                        dlg, text=f"Account '{n}' does not exist\n"
+                        f"on the destination.",
+                        font=("Segoe UI", 14, "bold"),
+                        justify="center").pack(pady=(18, 12))
+                    bf = ctk.CTkFrame(dlg, fg_color="transparent")
+                    bf.pack(pady=8)
+                    def _pick(v):
+                        answer[0] = v
+                        dlg.destroy()
+                        evt.set()
+                    ctk.CTkButton(
+                        bf, text="Create", width=110, height=36,
+                        fg_color="#00b894", hover_color="#00a37e",
+                        font=("Segoe UI", 13, "bold"),
+                        command=lambda: _pick("create")).pack(
+                            side="left", padx=6)
+                    ctk.CTkButton(
+                        bf, text="Create All", width=110, height=36,
+                        fg_color="#2980b9", hover_color="#1f6da3",
+                        font=("Segoe UI", 13, "bold"),
+                        command=lambda: _pick("create_all")).pack(
+                            side="left", padx=6)
+                    ctk.CTkButton(
+                        bf, text="Skip", width=110, height=36,
+                        fg_color="#555", hover_color="#777",
+                        font=("Segoe UI", 13, "bold"),
+                        command=lambda: _pick("skip")).pack(
+                            side="left", padx=6)
+                    dlg.protocol("WM_DELETE_WINDOW",
+                                 lambda: _pick("skip"))
+                _p(f"⏸ account '{name}' not found — waiting for user…")
+                self.after(0, _ask_create_acct)
+                evt.wait()
+                if answer[0] == "create_all":
+                    self._auto_create_accounts = True
+                    self._operation_log.append(
+                        "  ✓ Auto-create enabled for all remaining accounts")
+                    cli_log("Auto-creating all missing accounts from now on.",
+                            "info")
+                elif answer[0] == "skip":
+                    self._operation_log.append(
+                        f"  ⊘ Skipped account '{name}' (user declined create)")
+                    _p(f"account '{name}' skipped")
+                    return None
+            # Build create payload.
+            # S1 requires `licenses` with at least one bundle entry.
+            # Use the DESTINATION's existing SKU — the source's bundle
+            # may not be available on this tenant.
+            src_acct = node.get("account", {}) or {}
+            create_data = {"name": name}
+            for field in ("accountType",):
+                v = src_acct.get(field)
+                if v:
+                    create_data[field] = v
+            # Detect the primary bundle from an existing destination
+            # account. Only take the first bundle (the core SKU) — add-on
+            # bundles (Purple AI, Ranger, etc.) may not be assignable to
+            # new accounts and cause "not available in your scope" errors.
+            sku_label = "?"
+            primary_bundle = None
+            try:
+                existing = api.get_accounts()
+                if existing:
+                    dest_lic = existing[0].get("licenses", {})
+                    bundles = dest_lic.get("bundles", [])
+                    if bundles:
+                        primary_bundle = bundles[0]
+                        sku_label = primary_bundle.get("name", "?")
+            except Exception:
+                pass
+
+            # Build license payloads: try full bundle first, then
+            # stripped-down fallbacks if the API rejects add-ons/surfaces.
+            attempts = []
+            if primary_bundle:
+                attempts.append({"bundles": [primary_bundle]})
+                # fallback: bundle name only, no surfaces
+                attempts.append({"bundles": [{"name": primary_bundle.get("name")}]})
+            attempts.append({"bundles": [{"name": "Complete"}]})
+
+            _p(f"creating account '{name}' (bundle={sku_label})…")
+            last_err = ""
+            for lic_payload in attempts:
+                create_data["licenses"] = lic_payload
+                try:
+                    resp = api.create_account(create_data)
+                    d = resp.get("data", {})
+                    new_id = (d.get("id")
+                              or (d.get("account", {}).get("id")
+                                  if isinstance(d, dict) else None))
+                    if new_id:
+                        self._operation_log.append(
+                            f"  ✓ AUTO-CREATED account '{name}' → id={new_id} "
+                            f"(bundle={sku_label})")
+                        _p(f"created account '{name}' → id={new_id}")
+                        return new_id
+                except Exception as exc:
+                    last_err = getattr(exc, "detail", str(exc))
+                    self._operation_log.append(
+                        f"    ↳ attempt with {lic_payload} failed: "
+                        f"{str(last_err)[:80]}")
+            self._operation_log.append(
+                f"  ✗ Account '{name}' create failed: {last_err}")
+            cli_log(f"Account '{name}' create error: {last_err}", "error")
             return None
 
         if ntype == "site":
@@ -4642,25 +5007,29 @@ class RestorePage(ctk.CTkFrame):
                     placeholder = default_named[0]
                     ph_name = placeholder.get("name", "default site")
                     site_list = ", ".join(s.get("name", "?") for s in all_sites[:6])
-                    answer = [None]
-                    evt = _thr.Event()
-                    def _ask_default_conflict(pn=ph_name, sn=sname,
-                                              an=acct_match[0].get("name", acct_name),
-                                              sl=site_list):
-                        answer[0] = messagebox.askyesno(
-                            "Default Site Conflict",
-                            f"Source site  '{sn}'  is marked isDefault.\n"
-                            f"Destination account  '{an}'  has a placeholder "
-                            f"site named  '{pn}'.\n\n"
-                            f"Destination sites: {sl}\n\n"
-                            f"YES — Overwrite '{pn}' with source settings "
-                            f"and rename it to '{sn}'.\n\n"
-                            f"NO — Restore '{sn}' as a brand-new separate "
-                            f"site ('{pn}' is left unchanged).")
-                        evt.set()
-                    _p(f"⏸ default-site conflict with '{ph_name}' — waiting for user…")
-                    self.after(0, _ask_default_conflict)
-                    evt.wait()
+                    # Auto mode: always overwrite the default site
+                    if getattr(self, "_auto_mode", False):
+                        answer = [True]
+                    else:
+                        answer = [None]
+                        evt = _thr.Event()
+                        def _ask_default_conflict(pn=ph_name, sn=sname,
+                                                  an=acct_match[0].get("name", acct_name),
+                                                  sl=site_list):
+                            answer[0] = messagebox.askyesno(
+                                "Default Site Conflict",
+                                f"Source site  '{sn}'  is marked isDefault.\n"
+                                f"Destination account  '{an}'  has a placeholder "
+                                f"site named  '{pn}'.\n\n"
+                                f"Destination sites: {sl}\n\n"
+                                f"YES — Overwrite '{pn}' with source settings "
+                                f"and rename it to '{sn}'.\n\n"
+                                f"NO — Restore '{sn}' as a brand-new separate "
+                                f"site ('{pn}' is left unchanged).")
+                            evt.set()
+                        _p(f"⏸ default-site conflict with '{ph_name}' — waiting for user…")
+                        self.after(0, _ask_default_conflict)
+                        evt.wait()
                     if answer[0]:
                         # Scenario A: overwrite placeholder
                         _p(f"Scenario A — overwriting '{ph_name}' → "
@@ -4685,26 +5054,34 @@ class RestorePage(ctk.CTkFrame):
                                  else None)
                     if candidate:
                         ed_name = candidate.get("name", "?")
-                        _p(f"no match — asking what to do with '{sname}'…")
-                        answer = [None]
-                        evt = _thr.Event()
-                        site_list = ", ".join(
-                            s.get("name", "?") for s in all_sites[:6])
-                        def _ask_map(en=ed_name, sn=sname,
-                                     an=acct_match[0].get("name", acct_name),
-                                     sl=site_list):
-                            answer[0] = messagebox.askyesnocancel(
-                                "Site Not Found",
-                                f"Site '{sn}' was not found in account '{an}'.\n\n"
-                                f"Existing sites: {sl}\n\n"
-                                f"YES    — Map to '{en}' (rename it to '{sn}' and "
-                                f"restore settings onto it).\n\n"
-                                f"NO     — Create '{sn}' as a brand-new site in "
-                                f"this account.\n\n"
-                                f"Cancel — Skip '{sn}' entirely.")
-                            evt.set()
-                        self.after(0, _ask_map)
-                        evt.wait()
+                        # Auto mode: always create new site
+                        if getattr(self, "_auto_mode", False):
+                            answer = [False]
+                            _p(f"auto: creating '{sname}' as new site…")
+                            self._operation_log.append(
+                                f"  ➕ Auto: creating '{sname}' as a new site "
+                                f"('{ed_name}' left unchanged)")
+                        else:
+                            _p(f"no match — asking what to do with '{sname}'…")
+                            answer = [None]
+                            evt = _thr.Event()
+                            site_list = ", ".join(
+                                s.get("name", "?") for s in all_sites[:6])
+                            def _ask_map(en=ed_name, sn=sname,
+                                         an=acct_match[0].get("name", acct_name),
+                                         sl=site_list):
+                                answer[0] = messagebox.askyesnocancel(
+                                    "Site Not Found",
+                                    f"Site '{sn}' was not found in account '{an}'.\n\n"
+                                    f"Existing sites: {sl}\n\n"
+                                    f"YES    — Map to '{en}' (rename it to '{sn}' and "
+                                    f"restore settings onto it).\n\n"
+                                    f"NO     — Create '{sn}' as a brand-new site in "
+                                    f"this account.\n\n"
+                                    f"Cancel — Skip '{sn}' entirely.")
+                                evt.set()
+                            self.after(0, _ask_map)
+                            evt.wait()
                         if answer[0] is True:
                             # YES: map onto the existing site AND rename it to
                             # the source site name. The post-resolve default
@@ -4788,7 +5165,8 @@ class RestorePage(ctk.CTkFrame):
                     # detect SKU/bundle mismatch
                     if attempt == 0 and "not available" in detail.lower() and "bundle" in detail.lower():
                         dest_sku = self._detect_dest_sku(api, acct_id)
-                        if dest_sku and self._ask_sku_fix(detail, dest_sku):
+                        if dest_sku and (getattr(self, "_auto_mode", False)
+                                        or self._ask_sku_fix(detail, dest_sku)):
                             self._fix_sku_in_backup(dest_sku)
                             create_data["suite"] = dest_sku
                             continue  # retry with fixed SKU
@@ -5196,7 +5574,7 @@ class RestorePage(ctk.CTkFrame):
             f"Destination console: {meta.get('dest_url', '?')}",
             f"Started:             {meta.get('start_time', '?')}",
             f"Finished:            {meta.get('end_time', '?')}",
-            f"Tool version:        v1.4.1",
+            f"Tool version:        v1.5.0",
             "",
             f"{sum(len(g['items']) for g in groups.values())} item(s) "
             f"failed across {len(groups)} error type(s):",
