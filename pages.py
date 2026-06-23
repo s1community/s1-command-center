@@ -19,6 +19,7 @@ BACKUP_ELEMENTS = [
     # ── Core config ──
     "policy",
     "exclusions",
+    "unified_exclusions",
     "blocklist",
     # ── Firewall ──
     "firewall_rules",
@@ -62,7 +63,10 @@ BACKUP_ELEMENTS = [
 
 ELEMENT_HELP = {
     "policy": "Endpoint protection policy (mitigation mode, engines, DV settings, etc.)",
-    "exclusions": "All exclusion types: hash, path, file type, certificate, browser",
+    "exclusions": "Legacy exclusion types: hash, path, file type, certificate, browser",
+    "unified_exclusions": "Unified Exclusions (v2.1) — includes tag-based exclusions and all "
+                          "modern exclusion types. Use this instead of legacy exclusions when "
+                          "the source console uses Unified Exclusions.",
     "blocklist": "SHA1/SHA256 hash blocklist (restrictions) entries",
     "firewall_rules": "Firewall Control rules for network traffic filtering",
     "firewall_config": "Firewall Control configuration (enabled, inheritance, location-aware)",
@@ -699,6 +703,42 @@ _ERROR_RULES = [
     },
     {
         "match": _re.compile(
+            r"exclusionname.*255|name.*exceeds.*max|"
+            r"name.*too long|ensure this value has at most 255",
+            _re.IGNORECASE),
+        "what": "Exclusion name exceeds 255-character API limit",
+        "why":  "The SentinelOne UI allows exclusion names longer than "
+                "255 characters, but the API rejects them on create. "
+                "S1 Command Center now auto-truncates names to 255 chars.",
+        "fix":  "Update to the latest S1 Command Center — names are now "
+                "automatically truncated to 255 characters on restore. "
+                "Re-run the restore.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(
+            r"post /unified-exclusions.*→\s*400|"
+            r"unified.exclusion.*invalid|"
+            r"modetype.*required|engines.*required|"
+            r"scopelevel.*required",
+            _re.IGNORECASE),
+        "what": "Unified exclusion rejected by destination validation",
+        "why":  "The unified exclusion POST requires fields like "
+                "`modeType`, `type`, `engines`, `scopeLevel`, "
+                "`scopeLevelId`, `value`, and `recommendation`. The "
+                "source exclusion may be missing required fields or "
+                "contain values the destination doesn't support.",
+        "fix":  "1) Open the full error text (Copy button) to see the "
+                "exact S1 rejection reason.\n"
+                "2) If the destination doesn't support unified "
+                "exclusions, use legacy 'exclusions' instead.\n"
+                "3) Tag-based exclusions require the tags to exist on "
+                "the destination first — ensure tags are restored "
+                "before exclusions.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(
             r"(templateruleid|treatasthre).*may not be null|star.*field may not be null",
             _re.IGNORECASE),
         "what": "STAR rule sent a null field the destination rejects",
@@ -1028,6 +1068,18 @@ _EXCL_FIELDS = {
     "pathExclusionType", "actions", "includeChildren", "includeParents",
 }
 
+_UNIFIED_EXCL_FIELDS = {
+    "exclusionName", "type", "value", "osType", "description",
+    "mode", "modeType", "pathExclusionType", "actions",
+    "includeChildren", "includeParents",
+    "threatType", "engines", "interactionLevel",
+    "reason", "recommendation", "note",
+    "conditions", "tagIds", "tagNames",
+    "scopeLevel", "scopeLevelId",
+}
+
+_EXCL_NAME_MAX_LEN = 255
+
 _BLOCKLIST_FIELDS = {
     "type", "value", "osType", "description", "sha256Value",
 }
@@ -1121,6 +1173,12 @@ def _summarize_node_payload(data: dict) -> list:
             items = excls.get(etype) or []
             out.append((f"excl/{etype}", len(items),
                         [str(i.get("value", ""))[:60] for i in items[:50]]))
+
+    u_excls = (data or {}).get("unified_exclusions") or []
+    if u_excls:
+        out.append(("unified_exclusions", len(u_excls),
+                    [str(i.get("exclusionName") or i.get("value", ""))[:60]
+                     for i in u_excls[:50]]))
 
     bl = (data or {}).get("restrictions") \
         or (data or {}).get("blocklist") or []
@@ -1256,6 +1314,10 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str) -> dict:
             except Exception:
                 pass
         try:
+            data["unified_exclusions"] = api.get_unified_exclusions(scope)
+        except Exception:
+            pass
+        try:
             data["restrictions"] = api.get_blocklist(scope)
         except Exception:
             pass
@@ -1301,6 +1363,7 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str) -> dict:
 # Friendly labels for the categories produced by _summarize_node_payload.
 _CAT_LABELS = {
     "policy": "Policy",
+    "unified_exclusions": "Unified Exclusions (tag-based)",
     "blocklist": "Blocklist / restrictions",
     "fw-rules": "Firewall rules",
     "fw-locations": "Firewall locations",
@@ -2005,6 +2068,14 @@ class BackupPage(ctk.CTkFrame):
                 except Exception:
                     pass
             results.append(("exclusions", total))
+
+        if "unified_exclusions" in elements:
+            try:
+                items = api.get_unified_exclusions(scope)
+                data["unified_exclusions"] = items
+                results.append(("unified_exclusions", len(items)))
+            except Exception:
+                results.append(("unified_exclusions", "ERR"))
 
         if "blocklist" in elements:
             _fetch("restrictions", "blocklist", api.get_blocklist, scope)
@@ -4128,6 +4199,47 @@ class RestorePage(ctk.CTkFrame):
                     self._operation_log.append(
                         f"    ✗ excl last error: {e_last_err}")
                     cli_log(f"{npath} excl: {e_last_err}", "error")
+
+            # ── Unified Exclusions ──
+            if "unified_exclusions" in elements and data.get("unified_exclusions"):
+                u_ok = u_skip = u_fail = 0
+                u_last_err = ""
+                for item in data["unified_exclusions"]:
+                    try:
+                        payload = _whitelist(item, _UNIFIED_EXCL_FIELDS)
+                        for f in ("value", "description", "exclusionName", "note"):
+                            if isinstance(payload.get(f), str):
+                                payload[f] = _strip_non_printable(payload[f])
+                        # Truncate exclusion name to API limit (255 chars)
+                        if isinstance(payload.get("exclusionName"), str) \
+                                and len(payload["exclusionName"]) > _EXCL_NAME_MAX_LEN:
+                            payload["exclusionName"] = \
+                                payload["exclusionName"][:_EXCL_NAME_MAX_LEN]
+                        api.create_unified_exclusion(scope, payload)
+                        u_ok += 1
+                    except Exception as exc:
+                        if _is_exists_error(exc):
+                            u_skip += 1
+                        else:
+                            u_fail += 1
+                            full_err = _err_detail(exc)
+                            u_last_err = full_err[:80]
+                            failed_items.append({
+                                "element": "unified_excl",
+                                "name": (item.get("exclusionName")
+                                         or item.get("value", "?"))[:80],
+                                "error": full_err[:500],
+                            })
+                parts = []
+                if u_ok: parts.append(f"{u_ok} new")
+                if u_skip: parts.append(f"{u_skip} exist")
+                if u_fail: parts.append(f"{u_fail} err")
+                if parts:
+                    results.append(("unified-excl", ", ".join(parts)))
+                if u_last_err:
+                    self._operation_log.append(
+                        f"    ✗ unified-excl last error: {u_last_err}")
+                    cli_log(f"{npath} unified-excl: {u_last_err}", "error")
 
             # ── Blocklist ──
             bl = data.get("restrictions") or data.get("blocklist") or []

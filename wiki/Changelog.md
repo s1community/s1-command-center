@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.5.1 — 2026-06-23
+
+### New Features
+- **Unified Exclusions support** — Backup and restore now support SentinelOne's Unified Exclusions API (`/unified-exclusions`), including **tag-based exclusions**. Select `unified_exclusions` in the backup element list to capture all modern exclusion types that the legacy `/exclusions` endpoint misses.
+- **Load Unified button** — The Exclusions & Blocklist page now has a purple **Load Unified** button to browse all unified exclusions (including tag-based) from the source console.
+
+### Bug Fixes
+- **255-character name truncation** — Exclusion names longer than 255 characters (allowed by the SentinelOne UI but rejected by the API) are now automatically truncated on restore, preventing bulk failures.
+- **Non-printable character scrubbing** — Extended to unified exclusion fields (`exclusionName`, `note`) in addition to the existing `value` and `description` scrubbing.
+
+### Error Handling
+- New error classifiers for unified exclusion validation failures and the 255-char name limit, with actionable fix guidance in the Explain Errors panel.
+
 ## v1.5.0 — 2026-06-22
 
 ### New Features

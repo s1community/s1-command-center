@@ -932,14 +932,19 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
         ctk.CTkButton(btn, text="Load Exclusions", height=34,
                       fg_color=GREEN, hover_color="#00a381",
                       command=self._load_excl).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn, text="Load Unified", height=34,
+                      fg_color="#8e44ad", hover_color="#7d3c98",
+                      command=self._load_unified).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Load Blocklist", height=34,
                       command=self._load_block).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
                       fg_color="#2980b9",
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
-                  "Load Exclusions: fetch exclusions by selected type "
+                  "Load Exclusions: fetch legacy exclusions by selected type "
                   "(hash, path, file_type, cert, browser). "
+                  "Load Unified: fetch all Unified Exclusions (v2.1) "
+                  "including tag-based exclusions. "
                   "Load Blocklist: fetch SHA1 hash block entries."
                   ).pack(side="left", padx=(0, 6))
         self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
@@ -966,6 +971,24 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
             cli_log(f"Retrieved {len(items)} '{et}' exclusions", "success")
             self.table.columns = ["type", "value", "osType",
                                   "description", "id"]
+            self.table.load(items)
+
+        run_async(self, do, done)
+
+    def _load_unified(self):
+        api = _pick_api(self.app)
+        if not api:
+            return
+
+        def do():
+            return api.get_unified_exclusions({"tenant": "true"})
+
+        def done(items):
+            self.info_lbl.configure(
+                text=f"{len(items)} unified exclusions")
+            cli_log(f"Retrieved {len(items)} unified exclusions", "success")
+            self.table.columns = ["exclusionName", "type", "value",
+                                  "osType", "modeType", "id"]
             self.table.load(items)
 
         run_async(self, do, done)

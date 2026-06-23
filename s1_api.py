@@ -259,6 +259,9 @@ class S1API:
         p["type"] = excl_type
         return self.get_all("/exclusions", params=p)
 
+    def get_unified_exclusions(self, scope: dict) -> list[dict]:
+        return self.get_all("/unified-exclusions", params=scope)
+
     def get_blocklist(self, scope: dict) -> list[dict]:
         p = dict(scope)
         p["type"] = "black_hash"
@@ -527,6 +530,9 @@ class S1API:
 
     def create_exclusion(self, scope: dict, data: dict) -> dict:
         return self._post("/exclusions", body={"filter": scope, "data": data})
+
+    def create_unified_exclusion(self, scope: dict, data: dict) -> dict:
+        return self._post("/unified-exclusions", body={"filter": scope, "data": data})
 
     def create_restriction(self, scope: dict, data: dict) -> dict:
         return self._post("/restrictions", body={"filter": scope, "data": data})
