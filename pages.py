@@ -1075,7 +1075,6 @@ _UNIFIED_EXCL_FIELDS = {
     "threatType", "engines", "interactionLevel",
     "reason", "recommendation", "note",
     "conditions", "tagIds", "tagNames",
-    "scopeLevel", "scopeLevelId",
 }
 
 _EXCL_NAME_MAX_LEN = 255
@@ -4204,9 +4203,28 @@ class RestorePage(ctk.CTkFrame):
             if "unified_exclusions" in elements and data.get("unified_exclusions"):
                 u_ok = u_skip = u_fail = 0
                 u_last_err = ""
+                # Build the unified-exclusion filter with scopeLevel
+                _ue_scope_map = {
+                    "global": ("global", ""),
+                    "account": ("account", dest_id or ""),
+                    "site": ("site", dest_id or ""),
+                    "group": ("group", dest_id or ""),
+                }
+                _ue_sl, _ue_slid = _ue_scope_map.get(ntype, ("site", dest_id or ""))
+                ue_filter = dict(scope)
+                ue_filter["scopeLevel"] = _ue_sl
+                if _ue_slid:
+                    ue_filter["scopeLevelId"] = _ue_slid
                 for item in data["unified_exclusions"]:
                     try:
                         payload = _whitelist(item, _UNIFIED_EXCL_FIELDS)
+                        # Map common field-name variants
+                        if not payload.get("exclusionName"):
+                            payload["exclusionName"] = (
+                                item.get("name")
+                                or item.get("exclusionName")
+                                or item.get("value", "Migrated exclusion")
+                            )
                         for f in ("value", "description", "exclusionName", "note"):
                             if isinstance(payload.get(f), str):
                                 payload[f] = _strip_non_printable(payload[f])
@@ -4215,7 +4233,14 @@ class RestorePage(ctk.CTkFrame):
                                 and len(payload["exclusionName"]) > _EXCL_NAME_MAX_LEN:
                             payload["exclusionName"] = \
                                 payload["exclusionName"][:_EXCL_NAME_MAX_LEN]
-                        api.create_unified_exclusion(scope, payload)
+                        # Supply required defaults the API mandates
+                        if not payload.get("reason"):
+                            payload["reason"] = item.get("reason") or "other"
+                        if not payload.get("recommendation"):
+                            payload["recommendation"] = item.get("recommendation") or "NONE"
+                        if not payload.get("modeType") and item.get("modeType"):
+                            payload["modeType"] = item["modeType"]
+                        api.create_unified_exclusion(ue_filter, payload)
                         u_ok += 1
                     except Exception as exc:
                         if _is_exists_error(exc):
@@ -4227,6 +4252,7 @@ class RestorePage(ctk.CTkFrame):
                             failed_items.append({
                                 "element": "unified_excl",
                                 "name": (item.get("exclusionName")
+                                         or item.get("name")
                                          or item.get("value", "?"))[:80],
                                 "error": full_err[:500],
                             })
