@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.2 — 2026-06-23
+
+### Build
+- **Custom PyInstaller bootloader** — The Windows build now compiles PyInstaller's bootloader from source instead of using the pre-built binary. The pre-built bootloader hash is shared by thousands of apps (including malware) and is a known false-positive trigger for heuristic AV/EDR engines (`windows.preExecutionSuspicious`). A unique bootloader binary eliminates this trigger.
+- **Windows code-signing scaffolding** — Added conditional signing steps (mirrors the macOS pattern). When `WINDOWS_SIGN_CERT_P12` and `WINDOWS_SIGN_CERT_PASSWORD` secrets are populated, the build signs all `.exe`, `.dll`, and `.pyd` files in the bundle plus the Inno Setup installer using SHA-256 + RFC 3161 timestamp.
+
 ## v1.5.1 — 2026-06-23
 
 ### New Features

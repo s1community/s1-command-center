@@ -242,21 +242,21 @@ jobs:
       # positive trigger for heuristic AV/EDR engines. Compiling from
       # source produces a unique bootloader hash for our build.
       # ─────────────────────────────────────────────────────────────────
-      - name: Build PyInstaller bootloader from source
+      - name: Install dependencies & build PyInstaller bootloader from source
         shell: pwsh
         run: |
           pip install -r requirements.txt
+          pip install pyinstaller
           $pyiVer = (pip show pyinstaller | Select-String '^Version:').ToString().Split(' ')[1]
           Write-Host "PyInstaller version: $pyiVer"
-          pip download pyinstaller==$pyiVer --no-binary :all: --no-deps -d pyinstaller_src
-          $sdist = Get-ChildItem pyinstaller_src\pyinstaller-*.tar.gz | Select-Object -First 1
-          tar xzf $sdist.FullName -C pyinstaller_src
-          $srcDir = Get-ChildItem pyinstaller_src -Directory | Where-Object { $_.Name -like "pyinstaller-*" } | Select-Object -First 1
-          Push-Location "$($srcDir.FullName)\bootloader"
-          python ./waf all
+          pip uninstall pyinstaller pyinstaller-hooks-contrib -y
+          git clone --depth 1 --branch "v$pyiVer" https://github.com/pyinstaller/pyinstaller.git _pyinstaller_src
+          Push-Location _pyinstaller_src\bootloader
+          python ./waf distclean all
           Pop-Location
-          pip install $srcDir.FullName
-          Write-Host "✅ PyInstaller with custom bootloader installed"
+          pip install .\_pyinstaller_src
+          Remove-Item _pyinstaller_src -Recurse -Force
+          Write-Host "✅ PyInstaller $pyiVer with custom bootloader installed"
 
       # ─────────────────────────────────────────────────────────────────
       #  Windows code-signing scaffolding
