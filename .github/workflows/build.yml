@@ -234,10 +234,76 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      # ─────────────────────────────────────────────────────────────────
+      #  Build PyInstaller bootloader from source
+      # ─────────────────────────────────────────────────────────────────
+      # The pre-built bootloader binary is shared by thousands of
+      # PyInstaller apps (including malware) and is a known false-
+      # positive trigger for heuristic AV/EDR engines. Compiling from
+      # source produces a unique bootloader hash for our build.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Build PyInstaller bootloader from source
+        shell: pwsh
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          $pyiVer = (pip show pyinstaller | Select-String '^Version:').ToString().Split(' ')[1]
+          Write-Host "PyInstaller version: $pyiVer"
+          pip download pyinstaller==$pyiVer --no-binary :all: --no-deps -d pyinstaller_src
+          $sdist = Get-ChildItem pyinstaller_src\pyinstaller-*.tar.gz | Select-Object -First 1
+          tar xzf $sdist.FullName -C pyinstaller_src
+          $srcDir = Get-ChildItem pyinstaller_src -Directory | Where-Object { $_.Name -like "pyinstaller-*" } | Select-Object -First 1
+          Push-Location "$($srcDir.FullName)\bootloader"
+          python ./waf all
+          Pop-Location
+          pip install $srcDir.FullName
+          Write-Host "✅ PyInstaller with custom bootloader installed"
+
+      # ─────────────────────────────────────────────────────────────────
+      #  Windows code-signing scaffolding
+      # ─────────────────────────────────────────────────────────────────
+      # All signing steps activate automatically when the required
+      # GitHub repository secrets are populated. Until then, they are
+      # skipped and the build produces an unsigned exe exactly as
+      # before. Required secrets:
+      #
+      #   WINDOWS_SIGN_CERT_P12       (base64 of .pfx / .p12)
+      #   WINDOWS_SIGN_CERT_PASSWORD  (.pfx password)
+      #
+      # The certificate should be an EV or OV code-signing cert from
+      # a trusted CA. EV certs give immediate SmartScreen reputation;
+      # OV certs build reputation over time.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Check for signing secrets
+        id: winsign
+        shell: pwsh
+        env:
+          CERT_P12: ${{ secrets.WINDOWS_SIGN_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+        run: |
+          if ($env:CERT_P12 -and $env:CERT_PASSWORD) {
+            "sign=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "✅ Windows code-signing secrets present"
+          } else {
+            "sign=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "⚠  Windows code-signing secrets missing — unsigned build"
+          }
+
+      - name: Import code-signing certificate
+        if: steps.winsign.outputs.sign == 'true'
+        shell: pwsh
+        env:
+          CERT_P12: ${{ secrets.WINDOWS_SIGN_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+        run: |
+          $certFile = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($certFile, [Convert]::FromBase64String($env:CERT_P12))
+          Import-PfxCertificate -FilePath $certFile `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force)
+          Remove-Item $certFile -Force
+          $thumb = (Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1).Thumbprint
+          "SIGN_THUMBPRINT=$thumb" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Certificate thumbprint: $thumb"
 
       - name: Build Windows exe
         env:
@@ -258,6 +324,24 @@ jobs:
             --collect-all customtkinter `
             --noconfirm `
             main.py
+
+      - name: Sign application binaries
+        if: steps.winsign.outputs.sign == 'true'
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\*\bin\*\x64\signtool.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found" }
+          $st = $signtool.FullName
+          Write-Host "Using: $st"
+
+          # Sign the main exe + all DLLs/PYDs in the bundle
+          $targets = Get-ChildItem "dist\S1 Command Center" -Recurse -Include *.exe,*.dll,*.pyd
+          foreach ($f in $targets) {
+            Write-Host "  Signing $($f.Name)…"
+            & $st sign /sha1 $env:SIGN_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 $f.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to sign $($f.Name) — continuing" }
+          }
+          Write-Host "✅ Signed $($targets.Count) files"
 
       - name: Create ZIP
         run: |
@@ -282,6 +366,14 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" "installer\windows.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
           Rename-Item -Path "dist\S1-Command-Center-Setup.exe" -NewName "S1-Command-Center-Windows-Setup.exe"
+
+      - name: Sign installer
+        if: steps.winsign.outputs.sign == 'true'
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\*\bin\*\x64\signtool.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          & $signtool.FullName sign /sha1 $env:SIGN_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 "dist\S1-Command-Center-Windows-Setup.exe"
+          Write-Host "✅ Installer signed"
 
       - name: Upload Windows ZIP artifact
         uses: actions/upload-artifact@v4
