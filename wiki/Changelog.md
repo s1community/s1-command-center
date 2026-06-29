@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.6.0 — 2026-06-29
+
+### UI Redesign
+- **New design system** — Complete visual overhaul around the SentinelOne brand violet (`#7C3AED`) on a refined slate-charcoal dark theme, centralised in `theme.py`. All default widgets adopt the palette automatically; ~230 hardcoded inner-page colours were swept onto the new tokens.
+- **Cross-platform fonts** — Native system fonts per OS (SF Pro Text/Menlo on macOS, Segoe UI/Consolas on Windows) instead of Windows-only families that fell back to an unstyled default elsewhere.
+- **Redesigned sidebar** — Violet brand lockup, connection-status card with live SRC/DST dots, section eyebrows, active-indicator bar, and a distinct violet panel around the MIGRATION workflow.
+- **OUTPUT drawer** — The log moved from a cramped bottom strip to a collapsible, resizable drawer driven by an always-visible status line that mirrors the latest (colour-coded) log entry. Help (**?**) buttons open it automatically.
+- **Adaptive scaling** — Window opens proportional to the screen and the UI auto-scales with window size; manual zoom via ⌘/Ctrl +/-/0.
+
+### Safety
+- **Critical-operation lock** — During a backup/restore, all controls except Stop / Skip Element (and the log drawer) are disabled to protect the running job.
+
+### Security & Quality
+- **Hardened credential files** — `contexts.json`, Atlas token, and backup JSON written `0600`; config dir `0700`.
+- **Reproducible builds** — `requirements-lock.txt` added; fixed an unsatisfiable `requests` floor.
+- **Tests** — New pytest suite (API retry/error handling + restore helpers) and `requirements-dev.txt`.
+- **Backup error visibility** — Silent `except: pass` blocks in the backup path now log warnings.
+- **Restore refactor** — Pure helpers hoisted to module level (unit-tested) and duplicate summary logging consolidated.
+
+## v1.5.3 — 2026-06-23
+
+### Bug Fixes
+- **Unified exclusions restore fix** — Fixed 93/93 failures caused by missing required fields on POST `/unified-exclusions`. The API requires `scopeLevel` and `scopeLevelId` in the filter (not data), `exclusionName` (mapped from `name` if absent), `reason` (defaults to `"other"`), and `recommendation` (defaults to `"NONE"`). The GET response uses different field names than POST expects.
+
 ## v1.5.2 — 2026-06-23
 
 ### Build

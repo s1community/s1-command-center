@@ -9,7 +9,11 @@ from tkinter import filedialog, messagebox
 from datetime import datetime, timezone
 from typing import Optional
 
-from app import run_async, LogBox, CARD, GREEN, ACCENT, WARN, cli_log, _ConsoleProxy, _help_btn
+from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
+                 ACCENT_HOVER, WARN, WARN_HOVER, INFO, cli_log,
+                 _ConsoleProxy, _help_btn, UI_FONT, MONO_FONT, BRAND,
+                 BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
+                 TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
 from s1_api import S1APIError
 
@@ -115,8 +119,8 @@ def _build_elements_section(parent, row, title="Elements"):
 
     toggle_btn = ctk.CTkButton(
         hdr, text=f"▶ {title} ({len(BACKUP_ELEMENTS)} items — all selected)",
-        font=("Segoe UI", 13), fg_color="transparent", hover_color="#333",
-        text_color="#ccc", anchor="w", height=28,
+        font=(UI_FONT, 13), fg_color="transparent", hover_color=NEUTRAL_HOVER,
+        text_color=TEXT, anchor="w", height=28,
         command=lambda: _toggle())
     toggle_btn.pack(side="left", fill="x", expand=True)
 
@@ -131,17 +135,17 @@ def _build_elements_section(parent, row, title="Elements"):
         f = ctk.CTkFrame(content, fg_color="transparent")
         f.grid(row=i // 4, column=i % 4, padx=4, pady=1, sticky="w")
         ctk.CTkCheckBox(f, text=el, variable=var,
-                        font=("Segoe UI", 10), width=20).pack(
+                        font=(UI_FONT, 10), width=20).pack(
             side="left")
         help_text = ELEMENT_HELP.get(el, "")
         if help_text:
-            tip = ctk.CTkLabel(f, text="ⓘ", font=("Segoe UI", 10),
-                               text_color="#666", cursor="hand2", width=16)
+            tip = ctk.CTkLabel(f, text="ⓘ", font=(UI_FONT, 10),
+                               text_color=TEXT_FAINT, cursor="hand2", width=16)
             tip.pack(side="left", padx=(2, 0))
             tip.bind("<Enter>", lambda e, t=help_text, w=tip:
-                     w.configure(text_color="#4da6ff"))
+                     w.configure(text_color=INFO))
             tip.bind("<Leave>", lambda e, w=tip:
-                     w.configure(text_color="#666"))
+                     w.configure(text_color=TEXT_FAINT))
             tip.bind("<Button-1>", lambda e, t=help_text, n=el:
                      cli_log(f"ⓘ {n}: {t}", "info"))
         elem_vars[el] = var
@@ -151,11 +155,11 @@ def _build_elements_section(parent, row, title="Elements"):
     sel_frame.grid(row=len(BACKUP_ELEMENTS) // 4 + 1, column=0,
                    columnspan=4, pady=(4, 4), sticky="w")
     ctk.CTkButton(sel_frame, text="Select All", width=80, height=24,
-                  font=("Segoe UI", 10), fg_color="#555",
+                  font=(UI_FONT, 10), fg_color=NEUTRAL,
                   command=lambda: _update_all(True)
                   ).pack(side="left", padx=(0, 6))
     ctk.CTkButton(sel_frame, text="Deselect All", width=80, height=24,
-                  font=("Segoe UI", 10), fg_color="#555",
+                  font=(UI_FONT, 10), fg_color=NEUTRAL,
                   command=lambda: _update_all(False)
                   ).pack(side="left")
 
@@ -250,16 +254,16 @@ class ProgressTable(ctk.CTkFrame):
 
         # Header row inside the inner frame.
         ctk.CTkLabel(self._inner, text="Node",
-                     font=("Segoe UI", 10, "bold"),
-                     text_color="#888", width=250).grid(
+                     font=(UI_FONT, 10, "bold"),
+                     text_color=TEXT_MUTED, width=250).grid(
             row=0, column=0, padx=(8, 4), pady=4, sticky="w")
         ctk.CTkLabel(self._inner, text="Status",
-                     font=("Segoe UI", 10, "bold"),
-                     text_color="#888", width=70).grid(
+                     font=(UI_FONT, 10, "bold"),
+                     text_color=TEXT_MUTED, width=70).grid(
             row=0, column=1, padx=4, pady=4)
         ctk.CTkLabel(self._inner, text="Details",
-                     font=("Segoe UI", 10, "bold"),
-                     text_color="#888").grid(
+                     font=(UI_FONT, 10, "bold"),
+                     text_color=TEXT_MUTED).grid(
             row=0, column=2, padx=(4, 8), pady=4, sticky="w")
         self._inner.grid_columnconfigure(2, weight=1)
 
@@ -359,7 +363,7 @@ class ProgressTable(ctk.CTkFrame):
         # are.
         name_lbl = ctk.CTkLabel(self._inner,
                                 text=f"{r:>3}. {prefix} {display}",
-                                font=("Consolas", 11), text_color="#ccc",
+                                font=(MONO_FONT, 11), text_color=TEXT,
                                 anchor="w")
         name_lbl.grid(row=r, column=0, padx=(8, 4), pady=1, sticky="ew")
         # Hover-tooltip: show the FULL path on mouse-over so the operator
@@ -367,7 +371,7 @@ class ProgressTable(ctk.CTkFrame):
         self._attach_tooltip(name_lbl, path)
 
         status_lbl = ctk.CTkLabel(self._inner, text="pending",
-                                  font=("Segoe UI", 10, "bold"),
+                                  font=(UI_FONT, 10, "bold"),
                                   fg_color=bg, text_color=fg,
                                   corner_radius=6, width=70, height=22)
         status_lbl.grid(row=r, column=1, padx=4, pady=1)
@@ -376,7 +380,7 @@ class ProgressTable(ctk.CTkFrame):
         # long element-summary strings spill onto a second line instead of
         # being clipped. Re-computed on resize via _on_configure.
         detail_lbl = ctk.CTkLabel(self._inner, text="",
-                                  font=("Consolas", 10), text_color="#999",
+                                  font=(MONO_FONT, 10), text_color=TEXT_MUTED,
                                   anchor="w", justify="left",
                                   wraplength=380)
         detail_lbl.grid(row=r, column=2, padx=(4, 8), pady=1, sticky="ew")
@@ -407,7 +411,7 @@ class ProgressTable(ctk.CTkFrame):
                 w, text=text, justify="left",
                 background="#1f2329", foreground="#e0e0e0",
                 relief="solid", borderwidth=1,
-                font=("Consolas", 10), padx=6, pady=3)
+                font=(MONO_FONT, 10), padx=6, pady=3)
             lbl.pack()
             tip["win"] = w
 
@@ -438,7 +442,7 @@ class ProgressTable(ctk.CTkFrame):
             return
         bg, fg = self.STATUS_COLORS["running"]
         row["status"].configure(text="running", fg_color=bg, text_color=fg)
-        row["name"].configure(text_color="white")
+        row["name"].configure(text_color=TEXT)
         # Auto-scroll so the active row is always visible. Defer one tick
         # so Tk has finished laying out the just-configured label widths.
         self.after(20, lambda r=row: self._scroll_to_widget(r["name"]))
@@ -470,9 +474,9 @@ class ProgressTable(ctk.CTkFrame):
             return
         bg, fg = self.STATUS_COLORS["done"]
         row["status"].configure(text="done", fg_color=bg, text_color=fg)
-        row["name"].configure(text_color="#aaa")
+        row["name"].configure(text_color=TEXT_MUTED)
         if summary:
-            row["detail"].configure(text=summary, text_color="#8f8")
+            row["detail"].configure(text=summary, text_color=GREEN)
 
     def set_error(self, node_id: str, msg: str = ""):
         row = self._rows.get(node_id)
@@ -481,7 +485,7 @@ class ProgressTable(ctk.CTkFrame):
         bg, fg = self.STATUS_COLORS["error"]
         row["status"].configure(text="error", fg_color=bg, text_color=fg)
         if msg:
-            row["detail"].configure(text=msg, text_color="#f88")
+            row["detail"].configure(text=msg, text_color=ACCENT)
 
     def set_skipped(self, node_id: str, reason: str = ""):
         row = self._rows.get(node_id)
@@ -489,14 +493,14 @@ class ProgressTable(ctk.CTkFrame):
             return
         bg, fg = self.STATUS_COLORS["skipped"]
         row["status"].configure(text="skip", fg_color=bg, text_color=fg)
-        row["name"].configure(text_color="#555")
+        row["name"].configure(text_color=TEXT_FAINT)
         if reason:
-            row["detail"].configure(text=reason, text_color="#666")
+            row["detail"].configure(text=reason, text_color=TEXT_FAINT)
 
     def set_detail(self, node_id: str, text: str):
         row = self._rows.get(node_id)
         if row:
-            row["detail"].configure(text=text, text_color="#aaa")
+            row["detail"].configure(text=text, text_color=TEXT_MUTED)
 
 
 # Fields to strip from source objects before creating on destination
@@ -1150,6 +1154,58 @@ def _scope(scope_type, scope_id):
     return {}
 
 
+# ─── Restore error classification (pure, module-level for testability) ──
+# These were historically nested inside RestorePage._run_restore; they close
+# over nothing, so hoisting them lets the test-suite exercise the
+# "is this failure actually benign?" logic that drives skip-vs-error counts.
+
+def _is_exists_error(exc) -> bool:
+    """Treat duplicate-create and scope-inheritance errors as benign skips
+    rather than real failures.
+    S1APIError carries the human-readable reason in `.detail`, while
+    `str(exc)` is only the short 'METHOD /path → code' line, so we inspect
+    both."""
+    sc = getattr(exc, "status_code", 0)
+    msg = (str(exc) + " " + str(getattr(exc, "detail", ""))).lower()
+    exists_words = ("already", "duplicate", "exists",
+                    "conflict", "unique",
+                    "filter with the given name",
+                    "hash",
+                    "rule with same name",
+                    "with same name")
+    # 403 + 'decoupled scope' wording = destination group inherits from its
+    # parent, so per-scope writes are blocked. Not a bug — that's the
+    # intended inherited-config state.
+    inherit_words = ("decoupled", "marking scope",
+                     "cannot update other settings")
+    if sc in (400, 409) and any(w in msg for w in exists_words):
+        return True
+    if sc == 403 and any(w in msg for w in inherit_words):
+        return True
+    return False
+
+
+def _err_detail(exc) -> str:
+    """Best-effort human-readable error text from an exception.
+    S1APIError carries `.detail` but the API sometimes returns an empty
+    body, leaving detail = ''. Fall back to str(exc) whenever detail is
+    missing or blank so the user never sees an empty error."""
+    d = getattr(exc, "detail", "") or ""
+    if not str(d).strip():
+        d = str(exc) or repr(exc)
+    return str(d)
+
+
+def _item_id(item, label="") -> str:
+    """Extract a human-readable identifier from a restore item."""
+    for key in ("name", "ruleName", "value", "s1ql",
+                "email", "fullName", "description", "type"):
+        v = item.get(key)
+        if v and isinstance(v, str):
+            return v[:80]
+    return label
+
+
 # ─── Diff-panel summary helpers ────────────────────────────────────────
 # Used by the side-by-side DiffPanel on the Restore page. The same shape
 # is produced from a backup node's `data` dict AND from a live destination
@@ -1400,8 +1456,9 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
                     "id": "", "account_name": "", "site_name": ""})
     try:
         accounts = api.get_accounts()
-    except Exception:
+    except Exception as e:
         accounts = []
+        cli_log(f"Could not list accounts: {e}", "error")
     for acct in accounts:
         aname = acct.get("name", "?")
         aid = acct.get("id", "")
@@ -1416,8 +1473,9 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
         try:
             sites = api.get_sites(params={
                 "accountIds": aid, "sortBy": "name", "sortOrder": "asc"})
-        except Exception:
+        except Exception as e:
             sites = []
+            cli_log(f"Could not list sites under {aname}: {e}", "warning")
         for site in sites:
             sname = site.get("name", "?")
             sid = site.get("id", "")
@@ -1432,8 +1490,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
             try:
                 groups = api.get_groups(params={
                     "siteIds": sid, "sortBy": "name", "sortOrder": "asc"})
-            except Exception:
+            except Exception as e:
                 groups = []
+                cli_log(f"Could not list groups under {aname}/{sname}: {e}",
+                        "warning")
             for g in groups:
                 gname = g.get("name", "?")
                 gid = g.get("id", "")
@@ -1508,20 +1568,20 @@ class BackupPage(ctk.CTkFrame):
         hdr = ctk.CTkFrame(self, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 2))
         ctk.CTkLabel(hdr, text="Backup from",
-                     font=("Segoe UI", 22, "bold")).pack(side="left")
+                     font=(UI_FONT, 22, "bold")).pack(side="left")
         self._console_var = ctk.StringVar(value="SOURCE")
         ctk.CTkOptionMenu(hdr, values=["SOURCE", "DESTINATION"],
                           variable=self._console_var, width=160, height=32,
-                          font=("Segoe UI", 14, "bold"),
+                          font=(UI_FONT, 14, "bold"),
                           command=lambda _: self._update_indicator()).pack(
             side="left", padx=(8, 0))
         self._indicator = ctk.CTkLabel(hdr, text="",
-                                       font=("Segoe UI", 11),
+                                       font=(UI_FONT, 11),
                                        text_color=GREEN)
         self._indicator.pack(side="left", padx=(12, 0))
         ctk.CTkLabel(self,
                      text="Reads accounts → sites → groups and saves config to a JSON file.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # options card
@@ -1530,7 +1590,7 @@ class BackupPage(ctk.CTkFrame):
         opts.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(opts, text="Levels:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         lv_frame = ctk.CTkFrame(opts, fg_color="transparent")
         lv_frame.grid(row=0, column=1, padx=12, pady=8, sticky="w")
@@ -1538,7 +1598,7 @@ class BackupPage(ctk.CTkFrame):
         for lv in ["global", "accounts", "sites", "groups"]:
             var = ctk.BooleanVar(value=(lv != "global"))
             ctk.CTkCheckBox(lv_frame, text=lv.capitalize(), variable=var,
-                            font=("Segoe UI", 12)).pack(side="left", padx=8)
+                            font=(UI_FONT, 12)).pack(side="left", padx=8)
             self.level_vars[lv] = var
         self.level_vars["global"].trace_add(
             "write", lambda *a: self._toggle_global_mode())
@@ -1551,7 +1611,7 @@ class BackupPage(ctk.CTkFrame):
             ("Group Name:", "(blank = all groups)", "group_filter"),
         ], start=1):
             lbl = ctk.CTkLabel(opts, text=lbl_text,
-                               font=("Segoe UI", 13))
+                               font=(UI_FONT, 13))
             lbl.grid(row=row_i, column=0, padx=12, pady=6, sticky="w")
             entry = ctk.CTkEntry(opts, placeholder_text=ph, height=32)
             entry.grid(row=row_i, column=1, padx=12, pady=6, sticky="ew")
@@ -1567,29 +1627,29 @@ class BackupPage(ctk.CTkFrame):
         btn_row.grid(row=3, column=0, sticky="ew", padx=20, pady=8)
         self._start_btn = ctk.CTkButton(
             btn_row, text="▶ Start Backup", height=38,
-            fg_color=GREEN, hover_color="#00a381",
-            font=("Segoe UI", 14, "bold"),
+            fg_color=GREEN, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"),
             command=self._start)
         self._start_btn.pack(side="left", padx=(0, 4))
         self._stop_btn = ctk.CTkButton(
             btn_row, text="■ Stop", height=38, width=80,
-            fg_color="#c0392b", hover_color="#e74c3c",
-            font=("Segoe UI", 13, "bold"),
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=(UI_FONT, 13, "bold"),
             command=self._stop, state="disabled")
         self._stop_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Export Log", height=38,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         self.progress = ctk.CTkProgressBar(btn_row, width=200)
         self.progress.pack(side="left", padx=8)
         self.progress.set(0)
         self._timer_lbl = ctk.CTkLabel(btn_row, text="",
-                                        font=("Consolas", 12),
-                                        text_color="#888")
+                                        font=(MONO_FONT, 12),
+                                        text_color=TEXT_MUTED)
         self._timer_lbl.pack(side="left", padx=(8, 0))
         self._status_lbl = ctk.CTkLabel(btn_row, text="",
-                                         font=("Segoe UI", 12, "bold"),
-                                         text_color="#888")
+                                         font=(UI_FONT, 12, "bold"),
+                                         text_color=TEXT_MUTED)
         self._status_lbl.pack(side="left", padx=(8, 0))
 
         # progress table
@@ -1639,7 +1699,7 @@ class BackupPage(ctk.CTkFrame):
                 text=f"▶ {ctx.name}  ({ctx.display_url})", text_color=color)
         else:
             self._indicator.configure(
-                text=f"▶ {choice} — not connected", text_color="gray")
+                text=f"▶ {choice} — not connected", text_color=TEXT_MUTED)
 
     def on_show(self):
         self._update_indicator()
@@ -1673,11 +1733,14 @@ class BackupPage(ctk.CTkFrame):
         cli_log("Backup stop requested — finishing current node…", "warning")
 
     def _set_ui_running(self, running: bool):
+        # Lock the rest of the app while a backup runs — only Stop (and the
+        # OUTPUT drawer) stay clickable, so nothing disturbs the running job.
+        self.app.set_busy(running, allow=(self._start_btn, self._stop_btn))
         if running:
             self._start_btn.configure(state="disabled")
             self._stop_btn.configure(state="normal")
             self._status_lbl.configure(text="Backup running…",
-                                        text_color="#4da6ff")
+                                        text_color=INFO)
         else:
             self._start_btn.configure(state="normal")
             self._stop_btn.configure(state="disabled")
@@ -1755,6 +1818,11 @@ class BackupPage(ctk.CTkFrame):
                 return
             with open(path, "w") as f:
                 json.dump(backup_data, f, indent=2, default=str)
+            # Backup contains sensitive config (SSO/SMTP/Syslog/AD) — restrict it.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
             self.app._last_backup_path = path  # share with Restore page
             self._operation_log.append(
                 f"Backup saved to {path} ({len(backup_data)} nodes, "
@@ -1848,8 +1916,9 @@ class BackupPage(ctk.CTkFrame):
                     "runByUser": user_info,
                     "restoreToContext": "",
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                cli_log(f"Backup metadata (user/system info) unavailable: {e}",
+                        "warning")
             nodes.append(node)
 
         # ── discover structure ──
@@ -2046,6 +2115,7 @@ class BackupPage(ctk.CTkFrame):
                     results.append((label, "n/a"))
                 else:
                     results.append((label, f"ERR"))
+                    cli_log(f"Backup of {label} failed: {e}", "error")
                 return None
 
         # ── Core ──
@@ -2053,8 +2123,9 @@ class BackupPage(ctk.CTkFrame):
             try:
                 data["policy"] = api.get_policy(scope_type, scope_id)
                 results.append(("policy", "ok"))
-            except Exception:
+            except Exception as e:
                 results.append(("policy", "ERR"))
+                cli_log(f"Backup of policy failed: {e}", "error")
 
         if "exclusions" in elements:
             data["exclusions"] = {}
@@ -2064,8 +2135,8 @@ class BackupPage(ctk.CTkFrame):
                     items = api.get_exclusions(scope, et)
                     data["exclusions"][et] = items
                     total += len(items)
-                except Exception:
-                    pass
+                except Exception as e:
+                    cli_log(f"Backup of exclusions/{et} failed: {e}", "warning")
             results.append(("exclusions", total))
 
         if "unified_exclusions" in elements:
@@ -2073,8 +2144,9 @@ class BackupPage(ctk.CTkFrame):
                 items = api.get_unified_exclusions(scope)
                 data["unified_exclusions"] = items
                 results.append(("unified_exclusions", len(items)))
-            except Exception:
+            except Exception as e:
                 results.append(("unified_exclusions", "ERR"))
+                cli_log(f"Backup of unified_exclusions failed: {e}", "error")
 
         if "blocklist" in elements:
             _fetch("restrictions", "blocklist", api.get_blocklist, scope)
@@ -2189,13 +2261,16 @@ class BackupPage(ctk.CTkFrame):
                     try:
                         settings[sname] = getter(scope)
                         results.append((f"set-{sname[:4]}", "ok"))
-                    except Exception:
+                    except Exception as e:
                         results.append((f"set-{sname[:4]}", "n/a"))
+                        cli_log(f"Backup of {sname} settings skipped: {e}",
+                                "warning")
             if "settings_notifications" in elements:
                 try:
                     settings["recipients"] = api.get_notification_recipients(scope)
-                except Exception:
-                    pass
+                except Exception as e:
+                    cli_log(f"Backup of notification recipients skipped: {e}",
+                            "warning")
             if settings:
                 data["settings"] = settings
 
@@ -2248,7 +2323,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.title("Edit Backup — Defaults & Licenses")
         self.geometry("980x580")
-        self.configure(fg_color="#0d0d1a")
+        self.configure(fg_color=CONSOLE_BG)
         self.transient(parent)
         self.grab_set()
 
@@ -2269,27 +2344,27 @@ class SetDefaultsDialog(ctk.CTkToplevel):
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=16, pady=(16, 8))
         self._file_lbl = ctk.CTkLabel(
-            top, text="No file loaded", font=("Segoe UI", 12),
-            text_color="gray")
+            top, text="No file loaded", font=(UI_FONT, 12),
+            text_color=TEXT_MUTED)
         self._file_lbl.pack(side="left", fill="x", expand=True, anchor="w")
         ctk.CTkButton(top, text="Browse…", width=90, height=30,
-                      fg_color="#555", hover_color="#666",
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
                       command=self._browse).pack(side="right")
 
         # filter row
         filt = ctk.CTkFrame(self, fg_color="transparent")
         filt.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(filt, text="Show:", font=("Segoe UI", 12)).pack(
+        ctk.CTkLabel(filt, text="Show:", font=(UI_FONT, 12)).pack(
             side="left", padx=(0, 6))
         self._filter_var = ctk.StringVar(value="all")
         for val in ["all", "account", "site", "group"]:
             ctk.CTkRadioButton(filt, text=val.capitalize(),
                                variable=self._filter_var, value=val,
-                               font=("Segoe UI", 12),
+                               font=(UI_FONT, 12),
                                command=self._refresh).pack(
                 side="left", padx=6)
-        self._count_lbl = ctk.CTkLabel(filt, text="", font=("Segoe UI", 11),
-                                        text_color="#888")
+        self._count_lbl = ctk.CTkLabel(filt, text="", font=(UI_FONT, 11),
+                                        text_color=TEXT_MUTED)
         self._count_lbl.pack(side="right")
 
         # scrollable table
@@ -2297,7 +2372,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
             self, fg_color=CARD, corner_radius=12)
         self._table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         for col, (txt, w) in enumerate(self._COLS):
-            kw = {"text": txt, "font": ("Segoe UI", 10, "bold"),
+            kw = {"text": txt, "font": (UI_FONT, 10, "bold"),
                   "text_color": "#888"}
             if w:
                 kw["width"] = w
@@ -2309,23 +2384,23 @@ class SetDefaultsDialog(ctk.CTkToplevel):
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=16, pady=(0, 16))
         ctk.CTkButton(btns, text="∞ Exp ON", height=32, width=90,
-                      fg_color="#555", hover_color="#666",
-                      font=("Segoe UI", 11),
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                      font=(UI_FONT, 11),
                       command=lambda: self._bulk_bool("unlimitedExpiration", True)).pack(
             side="left", padx=(0, 4))
         ctk.CTkButton(btns, text="∞ Exp OFF", height=32, width=90,
-                      fg_color="#555", hover_color="#666",
-                      font=("Segoe UI", 11),
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                      font=(UI_FONT, 11),
                       command=lambda: self._bulk_bool("unlimitedExpiration", False)).pack(
             side="left", padx=(0, 8))
         ctk.CTkButton(btns, text="∞ Lic ON", height=32, width=90,
-                      fg_color="#555", hover_color="#666",
-                      font=("Segoe UI", 11),
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                      font=(UI_FONT, 11),
                       command=lambda: self._bulk_bool("unlimitedLicenses", True)).pack(
             side="left", padx=(0, 4))
         ctk.CTkButton(btns, text="∞ Lic OFF", height=32, width=90,
-                      fg_color="#555", hover_color="#666",
-                      font=("Segoe UI", 11),
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                      font=(UI_FONT, 11),
                       command=lambda: self._bulk_bool("unlimitedLicenses", False)).pack(
             side="left", padx=(0, 4))
 
@@ -2333,10 +2408,10 @@ class SetDefaultsDialog(ctk.CTkToplevel):
         save_row = ctk.CTkFrame(self, fg_color="transparent")
         save_row.pack(fill="x", padx=16, pady=(0, 12))
         ctk.CTkButton(save_row, text="Save to File", height=34,
-                      fg_color="#2980b9", hover_color="#2471a3",
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
                       command=self._save).pack(side="right")
-        self._status = ctk.CTkLabel(save_row, text="", font=("Segoe UI", 11),
-                                     text_color="#888")
+        self._status = ctk.CTkLabel(save_row, text="", font=(UI_FONT, 11),
+                                     text_color=TEXT_MUTED)
         self._status.pack(side="right", padx=12)
 
     # ── Load / Parse ───────────────────────────────────────────────────
@@ -2355,7 +2430,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
             self._file_path = path
             self._file_lbl.configure(
                 text=f"File: {os.path.basename(path)}",
-                text_color="white")
+                text_color=TEXT)
         except Exception as e:
             self._file_lbl.configure(text=f"Error: {e}", text_color=ACCENT)
             return
@@ -2409,13 +2484,13 @@ class SetDefaultsDialog(ctk.CTkToplevel):
             icons = {"account": "🏢", "site": "🌐", "group": "📁"}
             ctk.CTkLabel(self._table,
                          text=f"{icons.get(entry['type'], '')} {entry['type']}",
-                         font=("Segoe UI", 11), width=60).grid(
+                         font=(UI_FONT, 11), width=60).grid(
                 row=i, column=0, padx=4, pady=2, sticky="w")
 
             # col 1 — name
             ctk.CTkLabel(self._table, text=entry["name"],
-                         font=("Segoe UI", 12, "bold"),
-                         text_color="white").grid(
+                         font=(UI_FONT, 12, "bold"),
+                         text_color=TEXT).grid(
                 row=i, column=1, padx=4, pady=2, sticky="w")
 
             # col 2 — isDefault checkbox
@@ -2429,14 +2504,14 @@ class SetDefaultsDialog(ctk.CTkToplevel):
                 cb.grid(row=i, column=2, padx=4, pady=2, sticky="w")
                 rw["isDefault"] = var
             else:
-                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                ctk.CTkLabel(self._table, text="—", text_color=TEXT_FAINT,
                              width=55).grid(
                     row=i, column=2, padx=4, pady=2, sticky="w")
 
             # col 3 — expiration entry
             if "expiration" in entry:
                 exp_e = ctk.CTkEntry(self._table, width=130, height=26,
-                                     font=("Consolas", 11))
+                                     font=(MONO_FONT, 11))
                 exp_e.insert(0, entry.get("expiration", ""))
                 exp_e.grid(row=i, column=3, padx=4, pady=2, sticky="w")
                 exp_e._entry_ref = entry
@@ -2444,7 +2519,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
                            self._on_exp_change(w))
                 rw["expiration"] = exp_e
             else:
-                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                ctk.CTkLabel(self._table, text="—", text_color=TEXT_FAINT,
                              width=130).grid(
                     row=i, column=3, padx=4, pady=2, sticky="w")
 
@@ -2460,7 +2535,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
                                        sticky="w")
                 rw["unlimitedExpiration"] = var2
             else:
-                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                ctk.CTkLabel(self._table, text="—", text_color=TEXT_FAINT,
                              width=45).grid(
                     row=i, column=4, padx=4, pady=2, sticky="w")
 
@@ -2476,7 +2551,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
                                        sticky="w")
                 rw["unlimitedLicenses"] = var3
             else:
-                ctk.CTkLabel(self._table, text="—", text_color="#444",
+                ctk.CTkLabel(self._table, text="—", text_color=TEXT_FAINT,
                              width=45).grid(
                     row=i, column=5, padx=4, pady=2, sticky="w")
 
@@ -2534,6 +2609,10 @@ class SetDefaultsDialog(ctk.CTkToplevel):
         try:
             with open(self._file_path, "w") as f:
                 json.dump(self._backup_data, f, indent=2, default=str)
+            try:
+                os.chmod(self._file_path, 0o600)
+            except OSError:
+                pass
             self._status.configure(
                 text=f"Saved — {changes} change(s) → "
                      f"{os.path.basename(self._file_path)}",
@@ -2582,9 +2661,9 @@ class DiffPanel(ctk.CTkFrame):
         hdr = ctk.CTkFrame(self, fg_color="transparent")
         hdr.pack(fill="x", padx=8, pady=(8, 2))
         ctk.CTkLabel(hdr, text="🔍  Source vs Destination",
-                     font=("Segoe UI", 13, "bold")).pack(side="left")
+                     font=(UI_FONT, 13, "bold")).pack(side="left")
         self._refresh_lbl = ctk.CTkLabel(
-            hdr, text="", font=("Segoe UI", 10), text_color="#888")
+            hdr, text="", font=(UI_FONT, 10), text_color=TEXT_MUTED)
         self._refresh_lbl.pack(side="right", padx=(4, 0))
 
         # ── Node selector ──
@@ -2592,7 +2671,7 @@ class DiffPanel(ctk.CTkFrame):
         self._node_menu = ctk.CTkOptionMenu(
             self, variable=self._node_var, values=["(no backup loaded)"],
             command=self._on_select_node, height=28,
-            font=("Consolas", 11))
+            font=(MONO_FONT, 11))
         self._node_menu.pack(fill="x", padx=8, pady=(2, 4))
 
         # ── Column headers ──
@@ -2601,11 +2680,11 @@ class DiffPanel(ctk.CTkFrame):
         col_hdr.grid_columnconfigure(0, weight=1, uniform="c")
         col_hdr.grid_columnconfigure(1, weight=1, uniform="c")
         ctk.CTkLabel(col_hdr, text="📦  BACKUP",
-                     font=("Segoe UI", 11, "bold"),
+                     font=(UI_FONT, 11, "bold"),
                      text_color=GREEN, anchor="w").grid(
             row=0, column=0, sticky="ew", padx=4)
         ctk.CTkLabel(col_hdr, text="🌐  DESTINATION (live)",
-                     font=("Segoe UI", 11, "bold"),
+                     font=(UI_FONT, 11, "bold"),
                      text_color=ACCENT, anchor="w").grid(
             row=0, column=1, sticky="ew", padx=4)
 
@@ -2617,32 +2696,32 @@ class DiffPanel(ctk.CTkFrame):
         body.grid_rowconfigure(0, weight=1)
 
         self._left = tk.Text(
-            body, font=("Consolas", 10), bg="#15171c", fg="#d0d0d0",
+            body, font=(MONO_FONT, 10), bg="#15171c", fg="#d0d0d0",
             relief="flat", borderwidth=0, wrap="none", height=18,
             insertbackground="#d0d0d0")
         self._left.grid(row=0, column=0, sticky="nsew", padx=(4, 2))
         self._right = tk.Text(
-            body, font=("Consolas", 10), bg="#15171c", fg="#d0d0d0",
+            body, font=(MONO_FONT, 10), bg="#15171c", fg="#d0d0d0",
             relief="flat", borderwidth=0, wrap="none", height=18,
             insertbackground="#d0d0d0")
         self._right.grid(row=0, column=1, sticky="nsew", padx=(2, 4))
 
         for w in (self._left, self._right):
             w.tag_configure("hdr",  foreground="#9eaab8",
-                            font=("Consolas", 10, "bold"))
+                            font=(MONO_FONT, 10, "bold"))
             w.tag_configure("same", foreground="#6dbf6d")
             w.tag_configure("diff", foreground="#f0b248",
-                            font=("Consolas", 10, "bold"))
+                            font=(MONO_FONT, 10, "bold"))
             w.tag_configure("missing", foreground="#666",
-                            font=("Consolas", 10, "italic"))
+                            font=(MONO_FONT, 10, "italic"))
             w.tag_configure("identity_diff", foreground="#e94560",
-                            font=("Consolas", 10, "bold"))
+                            font=(MONO_FONT, 10, "bold"))
             w.configure(state="disabled")
 
         self._status = ctk.CTkLabel(
             self, text="Load a backup file and start a restore to see "
                        "side-by-side changes.",
-            font=("Segoe UI", 10), text_color="#888", anchor="w")
+            font=(UI_FONT, 10), text_color=TEXT_MUTED, anchor="w")
         self._status.pack(fill="x", padx=8, pady=(0, 6))
 
     # ── Public API ─────────────────────────────────────────────────────
@@ -2781,7 +2860,7 @@ class DiffPanel(ctk.CTkFrame):
                      f"({snap['phase']}).")
         else:
             self._refresh_lbl.configure(text="(not yet queried)",
-                                         text_color="#666")
+                                         text_color=TEXT_FAINT)
             self._status.configure(
                 text="Destination not queried yet — start a restore "
                      "to capture before/after snapshots.")
@@ -2803,20 +2882,20 @@ class RestorePage(ctk.CTkFrame):
         hdr = ctk.CTkFrame(self, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 2))
         ctk.CTkLabel(hdr, text="Restore to",
-                     font=("Segoe UI", 22, "bold")).pack(side="left")
+                     font=(UI_FONT, 22, "bold")).pack(side="left")
         self._console_var = ctk.StringVar(value="DESTINATION")
         ctk.CTkOptionMenu(hdr, values=["DESTINATION", "SOURCE"],
                           variable=self._console_var, width=160, height=32,
-                          font=("Segoe UI", 14, "bold"),
+                          font=(UI_FONT, 14, "bold"),
                           command=lambda _: self._update_indicator()).pack(
             side="left", padx=(8, 0))
         self._indicator = ctk.CTkLabel(hdr, text="",
-                                       font=("Segoe UI", 11),
+                                       font=(UI_FONT, 11),
                                        text_color=ACCENT)
         self._indicator.pack(side="left", padx=(12, 0))
         ctk.CTkLabel(self,
                      text="Load a backup file and push configuration to the selected console.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # file picker
@@ -2825,7 +2904,7 @@ class RestorePage(ctk.CTkFrame):
         file_row.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(file_row, text="Backup file:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=10, sticky="w")
         self.file_entry = ctk.CTkEntry(file_row, placeholder_text="Select a backup JSON…", height=32)
         self.file_entry.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
@@ -2834,7 +2913,7 @@ class RestorePage(ctk.CTkFrame):
             row=0, column=2, padx=12, pady=10)
 
         self.info_lbl = ctk.CTkLabel(file_row, text="",
-                                     font=("Segoe UI", 12), text_color="gray")
+                                     font=(UI_FONT, 12), text_color=TEXT_MUTED)
         self.info_lbl.grid(row=1, column=0, columnspan=3, padx=12,
                            pady=(0, 8), sticky="w")
 
@@ -2846,8 +2925,8 @@ class RestorePage(ctk.CTkFrame):
         mangle_hdr = ctk.CTkButton(
             mangle_outer,
             text="▶ Structure Operations (optional)",
-            font=("Segoe UI", 13), fg_color="transparent",
-            hover_color="#333", text_color=WARN, anchor="w", height=32,
+            font=(UI_FONT, 13), fg_color="transparent",
+            hover_color=NEUTRAL_HOVER, text_color=WARN, anchor="w", height=32,
             command=self._toggle_mangle)
         mangle_hdr.pack(fill="x", padx=8, pady=4)
         self._mangle_toggle_btn = mangle_hdr
@@ -2857,7 +2936,7 @@ class RestorePage(ctk.CTkFrame):
         self._mangle_content.columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self._mangle_content, text="Source Name:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=4, sticky="w")
         self.mangle_src = ctk.CTkEntry(
             self._mangle_content,
@@ -2865,7 +2944,7 @@ class RestorePage(ctk.CTkFrame):
         self.mangle_src.grid(row=0, column=1, padx=12, pady=4, sticky="ew")
 
         ctk.CTkLabel(self._mangle_content, text="New Name:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=1, column=0, padx=12, pady=4, sticky="w")
         self.mangle_dst = ctk.CTkEntry(
             self._mangle_content,
@@ -2876,14 +2955,14 @@ class RestorePage(ctk.CTkFrame):
         mangle_btns.grid(row=2, column=0, columnspan=2, padx=12,
                          pady=(6, 10), sticky="w")
         ctk.CTkButton(mangle_btns, text="Mangle Rename", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._mangle_rename).pack(side="left", padx=(0, 8))
         ctk.CTkButton(mangle_btns, text="Set Target Context", height=34,
-                      fg_color="#555",
+                      fg_color=NEUTRAL,
                       command=self._set_target_context).pack(side="left", padx=(0, 8))
         self.mangle_status = ctk.CTkLabel(mangle_btns, text="",
-                                          font=("Segoe UI", 11),
-                                          text_color="gray")
+                                          font=(UI_FONT, 11),
+                                          text_color=TEXT_MUTED)
         self.mangle_status.pack(side="left", padx=8)
 
         # restore scope card
@@ -2894,7 +2973,7 @@ class RestorePage(ctk.CTkFrame):
         scope_card.grid_columnconfigure(5, weight=1)
 
         ctk.CTkLabel(scope_card, text="Restore level:",
-                     font=("Segoe UI", 13, "bold"), text_color=ACCENT).grid(
+                     font=(UI_FONT, 13, "bold"), text_color=ACCENT).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         lv_inner = ctk.CTkFrame(scope_card, fg_color="transparent")
         lv_inner.grid(row=0, column=1, columnspan=5, padx=12, pady=8, sticky="w")
@@ -2902,7 +2981,7 @@ class RestorePage(ctk.CTkFrame):
         for lv in ["global", "accounts", "sites", "groups"]:
             var = ctk.BooleanVar(value=(lv != "global"))
             ctk.CTkCheckBox(lv_inner, text=lv.capitalize(), variable=var,
-                            font=("Segoe UI", 12)).pack(side="left", padx=8)
+                            font=(UI_FONT, 12)).pack(side="left", padx=8)
             self.restore_level_vars[lv] = var
         self.restore_level_vars["global"].trace_add(
             "write", lambda *a: self._toggle_restore_global())
@@ -2915,7 +2994,7 @@ class RestorePage(ctk.CTkFrame):
         ]):
             c0 = col_i * 2
             lbl = ctk.CTkLabel(scope_card, text=lbl_text,
-                               font=("Segoe UI", 13))
+                               font=(UI_FONT, 13))
             lbl.grid(row=1, column=c0, padx=12, pady=6, sticky="w")
             entry = ctk.CTkEntry(
                 scope_card, placeholder_text="(blank = all)", height=32)
@@ -2938,45 +3017,45 @@ class RestorePage(ctk.CTkFrame):
         # GROUP 1 – Launch (green tones)
         self._start_btn = ctk.CTkButton(
             row1, text="▶  Restore", height=38, width=130,
-            fg_color="#00b894", hover_color="#00a37e",
-            font=("Segoe UI", 14, "bold"),
+            fg_color=GREEN, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"),
             command=lambda: self._start_restore(auto=False))
         self._start_btn.pack(side="left", padx=(0, 4))
         self._auto_btn = ctk.CTkButton(
             row1, text="⚡ Auto Restore", height=38, width=150,
-            fg_color="#00897b", hover_color="#00695c",
-            font=("Segoe UI", 14, "bold"),
+            fg_color=GREEN_HOVER, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"),
             command=lambda: self._start_restore(auto=True))
         self._auto_btn.pack(side="left", padx=(0, 4))
         self._resume_btn = ctk.CTkButton(
             row1, text="↻  Resume", height=38, width=120,
-            fg_color="#555", hover_color="#777",
-            font=("Segoe UI", 14, "bold"),
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 14, "bold"),
             command=self._resume_restore, state="disabled")
         self._resume_btn.pack(side="left", padx=(0, 12))
 
         # GROUP 2 – Runtime control (red/orange tones, disabled until running)
         self._stop_btn = ctk.CTkButton(
             row1, text="■  Stop", height=38, width=90,
-            fg_color="#c0392b", hover_color="#e74c3c",
-            font=("Segoe UI", 13, "bold"),
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=(UI_FONT, 13, "bold"),
             command=self._stop, state="disabled")
         self._stop_btn.pack(side="left", padx=(0, 4))
         self._skip_btn = ctk.CTkButton(
             row1, text="⏭  Skip Element", height=38, width=140,
-            fg_color="#d35400", hover_color="#e67e22",
-            font=("Segoe UI", 13, "bold"),
+            fg_color=WARN_HOVER, hover_color=WARN_HOVER,
+            font=(UI_FONT, 13, "bold"),
             command=self._skip_current_element, state="disabled")
         self._skip_btn.pack(side="left", padx=(0, 12))
 
         # Progress + timer (right-aligned)
         self._status_lbl = ctk.CTkLabel(row1, text="",
-                                         font=("Segoe UI", 12, "bold"),
-                                         text_color="#888")
+                                         font=(UI_FONT, 12, "bold"),
+                                         text_color=TEXT_MUTED)
         self._status_lbl.pack(side="right", padx=(8, 0))
         self._timer_lbl = ctk.CTkLabel(row1, text="",
-                                        font=("Consolas", 12),
-                                        text_color="#888")
+                                        font=(MONO_FONT, 12),
+                                        text_color=TEXT_MUTED)
         self._timer_lbl.pack(side="right", padx=(8, 0))
         self.progress = ctk.CTkProgressBar(row1, width=200)
         self.progress.pack(side="right", padx=8)
@@ -2989,14 +3068,14 @@ class RestorePage(ctk.CTkFrame):
         # GROUP 3 – Results (blue tones, enabled after restore)
         self._export_btn = ctk.CTkButton(
             row2, text="📋  Export Log", height=34, width=130,
-            fg_color="#2980b9", hover_color="#2471a3",
-            font=("Segoe UI", 12, "bold"),
+            fg_color=BRAND, hover_color=BRAND_HOVER,
+            font=(UI_FONT, 12, "bold"),
             command=self._export, state="disabled")
         self._export_btn.pack(side="left", padx=(0, 4))
         self._explain_btn = ctk.CTkButton(
             row2, text="🛟  Explain Errors", height=34, width=150,
-            fg_color="#2c3e50", hover_color="#34495e",
-            font=("Segoe UI", 12, "bold"),
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
             command=self._show_errors_dialog, state="disabled")
         self._explain_btn.pack(side="left", padx=(0, 4))
         _help_btn(row2,
@@ -3008,8 +3087,8 @@ class RestorePage(ctk.CTkFrame):
 
         # GROUP 4 – Pre-restore tools (muted purple)
         ctk.CTkButton(row2, text="⚙  Set Defaults", height=34, width=140,
-                      fg_color="#555", hover_color="#777",
-                      font=("Segoe UI", 12),
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                      font=(UI_FONT, 12),
                       command=self._open_set_defaults).pack(side="left", padx=(0, 4))
 
         # progress table + diff panel (resizable side by side).
@@ -3093,7 +3172,7 @@ class RestorePage(ctk.CTkFrame):
                 text=f"▶ {ctx.name}  ({ctx.display_url})", text_color=color)
         else:
             self._indicator.configure(
-                text=f"▶ {choice} — not connected", text_color="gray")
+                text=f"▶ {choice} — not connected", text_color=TEXT_MUTED)
 
     def on_show(self):
         self._update_indicator()
@@ -3363,6 +3442,13 @@ class RestorePage(ctk.CTkFrame):
         cli_log("Restore stop requested — finishing current node…", "warning")
 
     def _set_ui_running(self, running: bool):
+        # Lock the rest of the app while a restore runs — only Stop, Skip
+        # Element (and the OUTPUT drawer) stay clickable. The buttons this page
+        # owns are exempted here and managed explicitly just below.
+        self.app.set_busy(running, allow=(
+            self._start_btn, self._auto_btn, self._resume_btn,
+            self._stop_btn, self._skip_btn, self._export_btn,
+            self._explain_btn))
         if running:
             self._start_btn.configure(state="disabled")
             self._auto_btn.configure(state="disabled")
@@ -3372,7 +3458,7 @@ class RestorePage(ctk.CTkFrame):
             self._export_btn.configure(state="disabled")
             self._explain_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
-                                        text_color="#4da6ff")
+                                        text_color=INFO)
         else:
             self._start_btn.configure(state="normal")
             self._auto_btn.configure(state="normal")
@@ -3392,7 +3478,7 @@ class RestorePage(ctk.CTkFrame):
                 for v in cp.values())
             self._resume_btn.configure(
                 state="normal" if has_remaining else "disabled",
-                fg_color="#e67e22" if has_remaining else "#555")
+                fg_color=WARN if has_remaining else "#555")
 
     def _start_restore(self, auto=False):
         api = self._get_restore_api()
@@ -3600,7 +3686,7 @@ class RestorePage(ctk.CTkFrame):
 
         win = ctk.CTkToplevel(self)
         win.title("Migration Complete")
-        win.configure(fg_color="#1a1a2e")
+        win.configure(fg_color=CARD_ELEVATED)
         win.resizable(False, False)
         w, h = 560, 600
 
@@ -3612,11 +3698,11 @@ class RestorePage(ctk.CTkFrame):
             banner,
             text="✓  Migration Completed Successfully" if clean
             else "✓  Migration Completed — with warnings",
-            font=("Segoe UI", 19, "bold"), text_color=accent).pack(
+            font=(UI_FONT, 19, "bold"), text_color=accent).pack(
             anchor="w", padx=24, pady=(18, 0))
         ctk.CTkLabel(
             banner, text=f"for  {customer}",
-            font=("Segoe UI", 15), text_color="white").pack(
+            font=(UI_FONT, 15), text_color=TEXT).pack(
             anchor="w", padx=24, pady=(2, 18))
 
         rows = [
@@ -3645,7 +3731,7 @@ class RestorePage(ctk.CTkFrame):
         btns = ctk.CTkFrame(win, fg_color="transparent")
         btns.pack(side="bottom", fill="x", padx=20, pady=(0, 16))
 
-        copy_status = ctk.CTkLabel(btns, text="", font=("Segoe UI", 11),
+        copy_status = ctk.CTkLabel(btns, text="", font=(UI_FONT, 11),
                                    text_color=GREEN)
         copy_status.pack(side="left", padx=(2, 0))
 
@@ -3661,20 +3747,20 @@ class RestorePage(ctk.CTkFrame):
 
         ctk.CTkButton(
             btns, text="Close", width=90, height=38,
-            fg_color="#555", hover_color="#666",
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
             command=win.destroy).pack(side="right", padx=(8, 0))
         ctk.CTkButton(
             btns, text="📋  Copy All", width=130, height=38,
-            fg_color=GREEN, hover_color="#00a37e",
+            fg_color=GREEN, hover_color=GREEN_HOVER,
             command=_copy_report).pack(side="right", padx=(8, 0))
         ctk.CTkButton(
             btns, text="📄  Export Log", width=130, height=38,
-            fg_color="#2980b9", hover_color="#2471a3",
+            fg_color=BRAND, hover_color=BRAND_HOVER,
             command=self._export).pack(side="right", padx=(8, 0))
         if total_failed:
             ctk.CTkButton(
                 btns, text="🛟  Explain Errors", width=150, height=38,
-                fg_color="#e67e22", hover_color="#d35400",
+                fg_color=WARN, hover_color=WARN_HOVER,
                 command=self._show_errors_dialog).pack(
                 side="right", padx=(8, 0))
 
@@ -3684,13 +3770,13 @@ class RestorePage(ctk.CTkFrame):
         card.grid_columnconfigure(1, weight=1)
 
         for r, (k, v) in enumerate(rows):
-            ctk.CTkLabel(card, text=k, font=("Segoe UI", 12, "bold"),
-                         text_color="#8aa0c0", anchor="w").grid(
+            ctk.CTkLabel(card, text=k, font=(UI_FONT, 12, "bold"),
+                         text_color=TEXT_MUTED, anchor="w").grid(
                 row=r, column=0, sticky="w", padx=(16, 10),
                 pady=5)
             val_color = (WARN if k == "Failures" and not clean
                          else GREEN if k == "Failures" else "white")
-            ctk.CTkLabel(card, text=str(v), font=("Segoe UI", 12),
+            ctk.CTkLabel(card, text=str(v), font=(UI_FONT, 12),
                          text_color=val_color, anchor="w",
                          wraplength=320, justify="left").grid(
                 row=r, column=1, sticky="w", pady=5)
@@ -3698,7 +3784,7 @@ class RestorePage(ctk.CTkFrame):
         if elements:
             ctk.CTkLabel(
                 card, text="• " + ", ".join(elements),
-                font=("Segoe UI", 10), text_color="#777",
+                font=(UI_FONT, 10), text_color=TEXT_FAINT,
                 wraplength=500, justify="left").grid(
                 row=len(rows), column=0, columnspan=2,
                 sticky="w", padx=16, pady=(8, 12))
@@ -3996,50 +4082,9 @@ class RestorePage(ctk.CTkFrame):
             # site rename the API rejected) in the issues report.
             failed_items.extend(self._resolve_issues.pop(npath, []))
 
-            def _is_exists_error(exc):
-                """Treat duplicate-create and scope-inheritance errors as
-                benign skips rather than real failures.
-                S1APIError carries the human-readable reason in `.detail`,
-                while `str(exc)` is only the short 'METHOD /path → code'
-                line, so we inspect both."""
-                sc = getattr(exc, "status_code", 0)
-                msg = (str(exc) + " " + str(getattr(exc, "detail", ""))).lower()
-                exists_words = ("already", "duplicate", "exists",
-                                "conflict", "unique",
-                                "filter with the given name",
-                                "hash",
-                                "rule with same name",
-                                "with same name")
-                # 403 + 'decoupled scope' wording = destination group inherits
-                # from its parent, so per-scope writes are blocked. Not a bug
-                # — that's the intended inherited-config state.
-                inherit_words = ("decoupled", "marking scope",
-                                 "cannot update other settings")
-                if sc in (400, 409) and any(w in msg for w in exists_words):
-                    return True
-                if sc == 403 and any(w in msg for w in inherit_words):
-                    return True
-                return False
-
-            def _err_detail(exc):
-                """Best-effort human-readable error text from an exception.
-                S1APIError carries `.detail` but the API sometimes returns
-                an empty body, leaving detail = ''. Fall back to str(exc)
-                whenever detail is missing or blank so the user never sees
-                an empty error in the report/dialog."""
-                d = getattr(exc, "detail", "") or ""
-                if not str(d).strip():
-                    d = str(exc) or repr(exc)
-                return str(d)
-
-            def _item_id(item, label=""):
-                """Extract a human-readable identifier from an item."""
-                for key in ("name", "ruleName", "value", "s1ql",
-                            "email", "fullName", "description", "type"):
-                    v = item.get(key)
-                    if v and isinstance(v, str):
-                        return v[:80]
-                return label
+            # _is_exists_error / _err_detail / _item_id are now module-level
+            # helpers (defined near _scope) — hoisted out of this 3k-line
+            # method so they can be unit-tested in isolation.
 
             def _r(label, fn, *a, **kw):
                 """Restore helper: call fn, track ok/skip/fail."""
@@ -4111,6 +4156,22 @@ class RestorePage(ctk.CTkFrame):
                     self._operation_log.append(
                         f"    ✗ {label} last error: {last_err_msg}")
                     cli_log(f"{npath} {label}: {last_err_msg}", "error")
+
+            def _summarize(result_key, ok, skip, fail, last_err):
+                """Shared 'N new, N exist, N err' summary row + last-error log
+                for the custom bulk blocks (exclusions / unified exclusions /
+                firewall rules) that build their own payloads and so can't go
+                through _r_bulk directly."""
+                parts = []
+                if ok: parts.append(f"{ok} new")
+                if skip: parts.append(f"{skip} exist")
+                if fail: parts.append(f"{fail} err")
+                if parts:
+                    results.append((result_key, ", ".join(parts)))
+                if last_err:
+                    self._operation_log.append(
+                        f"    ✗ {result_key} last error: {last_err}")
+                    cli_log(f"{npath} {result_key}: {last_err}", "error")
 
             def _set_cfg_decoupled(setter, cfg_data):
                 """Apply a module (Firewall / Device Control / Network
@@ -4188,16 +4249,7 @@ class RestorePage(ctk.CTkFrame):
                                     "name": item.get("value", "?")[:80],
                                     "error": full_err[:500],
                                 })
-                parts = []
-                if e_ok: parts.append(f"{e_ok} new")
-                if e_skip: parts.append(f"{e_skip} exist")
-                if e_fail: parts.append(f"{e_fail} err")
-                if parts:
-                    results.append(("excl", ", ".join(parts)))
-                if e_last_err:
-                    self._operation_log.append(
-                        f"    ✗ excl last error: {e_last_err}")
-                    cli_log(f"{npath} excl: {e_last_err}", "error")
+                _summarize("excl", e_ok, e_skip, e_fail, e_last_err)
 
             # ── Unified Exclusions ──
             if "unified_exclusions" in elements and data.get("unified_exclusions"):
@@ -4256,16 +4308,7 @@ class RestorePage(ctk.CTkFrame):
                                          or item.get("value", "?"))[:80],
                                 "error": full_err[:500],
                             })
-                parts = []
-                if u_ok: parts.append(f"{u_ok} new")
-                if u_skip: parts.append(f"{u_skip} exist")
-                if u_fail: parts.append(f"{u_fail} err")
-                if parts:
-                    results.append(("unified-excl", ", ".join(parts)))
-                if u_last_err:
-                    self._operation_log.append(
-                        f"    ✗ unified-excl last error: {u_last_err}")
-                    cli_log(f"{npath} unified-excl: {u_last_err}", "error")
+                _summarize("unified-excl", u_ok, u_skip, u_fail, u_last_err)
 
             # ── Blocklist ──
             bl = data.get("restrictions") or data.get("blocklist") or []
@@ -4353,16 +4396,7 @@ class RestorePage(ctk.CTkFrame):
                         f"created without their original location "
                         f"binding (source location IDs don't exist on "
                         f"this destination — re-attach manually).")
-                parts = []
-                if fw_ok: parts.append(f"{fw_ok} new")
-                if fw_skip: parts.append(f"{fw_skip} exist")
-                if fw_fail: parts.append(f"{fw_fail} err")
-                if parts:
-                    results.append(("fw-rules", ", ".join(parts)))
-                if fw_last_err:
-                    self._operation_log.append(
-                        f"    ✗ fw-rules last error: {fw_last_err}")
-                    cli_log(f"{npath} fw-rules: {fw_last_err}", "error")
+                _summarize("fw-rules", fw_ok, fw_skip, fw_fail, fw_last_err)
                 if len(new_fw_ids) > 1:
                     try:
                         api.reorder_firewall_rules(scope, new_fw_ids)
@@ -4967,7 +5001,7 @@ class RestorePage(ctk.CTkFrame):
                     ctk.CTkLabel(
                         dlg, text=f"Account '{n}' does not exist\n"
                         f"on the destination.",
-                        font=("Segoe UI", 14, "bold"),
+                        font=(UI_FONT, 14, "bold"),
                         justify="center").pack(pady=(18, 12))
                     bf = ctk.CTkFrame(dlg, fg_color="transparent")
                     bf.pack(pady=8)
@@ -4977,20 +5011,20 @@ class RestorePage(ctk.CTkFrame):
                         evt.set()
                     ctk.CTkButton(
                         bf, text="Create", width=110, height=36,
-                        fg_color="#00b894", hover_color="#00a37e",
-                        font=("Segoe UI", 13, "bold"),
+                        fg_color=GREEN, hover_color=GREEN_HOVER,
+                        font=(UI_FONT, 13, "bold"),
                         command=lambda: _pick("create")).pack(
                             side="left", padx=6)
                     ctk.CTkButton(
                         bf, text="Create All", width=110, height=36,
-                        fg_color="#2980b9", hover_color="#1f6da3",
-                        font=("Segoe UI", 13, "bold"),
+                        fg_color=BRAND, hover_color=BRAND_HOVER,
+                        font=(UI_FONT, 13, "bold"),
                         command=lambda: _pick("create_all")).pack(
                             side="left", padx=6)
                     ctk.CTkButton(
                         bf, text="Skip", width=110, height=36,
-                        fg_color="#555", hover_color="#777",
-                        font=("Segoe UI", 13, "bold"),
+                        fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                        font=(UI_FONT, 13, "bold"),
                         command=lambda: _pick("skip")).pack(
                             side="left", padx=6)
                     dlg.protocol("WM_DELETE_WINDOW",
@@ -5745,16 +5779,16 @@ class RestorePage(ctk.CTkFrame):
             pass
 
         # header strip
-        hdr = ctk.CTkFrame(win, fg_color="#1a1a2e", corner_radius=0)
+        hdr = ctk.CTkFrame(win, fg_color=CARD_ELEVATED, corner_radius=0)
         hdr.pack(fill="x")
         ctk.CTkLabel(hdr, text="🛟  Restore Errors — Explained",
-                     font=("Segoe UI", 18, "bold"),
-                     text_color="#fdcb6e").pack(side="left", padx=20, pady=14)
+                     font=(UI_FONT, 18, "bold"),
+                     text_color=WARN).pack(side="left", padx=20, pady=14)
         total_items = sum(len(g["items"]) for g in groups.values())
         ctk.CTkLabel(hdr,
                      text=f"{len(groups)} error type(s) · "
                           f"{total_items} item(s) affected",
-                     font=("Segoe UI", 12), text_color="#888"
+                     font=(UI_FONT, 12), text_color=TEXT_MUTED
                      ).pack(side="left", padx=8)
 
         def _copy(text: str, btn=None):
@@ -5776,12 +5810,12 @@ class RestorePage(ctk.CTkFrame):
                      text="Can't fix something yourself? Click below to "
                           "copy a full bundle and send it to SentinelOne "
                           "Support (or the developer).",
-                     font=("Segoe UI", 12), text_color="#aaa",
+                     font=(UI_FONT, 12), text_color=TEXT_MUTED,
                      wraplength=700, justify="left").pack(side="left")
         copy_all_btn = ctk.CTkButton(
             topbar, text="📋 Copy ALL errors", height=34,
-            fg_color="#e67e22", hover_color="#d35400",
-            font=("Segoe UI", 12, "bold"))
+            fg_color=WARN, hover_color=WARN_HOVER,
+            font=(UI_FONT, 12, "bold"))
         copy_all_btn.configure(
             command=lambda: _copy(bundle_text, copy_all_btn))
         copy_all_btn.pack(side="right", padx=(8, 0))
@@ -5800,7 +5834,7 @@ class RestorePage(ctk.CTkFrame):
             expl = grp["expl"]
             sev_color, sev_icon = sev_colors.get(expl["severity"],
                                                   ("#888", "•"))
-            card = ctk.CTkFrame(body, fg_color="#1a1a2e", corner_radius=10)
+            card = ctk.CTkFrame(body, fg_color=CARD_ELEVATED, corner_radius=10)
             card.pack(fill="x", pady=6, padx=2)
 
             # title row
@@ -5808,13 +5842,13 @@ class RestorePage(ctk.CTkFrame):
             trow.pack(fill="x", padx=14, pady=(12, 4))
             ctk.CTkLabel(trow,
                          text=f"{sev_icon}  {what}",
-                         font=("Segoe UI", 14, "bold"),
+                         font=(UI_FONT, 14, "bold"),
                          text_color=sev_color).pack(side="left")
             ctk.CTkLabel(trow,
                          text=f"{len(grp['items'])} item"
                               f"{'s' if len(grp['items']) != 1 else ''}",
-                         font=("Segoe UI", 11),
-                         text_color="#888").pack(side="left", padx=(10, 0))
+                         font=(UI_FONT, 11),
+                         text_color=TEXT_MUTED).pack(side="left", padx=(10, 0))
 
             grp_text = (
                 f"[{what}]\n"
@@ -5825,8 +5859,8 @@ class RestorePage(ctk.CTkFrame):
                     for it in grp["items"]))
             copy_grp_btn = ctk.CTkButton(
                 trow, text="📋 Copy", width=80, height=26,
-                fg_color="#555", hover_color="#777",
-                font=("Segoe UI", 11))
+                fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                font=(UI_FONT, 11))
             copy_grp_btn.configure(
                 command=lambda t=grp_text, b=copy_grp_btn: _copy(t, b))
             copy_grp_btn.pack(side="right")
@@ -5836,12 +5870,12 @@ class RestorePage(ctk.CTkFrame):
                     ("Why this happens",  expl["why"]),
                     ("What to do",        expl["fix"])):
                 ctk.CTkLabel(card, text=label,
-                             font=("Segoe UI", 11, "bold"),
-                             text_color="#888"
+                             font=(UI_FONT, 11, "bold"),
+                             text_color=TEXT_MUTED
                              ).pack(anchor="w", padx=14, pady=(8, 0))
                 ctk.CTkLabel(card, text=text,
-                             font=("Segoe UI", 12),
-                             text_color="#ddd",
+                             font=(UI_FONT, 12),
+                             text_color=TEXT,
                              wraplength=880, justify="left"
                              ).pack(anchor="w", padx=14, pady=(0, 2))
 
@@ -5850,22 +5884,22 @@ class RestorePage(ctk.CTkFrame):
             ctk.CTkLabel(card,
                          text=f"Affected items (showing {sample_count}"
                               f" of {len(grp['items'])}):",
-                         font=("Segoe UI", 11, "bold"),
-                         text_color="#888"
+                         font=(UI_FONT, 11, "bold"),
+                         text_color=TEXT_MUTED
                          ).pack(anchor="w", padx=14, pady=(10, 0))
             for it in grp["items"][:sample_count]:
                 ctk.CTkLabel(card,
                              text=f"• {it['path']}  →  {it['name']}",
-                             font=("Consolas", 11),
-                             text_color="#999",
+                             font=(MONO_FONT, 11),
+                             text_color=TEXT_MUTED,
                              wraplength=880, justify="left"
                              ).pack(anchor="w", padx=22, pady=0)
             if len(grp["items"]) > sample_count:
                 ctk.CTkLabel(card,
                              text=f"… +{len(grp['items']) - sample_count}"
                                   f" more (use 'Copy' for the full list)",
-                             font=("Segoe UI", 11, "italic"),
-                             text_color="#666"
+                             font=(UI_FONT, 11, "italic"),
+                             text_color=TEXT_FAINT
                              ).pack(anchor="w", padx=22, pady=(0, 8))
             else:
                 ctk.CTkFrame(card, height=8,
@@ -5875,7 +5909,7 @@ class RestorePage(ctk.CTkFrame):
         btmbar = ctk.CTkFrame(win, fg_color="transparent")
         btmbar.pack(fill="x", padx=16, pady=(0, 12))
         ctk.CTkButton(btmbar, text="Close", height=34, width=100,
-                      fg_color="#555", hover_color="#777",
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
                       command=win.destroy).pack(side="right")
 
     def _generate_restore_report(self):
@@ -6175,14 +6209,14 @@ class ValidationPage(ctk.CTkFrame):
         self.grid_rowconfigure(6, weight=1)
 
         ctk.CTkLabel(self, text="Migration Validation",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(
             self,
             text="Compare every setting on the SOURCE against the "
                  "DESTINATION to confirm nothing was missed after a "
                  "migration. Any difference is explained in plain English.",
-            font=("Segoe UI", 13), text_color="gray").grid(
+            font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # ── Controls card ──
@@ -6198,29 +6232,29 @@ class ValidationPage(ctk.CTkFrame):
             box.grid(row=0, column=col, sticky="nsew",
                      padx=(12, 6) if col == 0 else (6, 12), pady=12)
             box.grid_columnconfigure(1, weight=1)
-            ctk.CTkLabel(box, text=title, font=("Segoe UI", 14, "bold"),
+            ctk.CTkLabel(box, text=title, font=(UI_FONT, 14, "bold"),
                          text_color=accent).grid(
                 row=0, column=0, columnspan=2, sticky="w",
                 padx=12, pady=(10, 6))
 
-            ctk.CTkLabel(box, text="URL", font=("Segoe UI", 11),
-                         text_color="#999").grid(
+            ctk.CTkLabel(box, text="URL", font=(UI_FONT, 11),
+                         text_color=TEXT_MUTED).grid(
                 row=1, column=0, sticky="w", padx=(12, 8), pady=4)
-            url_lbl = ctk.CTkLabel(box, text="—", font=("Consolas", 12),
-                                   text_color="#ccc", anchor="w")
+            url_lbl = ctk.CTkLabel(box, text="—", font=(MONO_FONT, 12),
+                                   text_color=TEXT, anchor="w")
             url_lbl.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
             setattr(self, url_attr, url_lbl)
 
-            ctk.CTkLabel(box, text="Account", font=("Segoe UI", 11),
-                         text_color="#999").grid(
+            ctk.CTkLabel(box, text="Account", font=(UI_FONT, 11),
+                         text_color=TEXT_MUTED).grid(
                 row=2, column=0, sticky="w", padx=(12, 8), pady=4)
             acct_e = ctk.CTkEntry(box, placeholder_text="(blank = all)",
                                   height=32)
             acct_e.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=4)
             setattr(self, acct_attr, acct_e)
 
-            ctk.CTkLabel(box, text="Site", font=("Segoe UI", 11),
-                         text_color="#999").grid(
+            ctk.CTkLabel(box, text="Site", font=(UI_FONT, 11),
+                         text_color=TEXT_MUTED).grid(
                 row=3, column=0, sticky="w", padx=(12, 8), pady=(4, 12))
             site_e = ctk.CTkEntry(box, placeholder_text=site_ph, height=32)
             site_e.grid(row=3, column=1, sticky="ew", padx=(0, 12),
@@ -6242,7 +6276,7 @@ class ValidationPage(ctk.CTkFrame):
                     padx=12, pady=(0, 12))
         shared.grid_columnconfigure(3, weight=1)
         ctk.CTkLabel(shared, text="Compare levels:",
-                     font=("Segoe UI", 13, "bold"), text_color="#8aa0c0").grid(
+                     font=(UI_FONT, 13, "bold"), text_color=TEXT_MUTED).grid(
             row=0, column=0, padx=(0, 8), sticky="w")
         lv_inner = ctk.CTkFrame(shared, fg_color="transparent")
         lv_inner.grid(row=0, column=1, sticky="w")
@@ -6252,10 +6286,10 @@ class ValidationPage(ctk.CTkFrame):
             v = ctk.BooleanVar(value=default)
             self._level_vars[lv] = v
             ctk.CTkCheckBox(lv_inner, text=lv.capitalize(), variable=v,
-                            font=("Segoe UI", 12)).pack(
+                            font=(UI_FONT, 12)).pack(
                 side="left", padx=(0, 12))
-        ctk.CTkLabel(shared, text="Group filter:", font=("Segoe UI", 13),
-                     text_color="#8aa0c0").grid(
+        ctk.CTkLabel(shared, text="Group filter:", font=(UI_FONT, 13),
+                     text_color=TEXT_MUTED).grid(
             row=0, column=2, padx=(20, 8), sticky="e")
         self._group_f = ctk.CTkEntry(shared, placeholder_text="(blank = all)",
                                      height=32)
@@ -6266,22 +6300,22 @@ class ValidationPage(ctk.CTkFrame):
         btn_row.grid(row=3, column=0, sticky="ew", padx=20, pady=8)
         self._run_btn = ctk.CTkButton(
             btn_row, text="▶ Run Validation", height=38,
-            fg_color=GREEN, hover_color="#00a37e",
-            font=("Segoe UI", 14, "bold"), command=self._start)
+            fg_color=GREEN, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"), command=self._start)
         self._run_btn.pack(side="left")
         self._stop_btn = ctk.CTkButton(
             btn_row, text="■ Stop", height=38, width=80,
-            fg_color="#c0392b", hover_color="#e74c3c", state="disabled",
-            font=("Segoe UI", 13, "bold"), command=self._stop)
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, state="disabled",
+            font=(UI_FONT, 13, "bold"), command=self._stop)
         self._stop_btn.pack(side="left", padx=6)
         self._export_btn = ctk.CTkButton(
             btn_row, text="📄 Export Report", height=38, width=150,
-            fg_color="#2980b9", hover_color="#2471a3", state="disabled",
-            font=("Segoe UI", 13, "bold"), command=self._export_report)
+            fg_color=BRAND, hover_color=BRAND_HOVER, state="disabled",
+            font=(UI_FONT, 13, "bold"), command=self._export_report)
         self._export_btn.pack(side="left", padx=6)
         self._status_lbl = ctk.CTkLabel(btn_row, text="",
-                                        font=("Segoe UI", 12),
-                                        text_color="gray")
+                                        font=(UI_FONT, 12),
+                                        text_color=TEXT_MUTED)
         self._status_lbl.pack(side="left", padx=12)
 
         self.progress = ctk.CTkProgressBar(self, height=8)
@@ -6296,7 +6330,7 @@ class ValidationPage(ctk.CTkFrame):
             self._summary,
             text="Connect both consoles, choose a scope, then run a "
                  "validation. Results appear below.",
-            font=("Segoe UI", 12), text_color="#999", anchor="w",
+            font=(UI_FONT, 12), text_color=TEXT_MUTED, anchor="w",
             justify="left", wraplength=900)
         self._summary_lbl.pack(fill="x", padx=14, pady=10)
 
@@ -6313,10 +6347,10 @@ class ValidationPage(ctk.CTkFrame):
         dst = getattr(self.app.dest_api, "base_url", None)
         self._src_url_lbl.configure(
             text=src or "(not connected)",
-            text_color="#ccc" if src else "#777")
+            text_color=TEXT if src else "#777")
         self._dst_url_lbl.configure(
             text=dst or "(not connected)",
-            text_color="#ccc" if dst else "#777")
+            text_color=TEXT if dst else "#777")
 
     # ── UI state ────────────────────────────────────────────────────────
     def _set_running(self, running: bool):
@@ -6360,8 +6394,8 @@ class ValidationPage(ctk.CTkFrame):
         for w in self._results_frame.winfo_children():
             w.destroy()
         self._summary_lbl.configure(
-            text="Validation running…", text_color="#4da6ff")
-        self._status_lbl.configure(text="Starting…", text_color="gray")
+            text="Validation running…", text_color=INFO)
+        self._status_lbl.configure(text="Starting…", text_color=TEXT_MUTED)
         cli_log("Starting migration validation (source vs destination)…",
                 "cmd")
 
@@ -6426,7 +6460,7 @@ class ValidationPage(ctk.CTkFrame):
                     f"connection on the Connections page.")
 
         ui(lambda: self._status_lbl.configure(
-            text="Listing source scopes…", text_color="#4da6ff"))
+            text="Listing source scopes…", text_color=INFO))
         src_nodes = _enumerate_tree(src_api, src_filters, levels)
         ui(lambda: self._status_lbl.configure(
             text="Listing destination scopes…"))
@@ -6529,7 +6563,7 @@ class ValidationPage(ctk.CTkFrame):
             w.destroy()
         if not self._results:
             ctk.CTkLabel(frame, text="No nodes were compared.",
-                         text_color="#888").pack(pady=16)
+                         text_color=TEXT_MUTED).pack(pady=16)
             return
         for r in self._results:
             card = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=10)
@@ -6545,9 +6579,9 @@ class ValidationPage(ctk.CTkFrame):
             hdr = ctk.CTkFrame(card, fg_color="transparent")
             hdr.pack(fill="x", padx=12, pady=(10, 4))
             ctk.CTkLabel(hdr, text=f"[{r['type'].upper()}]  {r['path']}",
-                         font=("Segoe UI", 13, "bold"), anchor="w").pack(
+                         font=(UI_FONT, 13, "bold"), anchor="w").pack(
                 side="left")
-            ctk.CTkLabel(hdr, text=badge, font=("Segoe UI", 12, "bold"),
+            ctk.CTkLabel(hdr, text=badge, font=(UI_FONT, 12, "bold"),
                          text_color=color).pack(side="right")
 
             if not r["matched"]:
@@ -6557,7 +6591,7 @@ class ValidationPage(ctk.CTkFrame):
                          "The account/site/group may have been renamed "
                          "during migration, or it was never created. Names "
                          "must match for a comparison.",
-                    font=("Segoe UI", 11), text_color="#aaa",
+                    font=(UI_FONT, 11), text_color=TEXT_MUTED,
                     wraplength=860, justify="left", anchor="w").pack(
                     fill="x", padx=16, pady=(0, 10))
                 continue
@@ -6570,7 +6604,7 @@ class ValidationPage(ctk.CTkFrame):
                     card,
                     text=f"All {len(match_rows)} element group(s) match "
                          f"between source and destination.",
-                    font=("Segoe UI", 11), text_color=GREEN, anchor="w").pack(
+                    font=(UI_FONT, 11), text_color=GREEN, anchor="w").pack(
                     fill="x", padx=16, pady=(0, 10))
                 continue
 
@@ -6579,17 +6613,17 @@ class ValidationPage(ctk.CTkFrame):
                 if len(names) > 6:
                     shown += f"  (+{len(names) - 6} more)"
                 ctk.CTkLabel(
-                    box, text=f"{label} {shown}", font=("Consolas", 11),
+                    box, text=f"{label} {shown}", font=(MONO_FONT, 11),
                     text_color=color, anchor="w", wraplength=860,
                     justify="left").pack(fill="x", padx=16, pady=(0, 2))
 
             for x in diff_rows:
-                box = ctk.CTkFrame(card, fg_color="#15171c", corner_radius=8)
+                box = ctk.CTkFrame(card, fg_color=CONSOLE_BG, corner_radius=8)
                 box.pack(fill="x", padx=12, pady=3)
                 ctk.CTkLabel(
                     box,
                     text=f"{_cat_label(x['cat'])}   {x['src']} → {x['dst']}",
-                    font=("Segoe UI", 12, "bold"), text_color=WARN,
+                    font=(UI_FONT, 12, "bold"), text_color=WARN,
                     anchor="w").pack(fill="x", padx=12, pady=(6, 2))
                 if x.get("missing"):
                     _names_line("− Missing on dest:", x["missing"], "#ff7675")
@@ -6597,20 +6631,20 @@ class ValidationPage(ctk.CTkFrame):
                     _names_line("+ Extra on dest:", x["extra"], "#fdcb6e")
                 if not x.get("missing") and not x.get("extra"):
                     ctk.CTkLabel(
-                        box, text=f"  {x['what']}", font=("Segoe UI", 11),
-                        text_color="#aaa", anchor="w").pack(
+                        box, text=f"  {x['what']}", font=(UI_FONT, 11),
+                        text_color=TEXT_MUTED, anchor="w").pack(
                         fill="x", padx=16, pady=(0, 2))
                 ctk.CTkFrame(box, height=4, fg_color="transparent").pack()
             if match_rows:
                 ctk.CTkLabel(
                     card,
                     text=f"✓ {len(match_rows)} other element group(s) match.",
-                    font=("Segoe UI", 11), text_color="#5fae7f",
+                    font=(UI_FONT, 11), text_color=GREEN,
                     anchor="w").pack(fill="x", padx=16, pady=(2, 10))
             ctk.CTkLabel(
                 card,
                 text="Full item names & fix steps → Export Report",
-                font=("Segoe UI", 10, "italic"), text_color="#667",
+                font=(UI_FONT, 10, "italic"), text_color=TEXT_FAINT,
                 anchor="w").pack(fill="x", padx=16, pady=(0, 8))
 
     # ── Export ──────────────────────────────────────────────────────────
@@ -6797,11 +6831,11 @@ class AgentMigrationPage(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
 
         ctk.CTkLabel(self, text="Agent Migration",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Move agents from SOURCE console to DESTINATION using a registration token.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # config card
@@ -6810,7 +6844,7 @@ class AgentMigrationPage(ctk.CTkFrame):
         card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(card, text="Agent name filter:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         self.name_filter = ctk.CTkEntry(
             card, placeholder_text="e.g. *WORKSTATION* (blank = all in scope)",
@@ -6818,7 +6852,7 @@ class AgentMigrationPage(ctk.CTkFrame):
         self.name_filter.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
 
         ctk.CTkLabel(card, text="Dest reg. token:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=1, column=0, padx=12, pady=8, sticky="w")
         self.token_entry = ctk.CTkEntry(
             card, placeholder_text="Target site/group registration token",
@@ -6826,7 +6860,7 @@ class AgentMigrationPage(ctk.CTkFrame):
         self.token_entry.grid(row=1, column=1, padx=12, pady=8, sticky="ew")
 
         ctk.CTkLabel(card, text="Site scope:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=2, column=0, padx=12, pady=8, sticky="w")
         self.site_filter = ctk.CTkEntry(
             card, placeholder_text="(Optional) Site name on source to scope agents",
@@ -6842,22 +6876,22 @@ class AgentMigrationPage(ctk.CTkFrame):
                   "Fetch agents from SOURCE matching the filters above."
                   ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Migrate All", height=36,
-                      fg_color=ACCENT, hover_color="#c0392b",
-                      font=("Segoe UI", 13, "bold"),
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      font=(UI_FONT, 13, "bold"),
                       command=self._migrate).pack(side="left", padx=(0, 4))
         _help_btn(btn_row,
                   "Send a move-to-console command for all previewed agents "
                   "using the destination registration token."
                   ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Export Report", height=36,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn_row,
                   "Export agent list as HTML/Excel/JSON."
                   ).pack(side="left", padx=(0, 8))
         self.count_lbl = ctk.CTkLabel(btn_row, text="",
-                                      font=("Segoe UI", 12),
-                                      text_color="gray")
+                                      font=(UI_FONT, 12),
+                                      text_color=TEXT_MUTED)
         self.count_lbl.pack(side="left", padx=8)
 
         # agent list
@@ -6915,15 +6949,15 @@ class AgentMigrationPage(ctk.CTkFrame):
                 row = ctk.CTkFrame(self.agent_list, fg_color="transparent")
                 row.pack(fill="x", pady=1)
                 ctk.CTkLabel(row, text=name,
-                             font=("Segoe UI", 12, "bold")).pack(
+                             font=(UI_FONT, 12, "bold")).pack(
                     side="left", padx=4)
                 ctk.CTkLabel(row, text=f"  {os_name}  id={aid[:12]}…",
-                             font=("Segoe UI", 11),
-                             text_color="gray").pack(side="left")
+                             font=(UI_FONT, 11),
+                             text_color=TEXT_MUTED).pack(side="left")
             if len(agents) > 100:
                 ctk.CTkLabel(self.agent_list,
                              text=f"… and {len(agents)-100} more",
-                             text_color="gray").pack(pady=4)
+                             text_color=TEXT_MUTED).pack(pady=4)
             self.log.log(f"Preview: {len(agents)} agents")
 
         run_async(self, do, done)

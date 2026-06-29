@@ -346,6 +346,24 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v1.6.0 — 2026-06-29
+#### UI Redesign
+- **New design system** — A complete visual overhaul built around the SentinelOne brand violet (`#7C3AED`) on a refined slate-charcoal dark theme, centralised in a new `theme.py` so the whole app themes from one place. Buttons, inputs, checkboxes, sliders, progress bars, scrollbars, and dropdowns all adopt the palette automatically.
+- **Cross-platform fonts** — The UI now renders in the native system font per OS (SF Pro Text / Menlo on macOS, Segoe UI / Consolas on Windows, DejaVu on Linux) instead of Windows-only fonts that fell back to an unstyled default on macOS/Linux.
+- **Redesigned sidebar** — Brand lockup with a violet logo mark, a connection-status card with live SRC/DST dots, section eyebrows, and a violet active-indicator bar on the selected page. The MIGRATION workflow sits in its own distinct violet-tinted panel, set apart from OPERATIONS.
+- **OUTPUT console as a drawer** — The log is now a collapsible drawer that slides up from an always-visible status line (which mirrors the latest log entry, colour-coded). It's resizable via a drag handle and has an explicit Collapse control. Clicking any **?** help button opens it automatically.
+- **Adaptive scaling** — The window opens proportional to your screen, and the whole UI auto-scales as the window grows so it never looks cramped on large/full-screen displays. Manual zoom via ⌘/Ctrl +/-/0.
+
+#### Safety
+- **Critical-operation lock** — While a backup or restore is running, every control except Stop / Skip Element (and the log drawer) is disabled, so nothing can disturb the running job or navigate away mid-operation.
+
+#### Security & Quality
+- **Credential files hardened** — Saved API tokens (`contexts.json`), Atlas cookies, and backup JSON files are now written with owner-only (`0600`) permissions, and the config directory is `0700`.
+- **Reproducible builds** — Added `requirements-lock.txt` (fully pinned) and corrected an unsatisfiable `requests` version floor.
+- **Test suite** — Added a pytest suite (API client retry/error handling + pure restore helpers) and `requirements-dev.txt`.
+- **Backup error visibility** — Replaced silent `except: pass` blocks in the backup path with logged warnings, so a "0 nodes" or partial backup now explains itself in the OUTPUT log instead of failing silently.
+- **Restore refactor** — Hoisted pure restore helpers to module level (now unit-tested) and de-duplicated the per-element summary logging.
+
 ### v1.5.0 — 2026-06-22
 #### New Features
 - **⚡ Auto Restore** — New button that runs a fully automatic migration with zero prompts. Automatically creates all missing accounts, sites, and groups on the destination. No confirmation dialogs, no filters — click and walk away.
