@@ -27,6 +27,10 @@ class ConfigManager:
     def __init__(self):
         self.contexts: list[Context] = []
         os.makedirs(CONFIG_DIR, exist_ok=True)
+        try:
+            os.chmod(CONFIG_DIR, 0o700)  # owner-only — the dir holds secrets
+        except OSError:
+            pass
         self.load()
 
     def load(self):
@@ -43,6 +47,12 @@ class ConfigManager:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(CONFIG_FILE, "w") as f:
             json.dump([asdict(c) for c in self.contexts], f, indent=2)
+        # Tokens are stored in plaintext here — lock the file down to the
+        # owner so other local users can't read the API credentials.
+        try:
+            os.chmod(CONFIG_FILE, 0o600)
+        except OSError:
+            pass  # best-effort (e.g. Windows / unusual filesystems)
 
     def upsert(self, name: str, url: str, api_token: str, role: str = "",
                ignore_ssl_errors: bool = False) -> Context:

@@ -1,0 +1,21 @@
+# Fully-pinned, reproducible dependency set (direct + transitive).
+# Generated from a known-good virtualenv. Use this for packaged/release builds:
+#     pip install -r requirements-lock.txt
+# For day-to-day dev with looser ranges, use requirements.txt instead.
+#
+# Regenerate after intentional upgrades with:  pip freeze > requirements-lock.txt
+
+# --- direct dependencies ---
+customtkinter==5.2.2
+requests==2.33.1
+openpyxl==3.1.5
+pillow==12.2.0
+
+# --- transitive dependencies ---
+certifi==2026.4.22
+charset-normalizer==3.4.7
+darkdetect==0.8.0
+idna==3.13
+et-xmlfile==2.0.0
+packaging==26.2
+urllib3==2.6.3
