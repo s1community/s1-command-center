@@ -12,7 +12,8 @@ from datetime import datetime
 from typing import Optional, Callable
 
 from s1_api import S1API, S1APIError
-from config import ConfigManager
+from config import ConfigManager, ProfileManager, CONFIG_DIR
+from migtools import AuditLog
 import theme
 
 # Apply the brand design system (dark mode + violet primary) before any
@@ -688,6 +689,8 @@ class App(ctk.CTk):
         _app_ref = self
 
         self.cfg = ConfigManager()
+        self.profiles = ProfileManager()
+        self.audit = AuditLog(os.path.join(CONFIG_DIR, "audit.jsonl"))
         self.source_api: Optional[S1API] = None
         self.dest_api: Optional[S1API] = None
         self.pages = {}
@@ -811,7 +814,7 @@ class App(ctk.CTk):
 
         # import pages lazily here to avoid circular issues
         from pages import (BackupPage, RestorePage, AgentMigrationPage,
-                           ValidationPage)
+                           ValidationPage, MigrationRunbookPage)
         from pages_extra import (
             AccountsSitesPage, AgentsPage, ThreatsPage, UsersRolesPage,
             ActivitiesPage, DeepVisibilityPage, ExclusionsBlocklistPage,
@@ -829,6 +832,7 @@ class App(ctk.CTk):
 
         nav_migration = [
             ("Connections", ConnectionsPage),
+            ("Migration Runbook", MigrationRunbookPage),
             ("Backup Source", BackupPage),
             ("Restore to Dest", RestorePage),
             ("Agent Migration", AgentMigrationPage),
@@ -840,24 +844,38 @@ class App(ctk.CTk):
                 nav_migration.insert(0, ("PSO Tickets", JiraPage))
             except ImportError:
                 pass
-        nav_ops = [
-            ("Accounts & Sites", AccountsSitesPage),
-            ("Agents", AgentsPage),
-            ("Threats", ThreatsPage),
-            ("Unified Alerts", UnifiedAlertsPage),
-            ("Purple AI", PurpleAIPage),
-            ("Exclusions & Block", ExclusionsBlocklistPage),
-            ("STAR Rules", STARRulesPage),
-            ("Users & Roles", UsersRolesPage),
-            ("Activities", ActivitiesPage),
-            ("Deep Visibility", DeepVisibilityPage),
-            ("Apps & CVEs", ApplicationsCVEsPage),
-            ("Threat Intel", ThreatIntelPage),
-            ("Ranger & Rogues", RangerPage),
-            ("Remote Scripts", RemoteScriptsPage),
-            ("Tags", TagsPage),
-            ("Raw API", RawAPIPage),
+        # Operations pages are grouped into collapsible categories so the
+        # MIGRATION workflow stays the visual focus instead of competing with
+        # a flat list of 16 buttons.
+        nav_ops_groups = [
+            ("Inventory", [
+                ("Accounts & Sites", AccountsSitesPage),
+                ("Agents", AgentsPage),
+                ("Apps & CVEs", ApplicationsCVEsPage),
+                ("Ranger & Rogues", RangerPage),
+                ("Tags", TagsPage),
+            ]),
+            ("Detection & Response", [
+                ("Threats", ThreatsPage),
+                ("Unified Alerts", UnifiedAlertsPage),
+                ("STAR Rules", STARRulesPage),
+                ("Threat Intel", ThreatIntelPage),
+                ("Deep Visibility", DeepVisibilityPage),
+                ("Purple AI", PurpleAIPage),
+            ]),
+            ("Policy & Control", [
+                ("Exclusions & Block", ExclusionsBlocklistPage),
+                ("Remote Scripts", RemoteScriptsPage),
+            ]),
+            ("Admin", [
+                ("Users & Roles", UsersRolesPage),
+                ("Activities", ActivitiesPage),
+            ]),
+            ("Advanced", [
+                ("Raw API", RawAPIPage),
+            ]),
         ]
+        nav_ops = [item for _grp, items in nav_ops_groups for item in items]
         nav = nav_migration + nav_ops
 
         nav_scroll = ctk.CTkScrollableFrame(
@@ -887,6 +905,38 @@ class App(ctk.CTk):
             btn.pack(side="left", fill="x", expand=True, padx=(6, 4))
             self._btns.append((label, btn, bar))
 
+        # Collapsible operations categories. self._nav_groups maps each group
+        # title → {expand, collapse, labels} so _show() can auto-open the
+        # group that owns the page being shown.
+        self._nav_groups = {}
+
+        def _nav_group(parent, title, items):
+            collapsed = {"v": True}
+            content = ctk.CTkFrame(parent, fg_color="transparent")
+            header = ctk.CTkButton(
+                parent, text=f"▸  {title}", anchor="w", height=30,
+                font=(UI_FONT, 11, "bold"), fg_color="transparent",
+                text_color=TEXT_MUTED, hover_color=SIDEBAR_HOVER,
+                corner_radius=theme.RADIUS_SM)
+
+            def _set(open_):
+                collapsed["v"] = not open_
+                if open_:
+                    content.pack(after=header, fill="x", padx=0, pady=(0, 2))
+                    header.configure(text=f"▾  {title}")
+                else:
+                    content.pack_forget()
+                    header.configure(text=f"▸  {title}")
+
+            header.configure(command=lambda: _set(collapsed["v"]))
+            header.pack(fill="x", padx=8, pady=(2, 0))
+            for label, _cls in items:
+                _nav_item(content, label, SIDEBAR_HOVER)
+            self._nav_groups[title] = {
+                "expand": lambda: _set(True),
+                "labels": [lbl for lbl, _c in items],
+            }
+
         # MIGRATION workflow lives inside a distinct violet-tinted panel so it
         # reads as the primary workflow, set apart from the OPERATIONS tools.
         mig_box = ctk.CTkFrame(nav_scroll, fg_color=MIG_PANEL,
@@ -899,13 +949,13 @@ class App(ctk.CTk):
         ctk.CTkFrame(mig_box, fg_color="transparent", height=4).pack()
 
         _eyebrow(nav_scroll, "OPERATIONS", TEXT_FAINT, 6, 18)
-        for label, cls in nav_ops:
-            _nav_item(nav_scroll, label, SIDEBAR_HOVER)
+        for title, items in nav_ops_groups:
+            _nav_group(nav_scroll, title, items)
 
         # Footer: brand credit + version
         footer = ctk.CTkFrame(sb, fg_color="transparent")
         footer.pack(side="bottom", fill="x", pady=(4, 10))
-        ctk.CTkLabel(footer, text="v1.6.0", font=(UI_FONT, 10, "bold"),
+        ctk.CTkLabel(footer, text="v2.0.0", font=(UI_FONT, 10, "bold"),
                      text_color=TEXT_MUTED).pack()
         ctk.CTkLabel(footer, text="Built by Ran Jacobi · Professional Services",
                      font=(UI_FONT, 9), text_color=TEXT_FAINT).pack(pady=(1, 0))
@@ -991,6 +1041,11 @@ class App(ctk.CTk):
         p = self.pages[label]
         p.pack(fill="both", expand=True)
         self._current = p
+        # Auto-expand the operations category that owns this page so its
+        # active indicator is visible even when navigated to programmatically.
+        for grp in getattr(self, "_nav_groups", {}).values():
+            if label in grp["labels"]:
+                grp["expand"]()
         for lbl, btn, bar in self._btns:
             selected = lbl == label
             btn.configure(
@@ -1053,6 +1108,15 @@ class App(ctk.CTk):
             return
         api = S1API(ctx.url, ctx.api_token,
                     verify_ssl=not getattr(ctx, "ignore_ssl_errors", False))
+        # Surface API rate-limiting so a slow backup/restore explains itself
+        # instead of looking hung. Throttled at most once every ~10 events to
+        # avoid flooding the log on a heavily-limited tenant.
+        def _on_throttle(info, _r=role):
+            if info.get("events", 0) % 10 == 1:
+                cli_log(f"⏳ {_r} console is rate-limiting us "
+                        f"(429 ×{info['events']}); backing off and retrying — "
+                        f"this is normal on large tenants.", "warning")
+        api.on_throttle = _on_throttle
         if role == "source":
             self.source_api = api
             self.src_lbl.configure(
@@ -1061,6 +1125,15 @@ class App(ctk.CTk):
             self.dest_api = api
             self.dst_lbl.configure(
                 text=f"{ctx.name}\n{ctx.display_url}", text_color=ACCENT)
+
+    def log_audit(self, action, **fields):
+        """Append one operation to the audit history (best-effort)."""
+        try:
+            self.audit.record(
+                action, when=datetime.now().isoformat(timespec="seconds"),
+                **fields)
+        except Exception:
+            pass
 
     def set_active_console(self, role: str):
         """Highlight which console (source/destination) is active for current operation."""

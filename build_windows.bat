@@ -55,6 +55,8 @@ pyinstaller ^
     --hidden-import openpyxl ^
     --hidden-import PIL ^
     --collect-all customtkinter ^
+    --collect-all keyring ^
+    --hidden-import keyring.backends.Windows ^
     --exclude-module jira_page ^
     --noconfirm ^
     main.py

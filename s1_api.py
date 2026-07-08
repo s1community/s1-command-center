@@ -56,6 +56,18 @@ class S1API:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        # Rate-limit telemetry. A big backup/restore that slows down is almost
+        # always the API throttling us (HTTP 429); these counters let the UI
+        # explain that instead of looking frozen. `on_throttle`, if set by the
+        # app, is called with a small dict on each 429 backoff.
+        self.throttle_events = 0
+        self.throttle_wait_s = 0.0
+        self.on_throttle = None
+
+    def throttle_stats(self) -> dict:
+        """Snapshot of rate-limit backoff seen so far on this connection."""
+        return {"events": self.throttle_events,
+                "wait_seconds": round(self.throttle_wait_s, 1)}
 
     @property
     def api_url(self) -> str:
@@ -106,8 +118,22 @@ class S1API:
                 # Retry on 429 (rate limit) and 5xx (server errors)
                 if resp.status_code == 429 or resp.status_code >= 500:
                     retry_after = resp.headers.get("Retry-After")
-                    if retry_after and retry_after.isdigit():
-                        _time.sleep(int(retry_after))
+                    wait = int(retry_after) if (retry_after
+                                                and retry_after.isdigit()) else 0
+                    if resp.status_code == 429:
+                        # Track throttling so the UI can show why a run is slow.
+                        self.throttle_events += 1
+                        self.throttle_wait_s += wait or (1.5 * (attempt + 1))
+                        if callable(self.on_throttle):
+                            try:
+                                self.on_throttle({
+                                    "endpoint": endpoint,
+                                    "retry_after": wait,
+                                    "events": self.throttle_events})
+                            except Exception:
+                                pass
+                    if wait:
+                        _time.sleep(wait)
                     if attempt < retries - 1:
                         continue
                 raise S1APIError(f"{method} {endpoint} → {resp.status_code}",
@@ -773,6 +799,13 @@ class S1API:
 
     def get_scripts(self, params: Optional[dict] = None, **kw) -> list[dict]:
         return self.get_all("/remote-scripts", params=params, **kw)
+
+    def create_script(self, data: dict) -> dict:
+        # Note: the script *body* is stored in per-tenant cloud storage and is
+        # not returned by GET /remote-scripts, so a create from a backup
+        # payload only succeeds when the metadata carries a re-usable content
+        # reference. Restore treats the library as inventory (see RestorePage).
+        return self._post("/remote-scripts", body={"data": data})
 
     def remove_script(self, script_id: str) -> dict:
         return self._delete("/remote-scripts", body={

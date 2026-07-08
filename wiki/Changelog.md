@@ -1,5 +1,59 @@
 # Changelog
 
+## v2.0.0 — 2026-07-08
+
+Major version milestone. Rolls up the v1.8.x migration-workflow and verification work into a stable **2.0** release, plus the firewall-rule migration fixes below.
+
+### Bug Fixes
+- **Firewall rules with multiple IPs now transfer completely** — Multi-IP firewall rules were being restored with only a single IP (the first host, whether IP, CIDR or FQDN; multiple *ports* were unaffected). S1 v2.1 stores multiple hosts in the plural `remoteHosts`/`localHosts` arrays (each entry `{type, values:[...]}`), but the restore field-whitelist only kept the legacy singular `remoteHost`/`localHost` (which carries just the first host), so every extra IP was silently dropped. The whitelist now keeps the plural arrays, and the singular field is dropped when the plural form is present so it can't clobber the rule back down to one IP. Existing backups already contain the full data — just re-run the restore.
+- **Inherited firewall rules no longer leak into child-scope restores** — The firewall-control API returns inherited rules at every level, so a site/group node's backup includes the account/global rules that flow down to it. Restore re-created those parent-scope rules at the child scope — e.g. unchecking the **Account** restore level still created the account's firewall rules at the site. Firewall rules are now filtered to the node's own `scope` before restore (matching the existing Device Control behaviour); the shared `_rules_for_scope` helper backs both.
+
+## v1.8.0 — 2026-06-30
+
+### Migration workflow
+- **Migration Runbook** — A new guided page (top of the MIGRATION section) that sequences the whole job as an ordered checklist: connect → pre-flight → backup → preview → restore → validate → manifest. Each step opens the relevant page; some auto-detect completion (connected, backup taken, validated), the rest are operator-confirmed, with a progress bar.
+- **Pre-flight readiness check** — ✈ Pre-flight button on the Restore page validates *before* you commit: destination reachable, token valid/not-expiring and scoped wide enough for the target, and whether the target scope already exists. Read-only; returns pass/warn/fail with reasons.
+- **Agent-migration reconciliation** — After an agent move, ✓ Verify Move reconciles counts (source dropped, destination gained the expected number) and lists stragglers — the agent workflow finally has verification instead of fire-and-hope.
+
+### Verification
+- **Field-level settings/policy diff** — Validation no longer stops at "present on both" for the singletons. Policy, the three module configs, and SSO/SMTP/syslog/AD now get a value-level field diff (volatile keys like ids/timestamps/scope ignored), so "present" becomes "present *and identical*, or here's the field that differs".
+
+### Operations
+- **Operation audit history** — Every backup/restore/validate/agent-migrate is appended to `~/.s1-command-center/audit.jsonl` (owner-only). A 📜 History button shows recent operations.
+- **Scheduled backups** — ⏰ interval selector on the Backup page (Hourly/6h/12h/Daily) runs the current backup automatically while the app is open, saving timestamped files to `~/.s1-command-center/scheduled-backups/`. (True app-closed scheduling still needs an OS scheduler.)
+
+### Tests
+- New `migtools.py` (pure logic: audit log, pre-flight evaluation, agent reconciliation, field diff) with `test_migtools.py` — 15 cases. 81 tests total.
+
+## v1.7.0 — 2026-06-29
+
+### Reliability / scale
+- **Rate-limit visibility** — The API client now tracks HTTP 429 throttling (`throttle_stats()` + an `on_throttle` hook). A backup/restore that slows down because the tenant is rate-limiting now says so in the log ("⏳ console is rate-limiting us… backing off") instead of looking frozen. (Parallelising node reads for raw throughput is the next step and is intentionally deferred until it can be tested against a live tenant.)
+
+### Build
+- **Keyring bundled** — `S1 Command Center.spec`, `build_macos.sh`, and `build_windows.bat` now collect `keyring` + the platform backend (macOS Keychain / Windows Credential Manager / Secret Service), so OS-keyring token storage works in the packaged app. Guarded so builds still succeed if keyring is absent.
+
+### Security
+- **API tokens can live in the OS keyring** — When the `keyring` package and a working OS backend (macOS Keychain / Windows Credential Manager / Secret Service) are present, tokens are stored there and `contexts.json` holds only a sentinel instead of the plaintext token. Degrades gracefully to the previous file storage if keyring is missing or fails (no lockout — a missing token just prompts re-auth); `S1CC_DISABLE_KEYRING=1` forces file storage.
+- **Redacted backup export** — Backups embed real secrets (SMTP/AD/SSO/syslog passwords, tokens, keys). The Restore page now flags a loaded backup that contains secrets and offers **🛡 Redacted Copy** — a sanitised JSON safe to attach to a ticket or share, with every secret value masked. The working backup used for restore is never modified.
+
+### Migration
+- **Dry-run preview before restore** — New **🔍 Preview vs Dest** button on the Restore page compares the loaded backup against the *live* destination **without writing anything**, and reports per-element how many items would be newly created vs already exist (and which scopes are missing entirely and would be created). Reads through the shared full reader, and also fills the Source-vs-Destination panel so you can review before committing. Completes the safe-change loop: preview → snapshot → restore → validate.
+- **Validation now covers every migrated element** — Migration Validation previously compared only ~12 of the backed-up element types (policy, exclusions, blocklist, firewall/DC/NQ *rules*, saved filters, config overrides, console users), so it could report "identical" while STAR rules, threat-intel IOCs, tags, roles, service users, gateways, webhooks, scheduled reports, log-collection/auto-upgrade rules, the three module *configs*, and all five settings blocks were never checked. Validation now reads both consoles through the **same** `_read_node` backup reader (no second element list to drift) and compares all of them — collections by item name, configs/settings by presence. A guard test (`test_validation_coverage.py`) fails CI if a future backup element has no validation category.
+- **Pre-restore snapshot + rollback** — With **📸 Snapshot first** ticked (default), a restore first backs up the destination's *current* state of the same scope/elements to `~/.s1-command-center/snapshots/`, reusing the exact backup reader so the file is restore-compatible. The new **↩ Rollback** button loads the latest snapshot back into the loader to revert a bad restore. Skipped automatically on Resume; snapshot failure is logged loudly but does not abort the restore.
+- **Migration profiles** — Save the current scope (levels + name filters) and element selection as a reusable named profile (**Profile ▸ Save/Load/Delete** on the Backup page). Profiles are stored in `~/.s1-command-center/migration_profiles.json` and hold **no credentials**. Repeat/multi-site migrations become one click.
+- **Migration manifest + PSO comment** — After a validation, **🧾 Migration Manifest** exports a structured JSON manifest of what moved and how it verified, plus a ready-to-post PSO ticket comment (Markdown, copied to the clipboard) that feeds the *"done with PSO-XXX"* ticket-closing workflow.
+- **Remote Scripts element** — The Remote Scripts library is now captured by backup and listed on restore for manual re-upload (inventory-only — the script body lives in per-tenant cloud storage and isn't returned by the API). Brings the element count to **33**.
+
+### Docs
+- **Supported-Elements** rewritten to match the code (33 elements), marking inventory-only elements and documenting why **Custom Dashboards** and **Ranger/Network-Discovery** data are not migratable (no settable API surface).
+
+### Tests
+- New pure-logic suites for the migration manifest builders and the profile manager (`test_manifest.py`, `test_profiles.py`).
+- **Validation coverage guard** (`test_validation_coverage.py`) pins the comparison engine to `BACKUP_ELEMENTS`.
+- **Static wiring check** (`test_wiring.py`) asserts every `command=self._x` widget callback resolves to a real method — catches launch-crash bugs without a display.
+- **Dry-run resolver** (`test_preview.py`), **redaction** (`test_redaction.py`), and **keyring fallback** (`test_config_keyring.py`) suites. 62 tests total.
+
 ## v1.6.0 — 2026-06-29
 
 ### UI Redesign

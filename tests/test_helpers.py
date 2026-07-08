@@ -15,6 +15,8 @@ from pages import (
     _clean_for_restore,
     explain_error,
     _is_exists_error,
+    _FW_RULE_FIELDS,
+    _rules_for_scope,
 )
 
 
@@ -54,6 +56,66 @@ def test_whitelist_drops_none_values():
 
 def test_whitelist_empty_when_nothing_allowed():
     assert _whitelist({"a": 1}, set()) == {}
+
+
+# ── firewall multi-IP rules ─────────────────────────────────────────────
+# S1 v2.1 stores multiple IPs in the plural `remoteHosts`/`localHosts`
+# arrays (each entry = {type, values:[...]}). The legacy singular
+# remoteHost/localHost only carries the first host, so the whitelist must
+# keep the plural arrays or every extra IP is silently dropped on restore.
+
+def test_fw_whitelist_keeps_plural_host_arrays():
+    assert "remoteHosts" in _FW_RULE_FIELDS
+    assert "localHosts" in _FW_RULE_FIELDS
+
+
+def test_fw_whitelist_preserves_multi_ip_rule():
+    rule = {
+        "name": "multi-ip",
+        "action": "Allow",
+        "remoteHost": {"type": "addresses", "values": ["10.0.0.1"]},
+        "remoteHosts": [
+            {"type": "addresses", "values": ["10.0.0.1", "10.0.0.2"]},
+            {"type": "addresses", "values": ["10.0.0.3"]},
+        ],
+        "id": "should-be-dropped",
+        "createdAt": "2024-01-01",
+    }
+    cleaned = _whitelist(rule, _FW_RULE_FIELDS)
+    # all IPs survive via the plural array
+    all_ips = [ip for host in cleaned["remoteHosts"] for ip in host["values"]]
+    assert all_ips == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    # read-only server fields are stripped
+    assert "id" not in cleaned
+    assert "createdAt" not in cleaned
+
+
+# ── _rules_for_scope (inherited-rule leak guard) ────────────────────────
+# The firewall/device-control APIs return inherited rules at every level.
+# A site restore must NOT re-create the account/global rules that flow down
+# to it, or unchecking the Account level still restores account rules.
+
+def test_rules_for_scope_keeps_only_matching_level():
+    rules = [
+        {"name": "acct-rule", "scope": "account"},
+        {"name": "site-rule", "scope": "site"},
+        {"name": "group-rule", "scope": "group"},
+        {"name": "global-rule", "scope": "global"},
+    ]
+    assert [r["name"] for r in _rules_for_scope(rules, "site")] == ["site-rule"]
+    assert [r["name"] for r in _rules_for_scope(rules, "account")] == ["acct-rule"]
+    assert [r["name"] for r in _rules_for_scope(rules, "global")] == ["global-rule"]
+
+
+def test_rules_for_scope_is_case_insensitive():
+    rules = [{"name": "s", "scope": "SITE"}]
+    assert _rules_for_scope(rules, "site") == rules
+
+
+def test_rules_for_scope_drops_missing_scope_and_handles_empty():
+    assert _rules_for_scope([{"name": "x"}], "site") == []
+    assert _rules_for_scope(None, "site") == []
+    assert _rules_for_scope([], "account") == []
 
 
 # ── _scope ──────────────────────────────────────────────────────────────

@@ -104,7 +104,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v1.4.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.0.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -345,6 +345,32 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.0.0 — 2026-07-08
+Major version milestone — rolls up the v1.7–v1.8 migration-workflow & verification work into a stable **2.0**, plus the firewall-rule migration fixes below.
+#### Bug Fixes
+- **Multi-IP firewall rules transfer completely** — Rules with more than one remote host (IP, CIDR, or FQDN) were restored with only the first entry. SentinelOne stores multiple hosts in the plural `remoteHosts`/`localHosts` arrays, but the restore whitelist kept only the legacy singular `remoteHost`/`localHost`. Fixed — all hosts now migrate. (Multiple *ports* were never affected.)
+- **Inherited firewall rules no longer leak into child-scope restores** — A site/group restore no longer re-creates the account/global rules that the API returns as inherited; firewall rules are filtered to the node's own scope (matching Device Control). Fixes account-scoped rules still being restored after unchecking the **Account** restore level.
+
+### v1.8.0 — 2026-06-30
+#### Migration workflow
+- **Migration Runbook** — Guided, ordered checklist for the whole job: connect → pre-flight → backup → preview → restore → validate → manifest.
+- **Pre-flight readiness check** — Validates destination reachability, token validity/scope, and target existence *before* you commit (read-only pass/warn/fail).
+- **Agent-migration reconciliation** — ✓ Verify Move reconciles source/destination counts and lists stragglers after an agent move.
+#### Verification
+- **Field-level settings/policy diff** — Policy, the three module configs, and SSO/SMTP/syslog/AD now get a value-level field diff, not just present/absent.
+#### Operations
+- **Operation audit history** — Every backup/restore/validate/agent-migrate is appended to `~/.s1-command-center/audit.jsonl`; a 📜 History button shows recent operations.
+- **Scheduled backups** — ⏰ interval selector (Hourly/6h/12h/Daily) runs the current backup automatically while the app is open.
+
+### v1.7.0 — 2026-06-29
+#### Reliability / scale
+- **Rate-limit visibility** — The API client tracks HTTP 429 throttling and says so in the log when a job slows down, instead of appearing frozen.
+#### Security
+- **API tokens can live in the OS keyring** — When `keyring` and a working OS backend (macOS Keychain / Windows Credential Manager / Secret Service) are present, tokens are stored there and `contexts.json` holds only a sentinel. Degrades gracefully to file storage.
+- **Redacted backup export** — 🛡 Redacted Copy produces a sanitised backup JSON (SMTP/AD/SSO/syslog passwords, tokens, and keys masked) that's safe to attach to a ticket.
+#### Build
+- **Keyring bundled** — Build scripts and the PyInstaller spec now collect `keyring` + the platform backend so OS-keyring storage works in packaged apps.
 
 ### v1.6.0 — 2026-06-29
 #### UI Redesign

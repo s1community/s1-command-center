@@ -62,7 +62,14 @@ BACKUP_ELEMENTS = [
     # ── Other ──
     "gateways",
     "marketplace_apps",
+    "scripts",
 ]
+
+# Elements compared by Migration Validation. Defaults to everything backup
+# captures so validation can't silently skip a migrated element — see the
+# test_validation_covers_backup_elements guard test which fails if a backup
+# element has no comparison category in _summarize_node_payload.
+_VALIDATION_ELEMENTS = list(BACKUP_ELEMENTS)
 
 
 ELEMENT_HELP = {
@@ -105,6 +112,10 @@ ELEMENT_HELP = {
     "marketplace_apps": "Inventory of installed Singularity Marketplace apps "
                        "(read-only — re-install manually on destination as "
                        "each app requires its own OAuth / credentials)",
+    "scripts": "Remote Scripts library (custom scripts). Inventory only — the "
+               "script body is held in per-tenant cloud storage and isn't "
+               "returned by the API, so each script is listed for manual "
+               "re-upload on the destination (account level only).",
 }
 
 
@@ -1093,6 +1104,10 @@ _FW_RULE_FIELDS = {
     "protocolS", "osType", "osTypes", "status", "order",
     "tag", "tagName",
     "localHost", "remoteHost", "localPort", "remotePort",
+    # plural host arrays hold multi-IP rules — each entry is
+    # {type, values:[...]}. The singular localHost/remoteHost only
+    # carries the first host, so dropping these loses every extra IP.
+    "localHosts", "remoteHosts",
     "localPortRanges", "remotePortRanges",
     "localHostRanges", "remoteHostRanges",
     "application", "applicationName", "serviceId", "service",
@@ -1139,6 +1154,20 @@ _TAG_FIELDS = {
 def _whitelist(obj: dict, allowed: set) -> dict:
     """Keep only allowed fields, strip None values to avoid 'may not be null' errors."""
     return {k: v for k, v in obj.items() if k in allowed and v is not None}
+
+
+def _rules_for_scope(rules: list, ntype: str) -> list:
+    """Keep only rules whose OWN scope matches this node's type.
+
+    The firewall-control and device-control APIs return inherited rules at
+    every level (a site query also returns the account/global rules that
+    flow down to it). Restoring that raw list re-creates parent-scope rules
+    at the child scope — e.g. account firewall rules leaking into a site
+    restore even when the Account level is unchecked. The rule's `scope`
+    field is one of 'global' / 'account' / 'site' / 'group', which lines up
+    1:1 with the node type."""
+    return [r for r in (rules or [])
+            if str(r.get("scope", "")).lower() == ntype]
 
 
 def _scope(scope_type, scope_id):
@@ -1273,6 +1302,62 @@ def _summarize_node_payload(data: dict) -> list:
         out.append(("console_users", len(cusers),
                     [str(u.get("email") or u.get("fullName", ""))[:60]
                      for u in cusers[:50]]))
+
+    # ── Detection & hunting ──
+    star = (data or {}).get("star") or (data or {}).get("star_rules") or []
+    out.append(("star_rules", len(star),
+                [str(r.get("name", ""))[:60] for r in star[:50]]))
+    ti = (data or {}).get("threatIntel") \
+        or (data or {}).get("threat_intel") or []
+    out.append(("threat_intel", len(ti),
+                [str(i.get("value") or i.get("name", ""))[:60]
+                 for i in ti[:50]]))
+
+    # ── Tags ──
+    cfg = (data or {}).get("config", {}) or {}
+    tags = cfg.get("tags", {}) or {}
+    ep_tags = list(tags.get("deviceInventory") or []) \
+        + list(cfg.get("endpointTags") or [])
+    for items, cat in ((tags.get("firewall") or [], "tags_firewall"),
+                       (tags.get("networkQuarantine") or [],
+                        "tags_network_quarantine"),
+                       (ep_tags, "tags_endpoint")):
+        out.append((cat, len(items),
+                    [str(t.get("name", ""))[:60] for t in items[:50]]))
+
+    # ── Collections (account / site level) ──
+    def _name(x):
+        return (x.get("name") or x.get("scriptName") or x.get("email")
+                or x.get("applicationName") or x.get("ip")
+                or x.get("ipAddress") or x.get("value") or "")
+    for key, cat in (("logCollectionRules", "log_collection_rules"),
+                     ("autoUpgradePolicies", "auto_upgrade_policies"),
+                     ("webhooks", "webhooks"),
+                     ("scheduledReports", "scheduled_reports"),
+                     ("roles", "roles"),
+                     ("serviceUsers", "service_users"),
+                     ("gateways", "gateways"),
+                     ("marketplaceApps", "marketplace_apps"),
+                     ("scripts", "scripts")):
+        items = (data or {}).get(key) or []
+        out.append((cat, len(items),
+                    [str(_name(i))[:60] for i in items[:50]]))
+
+    # ── Config singletons (presence; value-level diff is out of scope) ──
+    fw_cfg = ((data or {}).get("firewall", {}) or {}).get("config")
+    out.append(("firewall_config", 1 if fw_cfg else 0, []))
+    nq_cfg = ((data or {}).get("networkQuarantine", {}) or {}).get("config")
+    out.append(("nq_config", 1 if nq_cfg else 0, []))
+    dc_cfg = ((data or {}).get("deviceControl", {}) or {}).get("config")
+    out.append(("device_control_config", 1 if dc_cfg else 0, []))
+
+    # ── Settings singletons (presence) ──
+    settings = (data or {}).get("settings", {}) or {}
+    for skey, scat in (("notifications", "settings_notifications"),
+                       ("sso", "settings_sso"), ("smtp", "settings_smtp"),
+                       ("syslog", "settings_syslog"),
+                       ("activeDirectory", "settings_ad")):
+        out.append((scat, 1 if settings.get(skey) else 0, []))
     return out
 
 
@@ -1324,11 +1409,17 @@ def _dest_identity_from_data(ntype: str, data: dict) -> dict:
     return info
 
 
-def _fetch_dest_snapshot(api, ntype: str, dest_id: str) -> dict:
-    """Snapshot the destination console for one node — shaped the same as
-    a backup `data` dict so `_summarize_node_payload` works on both sides.
-    Errors per-element are swallowed; missing keys just produce 0-count
-    rows."""
+def _fetch_dest_snapshot(api, ntype: str, dest_id: str,
+                         reader=None, elements=None) -> dict:
+    """Snapshot a console for one node — shaped the same as a backup `data`
+    dict so `_summarize_node_payload` works on both sides. Errors per-element
+    are swallowed; missing keys just produce 0-count rows.
+
+    When `reader` is given (the shared BackupPage._read_node), the FULL set of
+    backed-up elements is read through the exact same code path backup uses —
+    so validation compares everything that migration moves, and can't drift
+    from the backup element list. When `reader` is None, only the lightweight
+    subset below is read (used by the restore before/after diff panel)."""
     if not dest_id and ntype != "global":
         return {}
     scope = _scope(ntype, dest_id) if ntype != "global" else {"tenant": "true"}
@@ -1356,6 +1447,17 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str) -> dict:
                     break
         except Exception:
             pass
+
+    # Full, drift-proof read through the shared backup reader.
+    if reader is not None:
+        try:
+            full = reader(api, ntype, dest_id, scope,
+                          elements or _VALIDATION_ELEMENTS, None)
+            if isinstance(full, dict):
+                data.update(full)
+        except Exception:
+            pass
+        return data
 
     if ntype != "global":
         try:
@@ -1427,6 +1529,28 @@ _CAT_LABELS = {
     "saved_filters": "Saved filters (Deep Visibility)",
     "config_overrides": "Config overrides",
     "console_users": "Console users",
+    "star_rules": "STAR custom detection rules",
+    "threat_intel": "Threat Intel IOCs",
+    "tags_firewall": "Tags · firewall",
+    "tags_network_quarantine": "Tags · network quarantine",
+    "tags_endpoint": "Tags · endpoint",
+    "log_collection_rules": "Log collection rules",
+    "auto_upgrade_policies": "Auto-upgrade policies",
+    "webhooks": "Webhooks",
+    "scheduled_reports": "Scheduled reports",
+    "roles": "RBAC roles",
+    "service_users": "Service users",
+    "gateways": "Gateways",
+    "marketplace_apps": "Marketplace apps",
+    "scripts": "Remote scripts",
+    "firewall_config": "Firewall config (present?)",
+    "nq_config": "Network-quarantine config (present?)",
+    "device_control_config": "Device-control config (present?)",
+    "settings_notifications": "Notification settings (present?)",
+    "settings_sso": "SSO settings (present?)",
+    "settings_smtp": "SMTP settings (present?)",
+    "settings_syslog": "Syslog settings (present?)",
+    "settings_ad": "AD settings (present?)",
 }
 
 
@@ -1640,6 +1764,47 @@ class BackupPage(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="Export Log", height=38,
                       fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn_row, text="📜 History", height=38,
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
+                      command=self._show_history).pack(side="left", padx=(0, 4))
+
+        # ── Scheduled (unattended) backups — fires while the app is open ──
+        ctk.CTkLabel(btn_row, text="⏰", font=(UI_FONT, 14)).pack(
+            side="left", padx=(8, 0))
+        self._sched_var = ctk.StringVar(value="Off")
+        self._sched_menu = ctk.CTkOptionMenu(
+            btn_row, variable=self._sched_var, width=120, height=38,
+            values=["Off", "Hourly", "Every 6h", "Every 12h", "Daily"],
+            command=lambda _v: self._on_schedule_change())
+        self._sched_menu.pack(side="left", padx=(2, 4))
+        _help_btn(btn_row,
+                  "Run this backup automatically on a cadence (while the app "
+                  "is open) using the current console + scope + element "
+                  "selection. Files land in ~/.s1-command-center/"
+                  "scheduled-backups/. For true unattended backups when the "
+                  "app is closed, use an OS scheduler."
+                  ).pack(side="left", padx=(0, 4))
+
+        # ── Migration profiles (reusable scope + element selections) ──
+        prof_box = ctk.CTkFrame(btn_row, fg_color="transparent")
+        prof_box.pack(side="right")
+        ctk.CTkLabel(prof_box, text="Profile:",
+                     font=(UI_FONT, 12)).pack(side="left", padx=(0, 4))
+        self._profile_var = ctk.StringVar(value="—")
+        self._profile_menu = ctk.CTkOptionMenu(
+            prof_box, variable=self._profile_var, width=150, height=32,
+            values=["—"], font=(UI_FONT, 12))
+        self._profile_menu.pack(side="left", padx=2)
+        ctk.CTkButton(prof_box, text="Load", height=32, width=56,
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
+                      command=self._load_profile).pack(side="left", padx=2)
+        ctk.CTkButton(prof_box, text="Save", height=32, width=56,
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
+                      command=self._save_profile).pack(side="left", padx=2)
+        ctk.CTkButton(prof_box, text="🗑", height=32, width=36,
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      command=self._delete_profile).pack(side="left", padx=2)
+
         self.progress = ctk.CTkProgressBar(btn_row, width=200)
         self.progress.pack(side="left", padx=8)
         self.progress.set(0)
@@ -1664,6 +1829,234 @@ class BackupPage(ctk.CTkFrame):
         self._cancelled = False
         self._skip_element = False
         self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
+        self._sched_after_id = None
+        self._refresh_profiles()
+        self._load_schedule()
+
+    def _show_history(self):
+        """Print recent tool operations (audit history) to the console log."""
+        entries = self.app.audit.recent(limit=25)
+        if not entries:
+            cli_log("No operation history yet.", "info")
+            return
+        cli_log(f"📜 Operation history (last {len(entries)}):", "cmd")
+        for e in entries:
+            when = (e.get("when") or "")[:19].replace("T", " ")
+            action = (e.get("action") or "?").upper()
+            extra = " ".join(
+                f"{k}={v}" for k, v in e.items()
+                if k not in ("when", "action") and v not in (None, ""))
+            cli_log(f"  {when}  {action:<9} {extra}", "info")
+
+    # ── Scheduled backups ─────────────────────────────────────────────────
+    _SCHED_MINUTES = {"Off": 0, "Hourly": 60, "Every 6h": 360,
+                      "Every 12h": 720, "Daily": 1440}
+
+    def _schedule_file(self):
+        d = os.path.join(os.path.expanduser("~"), ".s1-command-center")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "schedule.json")
+
+    def _load_schedule(self):
+        try:
+            with open(self._schedule_file()) as f:
+                val = (json.load(f) or {}).get("interval", "Off")
+            if val in self._SCHED_MINUTES:
+                self._sched_var.set(val)
+                self._arm_schedule()
+        except Exception:
+            pass
+
+    def _on_schedule_change(self):
+        try:
+            with open(self._schedule_file(), "w") as f:
+                json.dump({"interval": self._sched_var.get()}, f)
+        except Exception:
+            pass
+        self._arm_schedule()
+        choice = self._sched_var.get()
+        cli_log(f"⏰ Scheduled backup: {choice}"
+                + ("" if choice == "Off" else " (while the app is open)"),
+                "info")
+
+    def _arm_schedule(self):
+        # Cancel any pending tick, then (re)arm if enabled.
+        old = getattr(self, "_sched_after_id", None)
+        if old is not None:
+            try:
+                self.after_cancel(old)
+            except Exception:
+                pass
+            self._sched_after_id = None
+        minutes = self._SCHED_MINUTES.get(self._sched_var.get(), 0)
+        if minutes > 0:
+            self._sched_after_id = self.after(
+                minutes * 60 * 1000, self._scheduled_tick)
+
+    def _scheduled_tick(self):
+        self._sched_after_id = None
+        try:
+            self._run_scheduled_backup()
+        finally:
+            self._arm_schedule()  # re-arm for the next interval
+
+    def _run_scheduled_backup(self):
+        if self._timer_running:
+            cli_log("⏰ Scheduled backup skipped — a backup is already "
+                    "running.", "warning")
+            return
+        api = self.app.source_api
+        if not api:
+            cli_log("⏰ Scheduled backup skipped — SOURCE not connected.",
+                    "warning")
+            return
+        levels = {k: v.get() for k, v in self.level_vars.items()}
+        elements = [k for k, v in self.elem_vars.items() if v.get()]
+        if not elements:
+            cli_log("⏰ Scheduled backup skipped — no elements selected.",
+                    "warning")
+            return
+        filters = {
+            "account": self.acct_filter.get().strip(),
+            "site": self.site_filter.get().strip(),
+            "group": self.group_filter.get().strip(),
+        }
+        folder = os.path.join(os.path.expanduser("~"), ".s1-command-center",
+                              "scheduled-backups")
+        os.makedirs(folder, exist_ok=True)
+        host = (getattr(api, "base_url", "src") or "src")
+        host = host.replace("https://", "").replace("http://", "").split("/")[0]
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(folder, f"scheduled-{host}-{ts}.json")
+        import time as _time
+        self.ptable.clear()
+        self._operation_log = []
+        self._cancelled = False
+        self.progress.set(0)
+        self._timer_start = _time.time()
+        self._timer_running = True
+        self._tick_timer()
+        self._set_ui_running(True)
+        cli_log(f"⏰ Scheduled backup starting → {os.path.basename(path)}",
+                "cmd")
+
+        def do():
+            return self._run_backup(api, levels, elements, filters)
+
+        def done(backup_data):
+            self._timer_running = False
+            self._set_ui_running(False)
+            try:
+                with open(path, "w") as f:
+                    json.dump(backup_data, f, indent=2, default=str)
+                os.chmod(path, 0o600)
+            except Exception as e:
+                cli_log(f"⏰ Scheduled backup save failed: {e}", "error")
+                return
+            self.progress.set(1)
+            cli_log(f"⏰ Scheduled backup saved → {os.path.basename(path)} "
+                    f"({len(backup_data)} nodes)", "success")
+            self.app.log_audit(
+                "scheduled_backup", url=getattr(api, "base_url", ""),
+                nodes=len(backup_data), elements=len(elements),
+                file=os.path.basename(path))
+            # Retention: keep the newest 20 scheduled backups, prune the rest.
+            try:
+                from migtools import select_backups_to_prune
+                entries = [
+                    (os.path.join(folder, f), os.path.getmtime(
+                        os.path.join(folder, f)))
+                    for f in os.listdir(folder)
+                    if f.startswith("scheduled-") and f.endswith(".json")]
+                for old in select_backups_to_prune(entries, keep_last=20):
+                    os.remove(old)
+                    cli_log(f"⏰ Pruned old scheduled backup "
+                            f"{os.path.basename(old)}", "info")
+            except Exception as _e:
+                cli_log(f"⏰ Retention prune skipped: {_e}", "warning")
+
+        def fail(e):
+            self._timer_running = False
+            self._set_ui_running(False)
+            cli_log(f"⏰ Scheduled backup failed: {e}", "error")
+
+        run_async(self, do, done, fail)
+
+    # ── Migration profiles ────────────────────────────────────────────────
+    def _refresh_profiles(self, select: str = None):
+        names = self.app.profiles.names()
+        self._profile_menu.configure(values=names or ["—"])
+        if select and select in names:
+            self._profile_var.set(select)
+        elif self._profile_var.get() not in names:
+            self._profile_var.set(names[0] if names else "—")
+
+    def _current_selection(self):
+        """Snapshot the current scope + element choices for a profile."""
+        levels = {k: v.get() for k, v in self.level_vars.items()}
+        elements = [k for k, v in self.elem_vars.items() if v.get()]
+        filters = {
+            "account": self.acct_filter.get().strip(),
+            "site": self.site_filter.get().strip(),
+            "group": self.group_filter.get().strip(),
+        }
+        return levels, elements, filters
+
+    def _save_profile(self):
+        dlg = ctk.CTkInputDialog(
+            text="Profile name (re-saving an existing name overwrites it):",
+            title="Save Migration Profile")
+        name = (dlg.get_input() or "").strip()
+        if not name:
+            return
+        levels, elements, filters = self._current_selection()
+        if not elements:
+            messagebox.showwarning(
+                "Nothing selected",
+                "Select at least one element before saving a profile.")
+            return
+        self.app.profiles.upsert(
+            name, elements=elements, levels=levels, filters=filters,
+            created_at=datetime.now(timezone.utc).isoformat())
+        self._refresh_profiles(select=name)
+        cli_log(f"Saved migration profile '{name}' "
+                f"({len(elements)} element(s)).", "success")
+
+    def _load_profile(self):
+        name = self._profile_var.get()
+        prof = self.app.profiles.get(name) if name and name != "—" else None
+        if not prof:
+            cli_log("No profile selected to load.", "warning")
+            return
+        # Levels (default missing keys to False).
+        for k, var in self.level_vars.items():
+            var.set(bool(prof.levels.get(k, False)))
+        # Filters.
+        for attr, key in (("acct_filter", "account"),
+                          ("site_filter", "site"),
+                          ("group_filter", "group")):
+            entry = getattr(self, attr)
+            entry.delete(0, "end")
+            entry.insert(0, prof.filters.get(key, "") or "")
+        # Elements — tick exactly the profile's set.
+        wanted = set(prof.elements or [])
+        for k, var in self.elem_vars.items():
+            var.set(k in wanted)
+        # Refresh the collapsible header count + global show/hide state.
+        self._toggle_global_mode()
+        cli_log(f"Loaded migration profile '{name}' "
+                f"({len(wanted)} element(s)).", "success")
+
+    def _delete_profile(self):
+        name = self._profile_var.get()
+        if not name or name == "—":
+            return
+        if not messagebox.askyesno(
+                "Delete Profile", f"Delete migration profile '{name}'?"):
+            return
+        self.app.profiles.remove(name)
+        self._refresh_profiles()
+        cli_log(f"Deleted migration profile '{name}'.", "info")
 
     def _tick_timer(self):
         if not self._timer_running:
@@ -1830,6 +2223,10 @@ class BackupPage(ctk.CTkFrame):
             self.progress.set(1)
             self.app.set_status(f"Backup complete → {path}")
             cli_log(f"Backup: {len(backup_data)} nodes in {m}m {s}s → {os.path.basename(path)}", "success")
+            self.app.log_audit(
+                "backup", console=self._console_var.get(),
+                url=getattr(api, "base_url", ""), nodes=len(backup_data),
+                elements=len(elements), file=os.path.basename(path))
 
         def fail(e):
             self._timer_running = False
@@ -2244,6 +2641,10 @@ class BackupPage(ctk.CTkFrame):
         if "marketplace_apps" in elements and scope_type in ("account", "global"):
             _fetch("marketplaceApps", "mkt-apps",
                    api.get_marketplace_apps, scope)
+
+        # ── Remote Scripts library (inventory only) ──
+        if "scripts" in elements and scope_type in ("account", "global"):
+            _fetch("scripts", "scripts", api.get_scripts, params=scope)
 
         # ── Settings ──
         if scope_type in ("account", "site", "global"):
@@ -3078,6 +3479,18 @@ class RestorePage(ctk.CTkFrame):
             font=(UI_FONT, 12, "bold"),
             command=self._show_errors_dialog, state="disabled")
         self._explain_btn.pack(side="left", padx=(0, 4))
+        self._redact_btn = ctk.CTkButton(
+            row2, text="🛡  Redacted Copy", height=34, width=150,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._export_redacted, state="disabled")
+        self._redact_btn.pack(side="left", padx=(0, 4))
+        _help_btn(row2,
+                  "Save a sanitised copy of the loaded backup with all "
+                  "secrets (SMTP/AD/SSO/syslog passwords, tokens, keys) "
+                  "masked — safe to attach to a ticket or share. The original "
+                  "backup is untouched."
+                  ).pack(side="left", padx=(0, 12))
         _help_btn(row2,
                   "After a restore, click this to see plain-English "
                   "explanations of every failure — what it means, why it "
@@ -3086,10 +3499,53 @@ class RestorePage(ctk.CTkFrame):
                   ).pack(side="left", padx=(0, 12))
 
         # GROUP 4 – Pre-restore tools (muted purple)
+        self._preflight_btn = ctk.CTkButton(
+            row2, text="✈  Pre-flight", height=34, width=120,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._preflight)
+        self._preflight_btn.pack(side="left", padx=(0, 4))
+        _help_btn(row2,
+                  "Readiness check before you restore — destination "
+                  "reachable, token valid/not-expiring and scoped wide "
+                  "enough, and whether the target scope already exists. "
+                  "Read-only."
+                  ).pack(side="left", padx=(0, 8))
+        self._preview_btn = ctk.CTkButton(
+            row2, text="🔍  Preview vs Dest", height=34, width=160,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._preview_changes)
+        self._preview_btn.pack(side="left", padx=(0, 4))
+        _help_btn(row2,
+                  "Dry run — compares the loaded backup against the LIVE "
+                  "destination without writing anything. Shows how many items "
+                  "per element would be newly created vs already exist, and "
+                  "fills the Source-vs-Destination panel so you can review "
+                  "before restoring."
+                  ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(row2, text="⚙  Set Defaults", height=34, width=140,
                       fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
                       font=(UI_FONT, 12),
                       command=self._open_set_defaults).pack(side="left", padx=(0, 4))
+
+        # GROUP 5 – Rollback safety net
+        self._snapshot_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            row2, text="📸 Snapshot first", variable=self._snapshot_var,
+            font=(UI_FONT, 12)).pack(side="left", padx=(12, 2))
+        _help_btn(row2,
+                  "Before restoring, back up the destination's current state "
+                  "of the selected elements/scope to a snapshot file. If the "
+                  "restore goes wrong, use Rollback to load that snapshot and "
+                  "restore the destination back to how it was."
+                  ).pack(side="left", padx=(0, 4))
+        self._rollback_btn = ctk.CTkButton(
+            row2, text="↩  Rollback", height=34, width=120,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._load_last_snapshot)
+        self._rollback_btn.pack(side="left", padx=(0, 4))
 
         # progress table + diff panel (resizable side by side).
         # Use a tk.PanedWindow so the user can drag the divider to give
@@ -3270,11 +3726,407 @@ class RestorePage(ctk.CTkFrame):
                     self.diff_panel.set_backup(self.backup_data)
                 except Exception:
                     pass
+            note = ""
+            try:
+                from export_utils import count_backup_secrets
+                nsec = count_backup_secrets(self.backup_data)
+                if hasattr(self, "_redact_btn"):
+                    self._redact_btn.configure(
+                        state="normal" if nsec else "disabled")
+                if nsec:
+                    note = (f"   ⚠ contains {nsec} secret value(s) — use "
+                            f"'Redacted Copy' before sharing")
+            except Exception:
+                pass
+            # Integrity check — surface a corrupt/incomplete backup up front.
+            try:
+                from migtools import check_backup_integrity
+                rep = check_backup_integrity(self.backup_data)
+                for w in rep["warnings"]:
+                    cli_log(f"backup integrity: {w}", "warning")
+                for e in rep["errors"]:
+                    cli_log(f"backup integrity ERROR: {e}", "error")
+                if not rep["ok"]:
+                    note += "   ❌ integrity errors — see log"
+                elif rep["warnings"]:
+                    note += f"   ⚠ {len(rep['warnings'])} integrity warning(s)"
+            except Exception:
+                pass
             self.info_lbl.configure(
-                text=f"Loaded {n} nodes: {summary}  ({os.path.basename(fp)})")
+                text=f"Loaded {n} nodes: {summary}  "
+                     f"({os.path.basename(fp)}){note}")
         except Exception as e:
             self.info_lbl.configure(text=f"Error: {e}")
             self.backup_data = None
+
+    def _export_redacted(self):
+        """Save a sanitised copy of the loaded backup (secrets masked), safe
+        to share. The in-memory/working backup is not modified."""
+        if not self.backup_data:
+            messagebox.showwarning("No backup", "Load a backup file first.")
+            return
+        from export_utils import redact_backup
+        redacted, count = redact_backup(self.backup_data)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = filedialog.asksaveasfilename(
+            title="Export Redacted Backup Copy",
+            initialfile=f"backup-redacted-{ts}",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path, "w") as f:
+                json.dump(redacted, f, indent=2, default=str)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except Exception as e:
+            cli_log(f"Redacted export error: {e}", "error")
+            messagebox.showerror("Export Error", str(e))
+            return
+        cli_log(f"Redacted copy saved → {os.path.basename(path)} "
+                f"({count} secret(s) masked)", "success")
+        messagebox.showinfo(
+            "Redacted Copy Saved",
+            f"Saved a shareable copy with {count} secret value(s) masked:\n"
+            f"{path}\n\nNote: this redacted file is for sharing only — it "
+            f"cannot be used to restore those secrets.")
+
+    # ── Snapshot / rollback ───────────────────────────────────────────────
+    def _snapshots_dir(self):
+        d = os.path.join(os.path.expanduser("~"), ".s1-command-center",
+                         "snapshots")
+        os.makedirs(d, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)  # holds full config dumps — owner-only
+        except OSError:
+            pass
+        return d
+
+    def _take_dest_snapshot(self, api, levels, filters, elements):
+        """Back up the destination's CURRENT state (same scope + elements the
+        restore will touch) to a snapshot file, so a bad restore can be rolled
+        back. Reuses the exact backup reader (BackupPage._read_node) so the
+        snapshot is byte-compatible with the normal restore loader. Returns the
+        saved path, or None if nothing was captured.
+
+        Runs on the restore worker thread (before _run_restore)."""
+        bp = self.app.pages.get("Backup Source")
+        if bp is None:
+            raise RuntimeError("Backup engine unavailable for snapshot")
+
+        nodes = _enumerate_tree(api, filters or {}, levels or {})
+        out_nodes = []
+        for n in nodes:
+            ntype, sid = n["type"], n["id"]
+            scope = (_scope(ntype, sid) if ntype != "global"
+                     else {"tenant": "true"})
+            try:
+                data = bp._read_node(api, ntype, sid, scope, elements, self.log)
+            except Exception as exc:
+                cli_log(f"Snapshot: could not read {n['path']}: {exc}",
+                        "warning")
+                continue
+            node = {"path": n["path"], "type": ntype, "data": data}
+            # Identity object under the key restore's _resolve_dest_id reads,
+            # so the snapshot resolves back onto the SAME destination scopes.
+            if ntype == "account":
+                node["account"] = {"name": n["account_name"], "id": sid}
+            elif ntype == "site":
+                node["site"] = {"name": n["site_name"], "id": sid}
+                node["account"] = {"name": n["account_name"]}
+            elif ntype == "group":
+                node["group"] = {"name": n["name"], "id": sid}
+                node["site"] = {"name": n["site_name"]}
+                node["account"] = {"name": n["account_name"]}
+            node["backupMetadata"] = {
+                "backupVersion": "gui-snapshot-1",
+                "url": getattr(api, "base_url", ""),
+                "snapshot": True,
+                "start": datetime.now(timezone.utc).isoformat(),
+            }
+            out_nodes.append(node)
+
+        if not out_nodes:
+            return None
+        host = (getattr(api, "base_url", "dest") or "dest")
+        host = host.replace("https://", "").replace("http://", "").split("/")[0]
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(self._snapshots_dir(),
+                            f"snapshot-{host}-{ts}.json")
+        with open(path, "w") as f:
+            json.dump(out_nodes, f, indent=2, default=str)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return path
+
+    def _latest_snapshot(self):
+        d = self._snapshots_dir()
+        snaps = [os.path.join(d, f) for f in os.listdir(d)
+                 if f.startswith("snapshot-") and f.endswith(".json")]
+        if not snaps:
+            return None
+        return max(snaps, key=os.path.getmtime)
+
+    def _load_last_snapshot(self):
+        """Load the most recent pre-restore snapshot into the restore loader so
+        the operator can review it and restore it to revert the destination."""
+        snap = self._latest_snapshot()
+        if not snap:
+            messagebox.showinfo(
+                "No Snapshot",
+                "No pre-restore snapshot found. Snapshots are created "
+                "automatically before a restore when 'Snapshot first' is "
+                "ticked.")
+            return
+        if not messagebox.askyesno(
+                "↩ Rollback",
+                f"Load this snapshot of the destination's PREVIOUS state?\n\n"
+                f"{os.path.basename(snap)}\n\n"
+                "It will become the loaded backup. Review it, make sure the "
+                "DESTINATION console is selected, then click Restore to revert "
+                "the destination to its pre-restore state."):
+            return
+        self._load_file(snap)
+        cli_log(f"Rollback snapshot loaded → {os.path.basename(snap)}. "
+                "Select DESTINATION and click Restore to revert.", "success")
+
+    # ── Pre-flight readiness check (read-only) ────────────────────────────
+    def _preflight(self):
+        api = self._get_restore_api()
+        if not api:
+            return
+        if not self.backup_data:
+            messagebox.showwarning("No backup", "Load a backup file first.")
+            return
+        if getattr(self, "_preflighting", False):
+            return
+        self._preflighting = True
+        self._preflight_btn.configure(state="disabled")
+        self._status_lbl.configure(text="Pre-flight…", text_color=INFO)
+        src_api = self.app.source_api
+        backup = self.backup_data
+
+        def do():
+            from migtools import evaluate_preflight, preflight_verdict
+            facts = {}
+            try:
+                api.get_my_user(); facts["dst_reachable"] = True
+            except Exception:
+                facts["dst_reachable"] = False
+            if src_api is not None:
+                try:
+                    src_api.get_my_user(); facts["src_reachable"] = True
+                except Exception:
+                    facts["src_reachable"] = False
+            # Destination token expiry / scope (best-effort; field names vary).
+            try:
+                td = api.get_token_details(api.api_token)
+                d = td.get("data", td) if isinstance(td, dict) else {}
+                facts["token_expires"] = (
+                    d.get("expiresAt") or d.get("expiration")
+                    or d.get("expiresAtUtc"))
+                scope = (d.get("scope") or d.get("scopeLevel")
+                         or d.get("scopeLevels"))
+                if isinstance(scope, list):
+                    scope = scope[0] if scope else None
+                facts["token_scope"] = str(scope).lower() if scope else None
+                facts["now"] = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                pass
+            # Deepest target level present in the backup.
+            order = ["global", "account", "site", "group"]
+            types = [n.get("type") for n in backup if n.get("type") in order]
+            if types:
+                facts["target_type"] = max(types, key=lambda t: order.index(t))
+            # Does the first concrete target scope already exist?
+            concrete = next((n for n in backup
+                             if n.get("type") != "global"), None)
+            if concrete is not None:
+                try:
+                    _id, found = self._resolve_dest_id_readonly(api, concrete)
+                    facts["dest_scope_exists"] = found
+                except Exception:
+                    pass
+            checks = evaluate_preflight(facts)
+            return checks, preflight_verdict(checks)
+
+        def done(result):
+            checks, verdict = result
+            self._preflighting = False
+            self._preflight_btn.configure(state="normal")
+            icon = {"pass": "✅", "warn": "⚠️", "fail": "❌",
+                    "info": "ℹ️"}.get(verdict, "")
+            self._status_lbl.configure(
+                text=f"Pre-flight: {verdict}",
+                text_color={"pass": GREEN, "warn": WARN,
+                            "fail": ACCENT}.get(verdict, TEXT_MUTED))
+            sym = {"pass": "✓", "warn": "⚠", "fail": "✗", "info": "•"}
+            lines = [f"{sym.get(c.status, '•')} {c.name}: {c.detail}"
+                     for c in checks]
+            self._operation_log.append("— Pre-flight —")
+            self._operation_log.extend(lines)
+            for c in checks:
+                cli_log(f"pre-flight {c.status}: {c.name} — {c.detail}",
+                        "error" if c.status == "fail"
+                        else "warning" if c.status == "warn" else "info")
+            messagebox.showinfo(
+                f"{icon} Pre-flight: {verdict.upper()}",
+                "\n".join(lines) + (
+                    "\n\n❌ Resolve the failures before restoring."
+                    if verdict == "fail" else ""))
+
+        def fail(e):
+            self._preflighting = False
+            self._preflight_btn.configure(state="normal")
+            self._status_lbl.configure(text=f"Pre-flight error: {str(e)[:40]}",
+                                        text_color=ACCENT)
+            cli_log(f"Pre-flight failed: {e}", "error")
+
+        run_async(self, do, done, fail)
+
+    # ── Dry-run preview (read-only) ───────────────────────────────────────
+    def _resolve_dest_id_readonly(self, api, node):
+        """Resolve a backup node to a destination scope id WITHOUT creating
+        anything (unlike _resolve_dest_id). Returns (id_or_empty, found_bool).
+        Global → ("", True). Missing scope → ("", False)."""
+        ntype = node.get("type")
+        if ntype == "global":
+            return "", True
+        a_name = (node.get("account") or {}).get("name")
+        s_name = (node.get("site") or {}).get("name")
+        g_name = (node.get("group") or {}).get("name")
+        try:
+            accts = api.get_accounts()
+        except Exception:
+            return "", False
+        acct = next((a for a in accts if a.get("name") == a_name), None)
+        if ntype == "account":
+            return (str(acct["id"]), True) if acct else ("", False)
+        if not acct:
+            return "", False
+        try:
+            sites = api.get_sites(params={"accountIds": acct["id"]})
+        except Exception:
+            return "", False
+        site = next((s for s in sites if s.get("name") == s_name), None)
+        if ntype == "site":
+            return (str(site["id"]), True) if site else ("", False)
+        if not site:
+            return "", False
+        try:
+            groups = api.get_groups(params={"siteIds": site["id"]})
+        except Exception:
+            return "", False
+        grp = next((g for g in groups if g.get("name") == g_name), None)
+        return (str(grp["id"]), True) if grp else ("", False)
+
+    def _preview_changes(self):
+        """Dry run: compare the loaded backup against the live destination and
+        report per-element create/exists counts, writing nothing."""
+        api = self._get_restore_api()
+        if not api:
+            return
+        if not self.backup_data:
+            messagebox.showwarning("No backup", "Load a backup file first.")
+            return
+        if getattr(self, "_previewing", False):
+            return
+        self._previewing = True
+        self._preview_btn.configure(state="disabled")
+        self._status_lbl.configure(text="Previewing…", text_color=INFO)
+        bp = self.app.pages.get("Backup Source")
+        reader = bp._read_node if bp is not None else None
+
+        def ui(fn):
+            self.after(0, fn)
+
+        def do():
+            total_create = total_exists = 0
+            missing_scopes = 0
+            per_element = {}  # cat -> [create, exists]
+            for idx, node in enumerate(self.backup_data):
+                ntype = node.get("type", "?")
+                dest_id, found = self._resolve_dest_id_readonly(api, node)
+                bk_sum = _summarize_node_payload(node.get("data") or {})
+                if not found:
+                    missing_scopes += 1
+                    # Whole scope absent → every backed-up item is "new".
+                    for cat, cnt, _names in bk_sum:
+                        if cnt:
+                            per_element.setdefault(cat, [0, 0])[0] += cnt
+                            total_create += cnt
+                    continue
+                dest_data = _fetch_dest_snapshot(api, ntype, dest_id,
+                                                 reader=reader)
+                if hasattr(self, "diff_panel"):
+                    ui(lambda ii=idx, t=ntype, d=dest_data:
+                       self.diff_panel.record_dest_snapshot(
+                           ii, t, d, "initial"))
+                dest_map = {c: (n, names) for c, n, names in
+                            _summarize_node_payload(dest_data)}
+                for cat, cnt, names in bk_sum:
+                    if not cnt:
+                        continue
+                    dest_cnt, dnames = dest_map.get(cat, (0, []))
+                    if names:
+                        # Collection: compare item names as a multiset.
+                        bc, dc = Counter(names), Counter(dnames)
+                        create = sum((bc - dc).values())
+                    else:
+                        # Presence/config category (no item names): missing on
+                        # the destination → would be created.
+                        create = max(cnt - dest_cnt, 0)
+                    exists = max(cnt - create, 0)
+                    slot = per_element.setdefault(cat, [0, 0])
+                    slot[0] += create
+                    slot[1] += exists
+                    total_create += create
+                    total_exists += exists
+            return {"create": total_create, "exists": total_exists,
+                    "missing": missing_scopes, "per_element": per_element,
+                    "nodes": len(self.backup_data)}
+
+        def done(res):
+            self._previewing = False
+            self._preview_btn.configure(state="normal")
+            self._status_lbl.configure(
+                text=f"Preview: {res['create']} new, {res['exists']} exist",
+                text_color=GREEN)
+            lines = [
+                f"Dry run vs {api.base_url}",
+                f"{res['nodes']} node(s) · {res['missing']} scope(s) missing "
+                f"on destination (would be created).",
+                "",
+                f"Items that would be NEWLY created: {res['create']}",
+                f"Items that already exist (skipped/overwritten): "
+                f"{res['exists']}",
+                "",
+                "Per element (new / exists):",
+            ]
+            for cat in sorted(res["per_element"]):
+                c, e = res["per_element"][cat]
+                if c or e:
+                    lines.append(f"  • {_cat_label(cat)}: {c} new / {e} exist")
+            self._operation_log.append("— Dry-run preview —")
+            self._operation_log.extend(lines)
+            cli_log("Dry-run preview complete (nothing was written).",
+                    "success")
+            messagebox.showinfo("Preview — Dry Run (no changes made)",
+                                "\n".join(lines))
+
+        def fail(e):
+            self._previewing = False
+            self._preview_btn.configure(state="normal")
+            self._status_lbl.configure(text=f"Preview error: {str(e)[:40]}",
+                                        text_color=ACCENT)
+            cli_log(f"Preview failed: {e}", "error")
+
+        run_async(self, do, done, fail)
 
     def _mangle_rename(self):
         """Rename accounts/sites/groups in the loaded backup data.
@@ -3542,8 +4394,8 @@ class RestorePage(ctk.CTkFrame):
         self._auto_mode = auto  # suppresses all interactive prompts
         # _resume_checkpoint is set by _resume_restore() before calling
         # _start_restore(). For fresh starts, clear it so nothing is skipped.
-        if not hasattr(self, "_resume_checkpoint") or \
-           not getattr(self, "_is_resuming", False):
+        _was_resuming = getattr(self, "_is_resuming", False)
+        if not hasattr(self, "_resume_checkpoint") or not _was_resuming:
             self._resume_checkpoint = {}
         self._is_resuming = False
         # Maps a resolved site's backup path -> destination site id. Groups
@@ -3584,7 +4436,38 @@ class RestorePage(ctk.CTkFrame):
         self._set_ui_running(True)
         cli_log(f"Starting restore to {target} console ({len(self.backup_data)} nodes)…", "cmd")
 
+        # Snapshot the destination's current state before overwriting it, so
+        # a bad restore can be rolled back. Skipped on resume (the snapshot was
+        # already taken on the original run) and when the operator unticks it.
+        take_snapshot = (getattr(self, "_snapshot_var", None) is not None
+                         and self._snapshot_var.get()
+                         and not _was_resuming)
+
         def do():
+            if take_snapshot:
+                self.after(0, lambda: self._status_lbl.configure(
+                    text="Snapshotting destination…", text_color=INFO))
+                try:
+                    snap = self._take_dest_snapshot(
+                        api, levels, scope_filters, elements)
+                    if snap:
+                        self._report_meta["snapshot_path"] = snap
+                        self._operation_log.append(
+                            f"📸 Destination snapshot saved → {snap}")
+                        cli_log(f"Destination snapshot saved → "
+                                f"{os.path.basename(snap)} "
+                                f"(use Rollback to revert)", "success")
+                    else:
+                        self._operation_log.append(
+                            "📸 Snapshot captured no nodes (nothing to roll "
+                            "back to).")
+                except Exception as exc:
+                    # Best-effort insurance — don't abort the restore, but make
+                    # the failure loud so the operator knows rollback is off.
+                    self._operation_log.append(
+                        f"⚠ Destination snapshot FAILED: {exc} — "
+                        f"rollback will not be available.")
+                    cli_log(f"Destination snapshot failed: {exc}", "error")
             return self._run_restore(api, self.backup_data, elements,
                                      levels, scope_filters)
 
@@ -3615,6 +4498,13 @@ class RestorePage(ctk.CTkFrame):
             self.progress.set(1)
             self.app.set_status("Restore complete")
             cli_log(f"Restore: {count} nodes in {m}m {s}s", "success")
+            self.app.log_audit(
+                "restore", console=target,
+                url=self._report_meta.get("dest_url", ""), nodes=count,
+                elements=len(elements),
+                snapshot=os.path.basename(
+                    self._report_meta.get("snapshot_path", "")) or None,
+                cancelled=self._cancelled)
             if not self._cancelled:
                 try:
                     self._show_completion_popup()
@@ -4330,6 +5220,18 @@ class RestorePage(ctk.CTkFrame):
                        api.set_firewall_config, fw_cfg)
             fw_r = fw.get("rules") or data.get("firewall_rules") or []
             if "firewall_rules" in elements and fw_r:
+                # Only restore rules that belong to THIS node's scope. The
+                # API returns inherited rules at every level, so without
+                # this filter account-scoped rules leak into site/group
+                # restores (e.g. the Account level is unchecked, yet the
+                # inherited account firewall rules still get re-created at
+                # the site). Mirrors the Device Control scope filter below.
+                _fw_inherited = len(fw_r)
+                fw_r = _rules_for_scope(fw_r, ntype)
+                if not fw_r:
+                    log(f"  fw-rules: 0 rules at {ntype} scope "
+                        f"({_fw_inherited} inherited rules skipped)")
+            if "firewall_rules" in elements and fw_r:
                 sorted_fw = sorted(fw_r,
                     key=lambda r: r.get("order", 9999))
                 new_fw_ids = []
@@ -4343,6 +5245,14 @@ class RestorePage(ctk.CTkFrame):
                         del cleaned["osType"]
                     if "osTypes" in cleaned and "osType" in cleaned:
                         del cleaned["osType"]
+                    # Multi-IP rules live in the plural host arrays; the
+                    # singular localHost/remoteHost only holds the first
+                    # host. When the plural form is present, drop the
+                    # singular so it can't clobber the rule down to one IP.
+                    if cleaned.get("remoteHosts") and "remoteHost" in cleaned:
+                        del cleaned["remoteHost"]
+                    if cleaned.get("localHosts") and "localHost" in cleaned:
+                        del cleaned["localHost"]
                     try:
                         resp = api.create_firewall_rule(scope, cleaned)
                         new_id = (resp.get("data", {}).get("id")
@@ -4436,8 +5346,7 @@ class RestorePage(ctk.CTkFrame):
                 # The API returns inherited rules at every level, so without this
                 # filter account-scoped rules appear inside site/group nodes and
                 # would be incorrectly re-created (or silently fail) at the wrong scope.
-                dc_r_scoped = [r for r in dc_r
-                               if r.get("scope", "").lower() == ntype]
+                dc_r_scoped = _rules_for_scope(dc_r, ntype)
                 if not dc_r_scoped:
                     log(f"  dc-rules: 0 rules at {ntype} scope "
                         f"({len(dc_r)} inherited rules skipped)")
@@ -4766,6 +5675,21 @@ class RestorePage(ctk.CTkFrame):
                     f"  ℹ Marketplace apps to re-install manually "
                     f"({len(mkt)}): {names}{more}")
                 results.append(("mkt-apps", f"{len(mkt)} listed"))
+
+            # ── Remote Scripts library (inventory, log only) ──
+            # The script body lives in per-tenant cloud storage and is not in
+            # the backup payload, so scripts can't be re-created via the API.
+            # List them so the operator can re-upload manually on the dest.
+            scripts = data.get("scripts") or []
+            if "scripts" in elements and scripts:
+                names = ", ".join(
+                    (s.get("scriptName") or s.get("name") or "?")
+                    for s in scripts[:20])
+                more = f" (+{len(scripts) - 20} more)" if len(scripts) > 20 else ""
+                self._operation_log.append(
+                    f"  ℹ Remote scripts to re-upload manually "
+                    f"({len(scripts)}): {names}{more}")
+                results.append(("scripts", f"{len(scripts)} listed"))
 
             # ── Console (human) users ──
             # Only locally-created users can be provisioned via API. SSO/SCIM
@@ -6313,6 +7237,11 @@ class ValidationPage(ctk.CTkFrame):
             fg_color=BRAND, hover_color=BRAND_HOVER, state="disabled",
             font=(UI_FONT, 13, "bold"), command=self._export_report)
         self._export_btn.pack(side="left", padx=6)
+        self._manifest_btn = ctk.CTkButton(
+            btn_row, text="🧾 Migration Manifest", height=38, width=180,
+            fg_color=BRAND, hover_color=BRAND_HOVER, state="disabled",
+            font=(UI_FONT, 13, "bold"), command=self._export_manifest)
+        self._manifest_btn.pack(side="left", padx=6)
         self._status_lbl = ctk.CTkLabel(btn_row, text="",
                                         font=(UI_FONT, 12),
                                         text_color=TEXT_MUTED)
@@ -6358,6 +7287,7 @@ class ValidationPage(ctk.CTkFrame):
         self._stop_btn.configure(state="normal" if running else "disabled")
         if running:
             self._export_btn.configure(state="disabled")
+            self._manifest_btn.configure(state="disabled")
 
     def _stop(self):
         self._cancelled = True
@@ -6431,8 +7361,13 @@ class ValidationPage(ctk.CTkFrame):
             self._status_lbl.configure(text="Done", text_color=GREEN)
             self._export_btn.configure(
                 state="normal" if self._results else "disabled")
+            self._manifest_btn.configure(
+                state="normal" if self._results else "disabled")
             cli_log(f"Validation: {identical}/{n} identical, "
                     f"{diffnodes} differ, {missing} missing.", "success")
+            self.app.log_audit(
+                "validate", nodes=n, identical=identical,
+                differing=diffnodes, missing=missing)
 
         def fail(e):
             self._set_running(False)
@@ -6514,8 +7449,14 @@ class ValidationPage(ctk.CTkFrame):
                 results.append({"type": sn["type"], "path": sn["path"],
                                 "matched": False, "rows": [], "diffs": 0})
                 continue
-            src_data = _fetch_dest_snapshot(src_api, sn["type"], sn["id"])
-            dst_data = _fetch_dest_snapshot(dst_api, sn["type"], dst_id)
+            # Read both sides through the shared backup reader so validation
+            # compares every migrated element (not just the legacy subset).
+            bp = self.app.pages.get("Backup Source")
+            reader = bp._read_node if bp is not None else None
+            src_data = _fetch_dest_snapshot(src_api, sn["type"], sn["id"],
+                                            reader=reader)
+            dst_data = _fetch_dest_snapshot(dst_api, sn["type"], dst_id,
+                                            reader=reader)
             src_sum = _summarize_node_payload(src_data)
             dst_sum = _summarize_node_payload(dst_data)
             dst_by = {c: (cnt, names) for c, cnt, names in dst_sum}
@@ -6542,6 +7483,58 @@ class ValidationPage(ctk.CTkFrame):
                                  "extra": extra, "what": what, "why": why,
                                  "fix": fix})
                     diffs += 1
+
+            # ── Field-level diff for singleton configs/settings/policy ──
+            # These compare as 'present on both' above; upgrade a match to a
+            # diff when their actual field values differ.
+            from migtools import diff_config_fields
+            field_cats = {
+                "policy": (src_data.get("policy") or {},
+                           dst_data.get("policy") or {}),
+                "firewall_config": (
+                    (src_data.get("firewall") or {}).get("config") or {},
+                    (dst_data.get("firewall") or {}).get("config") or {}),
+                "nq_config": (
+                    (src_data.get("networkQuarantine") or {}).get("config") or {},
+                    (dst_data.get("networkQuarantine") or {}).get("config") or {}),
+                "device_control_config": (
+                    (src_data.get("deviceControl") or {}).get("config") or {},
+                    (dst_data.get("deviceControl") or {}).get("config") or {}),
+                "settings_notifications": (
+                    (src_data.get("settings") or {}).get("notifications") or {},
+                    (dst_data.get("settings") or {}).get("notifications") or {}),
+                "settings_sso": (
+                    (src_data.get("settings") or {}).get("sso") or {},
+                    (dst_data.get("settings") or {}).get("sso") or {}),
+                "settings_smtp": (
+                    (src_data.get("settings") or {}).get("smtp") or {},
+                    (dst_data.get("settings") or {}).get("smtp") or {}),
+                "settings_syslog": (
+                    (src_data.get("settings") or {}).get("syslog") or {},
+                    (dst_data.get("settings") or {}).get("syslog") or {}),
+                "settings_ad": (
+                    (src_data.get("settings") or {}).get("activeDirectory") or {},
+                    (dst_data.get("settings") or {}).get("activeDirectory") or {}),
+            }
+            row_by_cat = {r["cat"]: r for r in rows}
+            for fcat, (s_obj, d_obj) in field_cats.items():
+                row = row_by_cat.get(fcat)
+                if not row or row.get("status") != "match":
+                    continue  # only upgrade 'present on both' rows
+                fdiffs = diff_config_fields(s_obj, d_obj)
+                if fdiffs:
+                    changes = [f"{d['field']}: {d['src']} → {d['dst']}"
+                               for d in fdiffs[:50]]
+                    row["status"] = "diff"
+                    row["missing"] = changes
+                    row["extra"] = []
+                    row["what"] = f"{len(fdiffs)} field value(s) differ"
+                    row["why"] = ("the setting exists on both consoles but "
+                                  "some field values differ")
+                    row["fix"] = ("review the changed fields; re-restore this "
+                                  "element to overwrite the destination values")
+                    diffs += 1
+
             results.append({"type": sn["type"], "path": sn["path"],
                             "matched": True, "rows": rows, "diffs": diffs})
 
@@ -6817,6 +7810,58 @@ class ValidationPage(ctk.CTkFrame):
         messagebox.showinfo("Report Exported",
                             f"Validation report saved to:\n{path}")
 
+    def _export_manifest(self):
+        """Export a structured migration manifest (JSON) plus a ready-to-post
+        PSO ticket comment (Markdown). Feeds the 'done with PSO-XXX'
+        ticket-closing workflow with the real validation outcome."""
+        if not self._results:
+            cli_log("Run a validation first.", "warning")
+            return
+        from export_utils import build_migration_manifest, manifest_to_pso_comment
+
+        manifest = build_migration_manifest(self._meta, self._results)
+        comment = manifest_to_pso_comment(manifest)
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        path = filedialog.asksaveasfilename(
+            title="Export Migration Manifest",
+            initialfile=f"migration-manifest-{ts}",
+            defaultextension=".json",
+            filetypes=[("JSON Manifest", "*.json"),
+                       ("PSO Comment (Markdown)", "*.md")])
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext == ".md":
+                with open(path, "w") as f:
+                    f.write(comment)
+            else:
+                with open(path, "w") as f:
+                    json.dump(manifest, f, indent=2, default=str)
+                # Also drop the PSO comment alongside the JSON for convenience.
+                md_path = os.path.splitext(path)[0] + "-pso-comment.md"
+                with open(md_path, "w") as f:
+                    f.write(comment)
+        except Exception as e:
+            cli_log(f"Manifest export error: {e}", "error")
+            messagebox.showerror("Export Error", str(e))
+            return
+
+        # Copy the PSO comment to the clipboard so it can be pasted straight
+        # into the ticket (or handed to the Jira automation).
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(comment)
+        except Exception:
+            pass
+        cli_log(f"Migration manifest exported → {os.path.basename(path)} "
+                f"(PSO comment copied to clipboard)", "success")
+        messagebox.showinfo(
+            "Manifest Exported",
+            f"Migration manifest saved to:\n{path}\n\n"
+            f"The PSO ticket comment was copied to your clipboard.")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Agent Migration Page
@@ -6882,6 +7927,16 @@ class AgentMigrationPage(ctk.CTkFrame):
         _help_btn(btn_row,
                   "Send a move-to-console command for all previewed agents "
                   "using the destination registration token."
+                  ).pack(side="left", padx=(0, 8))
+        self._verify_btn = ctk.CTkButton(
+            btn_row, text="✓ Verify Move", height=36,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            command=self._verify_migration, state="disabled")
+        self._verify_btn.pack(side="left", padx=(0, 4))
+        _help_btn(btn_row,
+                  "After migrating (give agents a few minutes to re-register), "
+                  "reconcile counts: did the source drop and the destination "
+                  "gain the expected number of agents? Lists any stragglers."
                   ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Export Report", height=36,
                       fg_color=BRAND,
@@ -6982,8 +8037,21 @@ class AgentMigrationPage(ctk.CTkFrame):
 
         self.log.log(f"Starting migration of {len(self.agents)} agents…")
         cli_log(f"Starting agent migration: {len(self.agents)} agents…", "cmd")
+        scope_params = self._resolve_params(api, filters)
+        dst_api = self.app.dest_api
 
         def do():
+            # Baseline counts BEFORE moving, for later reconciliation.
+            try:
+                src_before = api.get_agent_count(scope_params)
+            except Exception:
+                src_before = None
+            dst_before = None
+            if dst_api is not None:
+                try:
+                    dst_before = dst_api.get_agent_count()
+                except Exception:
+                    dst_before = None
             ok_count = 0
             fail_count = 0
             for i, agent in enumerate(self.agents):
@@ -6997,16 +8065,94 @@ class AgentMigrationPage(ctk.CTkFrame):
                     self.after(0, lambda n=name, err=e:
                                self.log.log(f"  ✗ {n}: {err}"))
                     fail_count += 1
-            return ok_count, fail_count
+            return ok_count, fail_count, src_before, dst_before
 
         def done(result):
-            ok, fail = result
+            ok, fail, src_before, dst_before = result
             self.log.log(f"Migration done: {ok} OK, {fail} failed")
             self.app.set_status(f"Migrated {ok} agents")
             cli_log(f"Migration done: {ok} OK, {fail} failed", "success")
-            messagebox.showinfo("Done", f"Migrated {ok} agents, {fail} failed.")
+            self.app.log_audit(
+                "agent_migrate", expected=ok, failed=fail,
+                url=getattr(api, "base_url", ""))
+            # Stash baseline for reconciliation.
+            self._recon = {
+                "expected": ok, "src_before": src_before,
+                "dst_before": dst_before, "scope_params": scope_params,
+                "dst_connected": dst_api is not None}
+            self._verify_btn.configure(
+                state="normal" if src_before is not None else "disabled")
+            messagebox.showinfo(
+                "Done",
+                f"Migrated {ok} agents, {fail} failed.\n\n"
+                f"Give agents a few minutes to re-register on the "
+                f"destination, then click ‘Verify Move’ to reconcile.")
 
         run_async(self, do, done)
+
+    def _verify_migration(self):
+        """Reconcile agent counts after a migration: did the source drop and
+        the destination gain the expected number of agents?"""
+        recon = getattr(self, "_recon", None)
+        if not recon or recon.get("src_before") is None:
+            messagebox.showinfo("Nothing to verify",
+                                "Run a migration first.")
+            return
+        api = self.app.source_api
+        dst_api = self.app.dest_api
+        if not api:
+            messagebox.showwarning("No source", "Connect SOURCE first.")
+            return
+        self._verify_btn.configure(state="disabled")
+        self.log.log("Reconciling agent counts…")
+
+        def do():
+            from migtools import reconcile_agents
+            src_after = api.get_agent_count(recon["scope_params"])
+            dst_before = recon["dst_before"]
+            dst_after = dst_before
+            if dst_api is not None and dst_before is not None:
+                try:
+                    dst_after = dst_api.get_agent_count()
+                except Exception:
+                    dst_after = dst_before
+            r = reconcile_agents(
+                recon["expected"], recon["src_before"], src_after,
+                dst_before or 0, dst_after or 0)
+            r["_dst_connected"] = recon["dst_connected"] and \
+                dst_before is not None
+            return r
+
+        def done(r):
+            self._verify_btn.configure(state="normal")
+            head = ("✅ Reconciled — counts line up."
+                    if r["reconciled"] else "⚠️ Discrepancy found.")
+            lines = [
+                head, "",
+                f"Expected to move: {r['expected_moved']}",
+                f"Source dropped by: {r['source_drop']}",
+            ]
+            if r.get("_dst_connected"):
+                lines.append(f"Destination gained: {r['dest_gain']}")
+            else:
+                lines.append("Destination not connected — source-side check "
+                             "only (connect the destination console for a "
+                             "full reconciliation).")
+            for issue in r["issues"]:
+                lines.append(f"  • {issue}")
+            self.app.log_audit(
+                "agent_reconcile", reconciled=r["reconciled"],
+                source_drop=r["source_drop"], dest_gain=r["dest_gain"])
+            cli_log("Agent reconciliation: "
+                    + ("OK" if r["reconciled"] else "; ".join(r["issues"])),
+                    "success" if r["reconciled"] else "warning")
+            messagebox.showinfo("Migration Reconciliation", "\n".join(lines))
+
+        def fail(e):
+            self._verify_btn.configure(state="normal")
+            cli_log(f"Reconciliation failed: {e}", "error")
+
+        run_async(self, do, done, fail)
 
     def _export(self):
         cols = ["computerName", "osName", "agentVersion", "id"]
@@ -7016,3 +8162,146 @@ class AgentMigrationPage(ctk.CTkFrame):
 
     def on_show(self):
         pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Migration Runbook — guided, ordered workflow
+# ═══════════════════════════════════════════════════════════════════════
+
+class MigrationRunbookPage(ctk.CTkFrame):
+    """A guided checklist that sequences the whole migration: each step opens
+    the relevant page and tracks completion. Some steps auto-detect done;
+    the rest are operator-confirmed. Keeps the workflow repeatable and
+    hard to skip a step."""
+
+    # (title, target page label, guidance, auto-detect key)
+    STEPS = [
+        ("Connect both consoles", "Connections",
+         "Add SOURCE and DESTINATION and connect to each.", "connected"),
+        ("Pre-flight check", "Restore to Dest",
+         "Load the source backup, then click ✈ Pre-flight to confirm the "
+         "destination is reachable, the token is valid/scoped, and the target "
+         "scope exists.", None),
+        ("Back up the source", "Backup Source",
+         "Pick the scope + elements (or load a profile) and run the backup.",
+         "backup"),
+        ("Preview vs destination", "Restore to Dest",
+         "Load the backup and click 🔍 Preview vs Dest — a dry run showing "
+         "what would be created vs already exists. Nothing is written.", None),
+        ("Restore to destination", "Restore to Dest",
+         "With 📸 Snapshot first enabled (default), run the restore. The "
+         "snapshot lets you ↩ Rollback if needed.", None),
+        ("Validate the migration", "Migration Validation",
+         "Compare SOURCE vs DESTINATION across every element.", "validated"),
+        ("Manifest & close ticket", "Migration Validation",
+         "Export 🧾 Migration Manifest — the PSO comment is copied to your "
+         "clipboard for the ticket-closing workflow.", None),
+    ]
+
+    def __init__(self, master, app, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.app = app
+        self._manual_done = set()      # step indices the user marked done
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(self, text="Migration Runbook",
+                     font=(UI_FONT, 22, "bold")).grid(
+            row=0, column=0, sticky="w", padx=20, pady=(20, 2))
+        ctk.CTkLabel(
+            self,
+            text="A guided, ordered checklist for a console migration. Open "
+                 "each step, do the work on that page, then mark it done.",
+            font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
+            row=1, column=0, sticky="w", padx=20, pady=(0, 8))
+
+        self._progress = ctk.CTkProgressBar(self, height=10)
+        self._progress.set(0)
+        self._progress.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 8))
+
+        self._steps_frame = ctk.CTkScrollableFrame(
+            self, fg_color="transparent")
+        self._steps_frame.grid(row=3, column=0, sticky="nsew",
+                                padx=16, pady=(0, 12))
+        self._render()
+
+    # ── completion detection ──────────────────────────────────────────
+    def _auto_done(self, key) -> bool:
+        if key == "connected":
+            return bool(self.app.source_api and self.app.dest_api)
+        if key == "backup":
+            return bool(getattr(self.app, "_last_backup_path", None))
+        if key == "validated":
+            vp = self.app.pages.get("Migration Validation")
+            return bool(getattr(vp, "_results", None))
+        return False
+
+    def _is_done(self, i, key) -> bool:
+        return i in self._manual_done or self._auto_done(key)
+
+    def _render(self):
+        for w in self._steps_frame.winfo_children():
+            w.destroy()
+        done_count = 0
+        for i, (title, target, guide, key) in enumerate(self.STEPS):
+            done = self._is_done(i, key)
+            auto = self._auto_done(key)
+            if done:
+                done_count += 1
+            card = ctk.CTkFrame(self._steps_frame, fg_color=CARD,
+                                corner_radius=10)
+            card.pack(fill="x", padx=4, pady=5)
+            card.grid_columnconfigure(1, weight=1)
+
+            badge = "✅" if done else f"{i + 1}"
+            ctk.CTkLabel(card, text=badge, width=34,
+                         font=(UI_FONT, 16, "bold"),
+                         text_color=GREEN if done else TEXT_MUTED).grid(
+                row=0, column=0, rowspan=2, padx=(12, 6), pady=10)
+            ctk.CTkLabel(card, text=title, anchor="w",
+                         font=(UI_FONT, 14, "bold"),
+                         text_color=TEXT if not done else GREEN).grid(
+                row=0, column=1, sticky="ew", padx=4, pady=(10, 0))
+            ctk.CTkLabel(card, text=guide, anchor="w", justify="left",
+                         font=(UI_FONT, 11), text_color=TEXT_MUTED,
+                         wraplength=620).grid(
+                row=1, column=1, sticky="ew", padx=4, pady=(0, 10))
+
+            btns = ctk.CTkFrame(card, fg_color="transparent")
+            btns.grid(row=0, column=2, rowspan=2, padx=10)
+            ctk.CTkButton(btns, text=f"Open ▸", width=90, height=32,
+                          fg_color=BRAND, hover_color=BRAND_HOVER,
+                          command=lambda t=target: self._open(t)).pack(
+                side="left", padx=4)
+            if auto:
+                ctk.CTkLabel(btns, text="auto", width=70,
+                             font=(UI_FONT, 11), text_color=GREEN).pack(
+                    side="left", padx=4)
+            else:
+                ctk.CTkButton(
+                    btns, text="✓ Done" if i in self._manual_done else "○ Mark",
+                    width=84, height=32,
+                    fg_color=GREEN if i in self._manual_done else NEUTRAL,
+                    hover_color=GREEN_HOVER if i in self._manual_done
+                    else NEUTRAL_HOVER,
+                    command=lambda ii=i: self._toggle(ii)).pack(
+                    side="left", padx=4)
+
+        self._progress.set(done_count / len(self.STEPS))
+
+    def _open(self, target):
+        try:
+            self.app._show(target)
+        except Exception as e:
+            cli_log(f"Could not open '{target}': {e}", "error")
+
+    def _toggle(self, i):
+        if i in self._manual_done:
+            self._manual_done.discard(i)
+        else:
+            self._manual_done.add(i)
+        self._render()
+
+    def on_show(self):
+        # Re-evaluate auto-detected steps each time the runbook is shown.
+        self._render()

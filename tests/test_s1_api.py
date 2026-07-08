@@ -165,3 +165,44 @@ def test_non_json_error_body_falls_back_to_text():
     with pytest.raises(S1APIError) as ei:
         api._request("GET", "/x")
     assert ei.value.detail == "plain text error"
+
+
+# ── throttle telemetry ───────────────────────────────────────────────────
+
+def test_throttle_counter_increments_on_429():
+    api = _client([
+        FakeResp(429, {}, headers={"Retry-After": "1"}),
+        FakeResp(200, {"data": "ok"}),
+    ])
+    assert api.throttle_stats() == {"events": 0, "wait_seconds": 0.0}
+    api._request("GET", "/x")
+    assert api.throttle_stats()["events"] == 1
+    assert api.throttle_stats()["wait_seconds"] >= 1.0
+
+
+def test_throttle_callback_fires_with_info():
+    seen = []
+    api = _client([
+        FakeResp(429, {}, headers={"Retry-After": "1"}),
+        FakeResp(200, {"data": "ok"}),
+    ])
+    api.on_throttle = lambda info: seen.append(info)
+    api._request("GET", "/sites")
+    assert len(seen) == 1
+    assert seen[0]["endpoint"] == "/sites"
+    assert seen[0]["events"] == 1
+
+
+def test_5xx_does_not_count_as_throttle():
+    api = _client([FakeResp(500, {}), FakeResp(200, {"data": "ok"})])
+    api._request("GET", "/x")
+    assert api.throttle_stats()["events"] == 0  # only 429 counts
+
+
+def test_throttle_callback_errors_are_swallowed():
+    api = _client([
+        FakeResp(429, {}, headers={"Retry-After": "1"}),
+        FakeResp(200, {"data": "ok"}),
+    ])
+    api.on_throttle = lambda info: 1 / 0  # must not break the request
+    assert api._request("GET", "/x") == {"data": "ok"}
