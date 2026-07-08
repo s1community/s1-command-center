@@ -12,18 +12,45 @@ from datetime import datetime
 from typing import Optional, Callable
 
 from s1_api import S1API, S1APIError
-from config import ConfigManager
+from config import ConfigManager, ProfileManager, CONFIG_DIR
+from migtools import AuditLog
+import theme
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+# Apply the brand design system (dark mode + violet primary) before any
+# widget is created.
+theme.apply()
 
-SIDEBAR_BG = "#1a1a2e"
-SIDEBAR_HOVER = "#16213e"
-SIDEBAR_SEL = "#0f3460"
-ACCENT = "#e94560"
-GREEN = "#00b894"
-WARN = "#fdcb6e"
-CARD = "#2d2d44"
+# ── Design tokens, re-exported for pages.py / pages_extra.py / jira_page.py ──
+# These names are imported by the page modules, so the whole app re-themes
+# from theme.py.
+APP_BG        = theme.APP_BG
+SIDEBAR_BG    = theme.SIDEBAR_BG
+SIDEBAR_HOVER = theme.SIDEBAR_HOVER
+SIDEBAR_SEL   = theme.SIDEBAR_SEL
+ACCENT        = theme.ACCENT
+ACCENT_HOVER  = theme.ACCENT_HOVER
+GREEN         = theme.GREEN
+GREEN_HOVER   = theme.GREEN_HOVER
+WARN          = theme.WARN
+WARN_HOVER    = theme.WARN_HOVER
+INFO          = theme.INFO
+CARD          = theme.CARD
+CARD_ELEVATED = theme.CARD_ELEVATED
+INPUT_BG      = theme.INPUT_BG
+BORDER        = theme.BORDER
+MIG_PANEL     = theme.MIG_PANEL
+MIG_BORDER    = theme.MIG_BORDER
+BRAND         = theme.BRAND
+BRAND_HOVER   = theme.BRAND_HOVER
+BRAND_LIGHT   = theme.BRAND_LIGHT
+NEUTRAL       = theme.NEUTRAL
+NEUTRAL_HOVER = theme.NEUTRAL_HOVER
+CONSOLE_BG    = theme.CONSOLE_BG
+TEXT          = theme.TEXT
+TEXT_MUTED    = theme.TEXT_MUTED
+TEXT_FAINT    = theme.TEXT_FAINT
+UI_FONT       = theme.UI_FONT
+MONO_FONT     = theme.MONO_FONT
 
 
 def _help_btn(parent, text):
@@ -31,12 +58,15 @@ def _help_btn(parent, text):
     import sys
     def _show():
         cli_log(text, "info")
+        # Surface the help in the OUTPUT drawer (which starts collapsed).
+        if _app_ref:
+            _app_ref.show_console()
     # Windows doesn't render high corner_radius well — use smaller radius
     cr = 13 if sys.platform == "darwin" else 6
     btn = ctk.CTkButton(parent, text="?", width=28, height=28,
-                        font=("Segoe UI", 12, "bold"), fg_color="#444",
-                        hover_color="#666", corner_radius=cr,
-                        command=_show)
+                        font=(UI_FONT, 12, "bold"), fg_color=NEUTRAL,
+                        hover_color=NEUTRAL_HOVER, text_color=TEXT_MUTED,
+                        corner_radius=cr, command=_show)
     return btn
 
 
@@ -69,7 +99,7 @@ def run_async(widget, fn, done=None, err=None):
 
 class LogBox(ctk.CTkTextbox):
     def __init__(self, master, **kw):
-        kw.setdefault("font", ("Consolas", 12))
+        kw.setdefault("font", (MONO_FONT, 12))
         kw.setdefault("height", 200)
         super().__init__(master, **kw)
         self.configure(state="disabled")
@@ -112,11 +142,11 @@ class ConnectionsPage(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self, text="Console Connections",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Connect SOURCE (backup from) and DESTINATION (restore to).",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color="gray").grid(
             row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 12))
 
         paste_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -141,14 +171,14 @@ class ConnectionsPage(ctk.CTkFrame):
                       command=self._refresh_list).pack(side="left", padx=(8, 0))
         ctk.CTkButton(paste_row, text="🔄 Reset All", width=110, height=32,
                       fg_color="#c0392b", hover_color="#e74c3c",
-                      font=("Segoe UI", 12, "bold"),
+                      font=(UI_FONT, 12, "bold"),
                       command=self._reset_all).pack(side="left", padx=(8, 0))
         _help_btn(paste_row,
                   "Clear ALL fields across all pages — connections, backup "
                   "filters, restore data, output console — to start fresh."
                   ).pack(side="left", padx=(4, 0))
         self._paste_status = ctk.CTkLabel(paste_row, text="",
-                                          font=("Segoe UI", 11),
+                                          font=(UI_FONT, 11),
                                           text_color="gray")
         self._paste_status.pack(side="left", padx=10)
 
@@ -160,10 +190,10 @@ class ConnectionsPage(ctk.CTkFrame):
         saved_hdr.grid(row=4, column=0, columnspan=2, sticky="ew",
                        padx=20, pady=(16, 4))
         ctk.CTkLabel(saved_hdr, text="Saved Connections",
-                     font=("Segoe UI", 15, "bold")).pack(side="left")
+                     font=(UI_FONT, 15, "bold")).pack(side="left")
         ctk.CTkButton(saved_hdr, text="🗑  Delete All", width=110, height=28,
                       fg_color="#c0392b", hover_color="#e74c3c",
-                      font=("Segoe UI", 12, "bold"),
+                      font=(UI_FONT, 12, "bold"),
                       command=self._delete_all_connections).pack(
             side="right")
         _help_btn(saved_hdr,
@@ -186,7 +216,7 @@ class ConnectionsPage(ctk.CTkFrame):
         title_fr = ctk.CTkFrame(card, fg_color="transparent")
         title_fr.grid(row=0, column=0, columnspan=2, sticky="w",
                       padx=12, pady=(12, 4))
-        ctk.CTkLabel(title_fr, text=role, font=("Segoe UI", 15, "bold"),
+        ctk.CTkLabel(title_fr, text=role, font=(UI_FONT, 15, "bold"),
                      text_color=color).pack(side="left")
         help_map = {
             "SOURCE": "Console to read/backup from. Enter a friendly name, "
@@ -201,7 +231,7 @@ class ConnectionsPage(ctk.CTkFrame):
         labels = ["Name:", "URL:", "API Token:"]
         entries = []
         for i, lbl in enumerate(labels):
-            ctk.CTkLabel(card, text=lbl, font=("Segoe UI", 13)).grid(
+            ctk.CTkLabel(card, text=lbl, font=(UI_FONT, 13)).grid(
                 row=i+1, column=0, padx=12, pady=4, sticky="w")
             show = "•" if "Token" in lbl else None
             ph = {0: "my-console", 1: "https://… or short-name",
@@ -217,7 +247,7 @@ class ConnectionsPage(ctk.CTkFrame):
                      sticky="w")
         ctk.CTkCheckBox(ssl_row, text="Ignore SSL errors",
                         variable=ssl_var, onvalue=True, offvalue=False,
-                        font=("Segoe UI", 12),
+                        font=(UI_FONT, 12),
                         checkbox_width=18, checkbox_height=18).pack(side="left")
         _help_btn(ssl_row,
                   "Skip TLS certificate verification when calling this "
@@ -228,7 +258,7 @@ class ConnectionsPage(ctk.CTkFrame):
                   ).pack(side="left", padx=(6, 0))
 
         status = ctk.CTkLabel(card, text="Not connected",
-                              font=("Segoe UI", 11), text_color="gray")
+                              font=(UI_FONT, 11), text_color="gray")
         status.grid(row=6, column=0, columnspan=2, padx=12, pady=(0, 8),
                     sticky="w")
 
@@ -356,7 +386,7 @@ class ConnectionsPage(ctk.CTkFrame):
                             corner_radius=6)
         hdr.pack(fill="x", pady=(4, 2), padx=4)
         for col, w in [("Role", 60), ("Name", 160), ("URL", 0)]:
-            kw = {"text": col, "font": ("Segoe UI", 11, "bold"),
+            kw = {"text": col, "font": (UI_FONT, 11, "bold"),
                   "text_color": "#888"}
             if w:
                 kw["width"] = w
@@ -371,29 +401,29 @@ class ConnectionsPage(ctk.CTkFrame):
                 badge, c = "DST", ACCENT
             else:
                 badge, c = "—", "gray"
-            ctk.CTkLabel(row, text=badge, font=("Segoe UI", 12, "bold"),
+            ctk.CTkLabel(row, text=badge, font=(UI_FONT, 12, "bold"),
                          text_color=c, width=60).pack(side="left", padx=8)
             ctk.CTkLabel(row, text=ctx.name,
-                         font=("Segoe UI", 13, "bold"),
+                         font=(UI_FONT, 13, "bold"),
                          text_color="white", width=160).pack(side="left", padx=8)
             ctk.CTkLabel(row, text=ctx.display_url,
-                         font=("Segoe UI", 12),
+                         font=(UI_FONT, 12),
                          text_color="gray").pack(side="left", padx=8)
             # right-side actions: delete + role toggles
             ctk.CTkButton(row, text="✕", width=26, height=24,
                           fg_color="#555", hover_color="#c0392b",
-                          font=("Segoe UI", 11, "bold"),
+                          font=(UI_FONT, 11, "bold"),
                           command=lambda u=ctx.url: self._delete_by_url(u)
                           ).pack(side="right", padx=(4, 8))
             ctk.CTkButton(row, text="Use as DST", width=86, height=24,
-                          font=("Segoe UI", 10, "bold"),
+                          font=(UI_FONT, 10, "bold"),
                           fg_color=ACCENT if ctx.role != "destination" else "#3b0d1e",
                           hover_color="#c0392b",
                           state="disabled" if ctx.role == "destination" else "normal",
                           command=lambda u=ctx.url: self._activate_as(u, "destination")
                           ).pack(side="right", padx=2)
             ctk.CTkButton(row, text="Use as SRC", width=86, height=24,
-                          font=("Segoe UI", 10, "bold"),
+                          font=(UI_FONT, 10, "bold"),
                           fg_color=GREEN if ctx.role != "source" else "#0d3b2e",
                           hover_color="#00875a",
                           state="disabled" if ctx.role == "source" else "normal",
@@ -401,7 +431,7 @@ class ConnectionsPage(ctk.CTkFrame):
                           ).pack(side="right", padx=2)
             token_hint = ctx.api_token[:8] + "…" if len(ctx.api_token) > 8 else "—"
             ctk.CTkLabel(row, text=f"token: {token_hint}",
-                         font=("Consolas", 10),
+                         font=(MONO_FONT, 10),
                          text_color="#555").pack(side="right", padx=8)
 
     def _activate_as(self, url: str, role: str):
@@ -623,12 +653,34 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("S1 Command Center")
-        self._win_w, self._win_h = 1200, 780
-        self.minsize(900, 600)
+        # Size the window to a sensible fraction of the actual screen instead
+        # of a fixed 1200×780, so it's well-proportioned on laptops and large
+        # external displays alike.
+        sx, sy = self.winfo_screenwidth(), self.winfo_screenheight()
+        self._win_w = max(1120, min(1600, int(sx * 0.80)))
+        self._win_h = max(720, min(1000, int(sy * 0.84)))
+        self.minsize(1000, 640)
         self._center_on_screen()
         # Re-assert centering after the WM has finished placing the window
         # (some platforms ignore the first geometry call on launch).
         self.after(50, self._center_on_screen)
+
+        # Auto UI scaling: grow every widget proportionally as the window gets
+        # larger (and back down when smaller) so big/full-screen displays don't
+        # look sparse and tiny. Debounced + bucketed to avoid thrash.
+        self._ui_scale = 1.0
+        self._auto_scale = True       # follows window size until user zooms
+        self._scale_after = None
+        self.bind("<Configure>", self._on_resize)
+
+        # Manual zoom override (Cmd/Ctrl +/-/0) — once used, it pins the scale.
+        for seq in ("<Command-equal>", "<Command-plus>", "<Control-equal>",
+                    "<Control-plus>"):
+            self.bind(seq, lambda e: self._zoom(0.1))
+        for seq in ("<Command-minus>", "<Control-minus>"):
+            self.bind(seq, lambda e: self._zoom(-0.1))
+        for seq in ("<Command-0>", "<Control-0>"):
+            self.bind(seq, lambda e: self._zoom_reset())
         icon_path = os.path.join(os.path.dirname(__file__), "s1cc.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
@@ -637,12 +689,16 @@ class App(ctk.CTk):
         _app_ref = self
 
         self.cfg = ConfigManager()
+        self.profiles = ProfileManager()
+        self.audit = AuditLog(os.path.join(CONFIG_DIR, "audit.jsonl"))
         self.source_api: Optional[S1API] = None
         self.dest_api: Optional[S1API] = None
         self.pages = {}
         self._current = None
         self._btns = []
-        self._console_visible = True
+        self._console_visible = False   # OUTPUT drawer starts collapsed
+        self._busy = False              # a backup/restore is in progress
+        self._saved_btn_states = {}
 
         self._build()
         self._startup_banner()
@@ -659,44 +715,106 @@ class App(ctk.CTk):
         y = max(0, (sy - h) // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
+    def _on_resize(self, event):
+        """Debounce window resizes, then rescale the UI to match the new size."""
+        if event.widget is not self:
+            return
+        if self._scale_after:
+            self.after_cancel(self._scale_after)
+        self._scale_after = self.after(160, self._apply_auto_scale)
+
+    def _apply_auto_scale(self):
+        """Pick a widget-scaling factor from the current window width so the UI
+        fills large windows without looking cramped, and stays compact on small
+        ones. Bucketed to 0.05 steps; only re-applied when it actually changes."""
+        self._scale_after = None
+        if not self._auto_scale:        # user took manual control via zoom
+            return
+        if not hasattr(self, "status"):  # _build() not finished yet
+            return
+        w = self.winfo_width()
+        if w < 50:                      # window not realized yet
+            return
+        # Reference design width ~1200 → 1.0; grow gently up to 1.35.
+        factor = max(1.0, min(1.35, w / 1240))
+        factor = round(factor * 20) / 20
+        if abs(factor - self._ui_scale) >= 0.05:
+            self._ui_scale = factor
+            ctk.set_widget_scaling(factor)
+
+    def _zoom(self, delta):
+        """Manual zoom — pins the scale (disables auto) and steps it."""
+        self._auto_scale = False
+        self._ui_scale = max(0.7, min(2.0, round((self._ui_scale + delta) * 20) / 20))
+        ctk.set_widget_scaling(self._ui_scale)
+        self.set_status(f"UI zoom: {int(self._ui_scale * 100)}%  "
+                        f"(⌘0 to reset / auto-fit)")
+
+    def _zoom_reset(self):
+        """Back to automatic, window-size-driven scaling."""
+        self._auto_scale = True
+        self._ui_scale = 0.0            # force the next auto pass to re-apply
+        self._apply_auto_scale()
+        self.set_status("UI zoom: auto-fit to window size")
+
     def _build(self):
-        # sidebar
-        sb = ctk.CTkFrame(self, width=250, fg_color=SIDEBAR_BG,
+        # ── Sidebar ──────────────────────────────────────────────────────
+        sb = ctk.CTkFrame(self, width=258, fg_color=SIDEBAR_BG,
                           corner_radius=0)
         sb.pack(side="left", fill="y")
         sb.pack_propagate(False)
 
-        logo = ctk.CTkFrame(sb, fg_color="transparent")
-        logo.pack(fill="x", padx=14, pady=(14, 4))
-        ctk.CTkLabel(logo, text="S1 Command Center",
-                     font=("Segoe UI", 22, "bold"),
-                     text_color="white").pack(anchor="w")
-        self._src_frame = ctk.CTkFrame(logo, fg_color="#0d3b2e", corner_radius=6)
-        self._src_frame.pack(fill="x", pady=(6, 2))
-        ctk.CTkLabel(self._src_frame, text="SRC", font=("Segoe UI", 9, "bold"),
-                     text_color=GREEN, width=30).pack(side="left", padx=(6, 4))
+        # Brand lockup: violet logo mark + wordmark
+        brand = ctk.CTkFrame(sb, fg_color="transparent")
+        brand.pack(fill="x", padx=18, pady=(20, 14))
+        mark = ctk.CTkFrame(brand, width=40, height=40, fg_color=BRAND,
+                            corner_radius=theme.RADIUS_MD)
+        mark.pack(side="left")
+        mark.pack_propagate(False)
+        ctk.CTkLabel(mark, text="S1", font=(UI_FONT, 17, "bold"),
+                     text_color="#FFFFFF").pack(expand=True)
+        wm = ctk.CTkFrame(brand, fg_color="transparent")
+        wm.pack(side="left", padx=(11, 0))
+        ctk.CTkLabel(wm, text="Command Center", font=(UI_FONT, 16, "bold"),
+                     text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(wm, text="SentinelOne Console Suite",
+                     font=(UI_FONT, 10), text_color=TEXT_FAINT).pack(anchor="w")
+
+        # Connection status card (SRC / DST)
+        conn = ctk.CTkFrame(sb, fg_color=CARD, corner_radius=theme.RADIUS_MD)
+        conn.pack(fill="x", padx=14, pady=(0, 10))
+
+        self._src_frame = ctk.CTkFrame(conn, fg_color="transparent",
+                                       corner_radius=theme.RADIUS_SM)
+        self._src_frame.pack(fill="x", padx=8, pady=(8, 3))
+        ctk.CTkLabel(self._src_frame, text="●", font=(UI_FONT, 12, "bold"),
+                     text_color=GREEN, width=14).pack(side="left", padx=(6, 2))
+        ctk.CTkLabel(self._src_frame, text="SRC", font=(UI_FONT, 10, "bold"),
+                     text_color=GREEN, width=30).pack(side="left")
         self.src_lbl = ctk.CTkLabel(self._src_frame, text="not connected",
-                                    font=("Segoe UI", 10),
-                                    text_color="gray")
-        self.src_lbl.pack(side="left", padx=(0, 6))
+                                    font=(UI_FONT, 10), text_color=TEXT_FAINT,
+                                    anchor="w", justify="left")
+        self.src_lbl.pack(side="left", padx=(2, 6), fill="x", expand=True)
 
-        self._dst_frame = ctk.CTkFrame(logo, fg_color="#3b0d1e", corner_radius=6)
-        self._dst_frame.pack(fill="x", pady=(2, 2))
-        ctk.CTkLabel(self._dst_frame, text="DST", font=("Segoe UI", 9, "bold"),
-                     text_color=ACCENT, width=30).pack(side="left", padx=(6, 4))
+        self._dst_frame = ctk.CTkFrame(conn, fg_color="transparent",
+                                       corner_radius=theme.RADIUS_SM)
+        self._dst_frame.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkLabel(self._dst_frame, text="●", font=(UI_FONT, 12, "bold"),
+                     text_color=ACCENT, width=14).pack(side="left", padx=(6, 2))
+        ctk.CTkLabel(self._dst_frame, text="DST", font=(UI_FONT, 10, "bold"),
+                     text_color=ACCENT, width=30).pack(side="left")
         self.dst_lbl = ctk.CTkLabel(self._dst_frame, text="not connected",
-                                    font=("Segoe UI", 10),
-                                    text_color="gray")
-        self.dst_lbl.pack(side="left", padx=(0, 6))
+                                    font=(UI_FONT, 10), text_color=TEXT_FAINT,
+                                    anchor="w", justify="left")
+        self.dst_lbl.pack(side="left", padx=(2, 6), fill="x", expand=True)
 
-        self._active_lbl = ctk.CTkLabel(logo, text="",
-                                         font=("Segoe UI", 10, "bold"),
-                                         text_color="#888")
-        self._active_lbl.pack(fill="x", pady=(4, 0))
+        self._active_lbl = ctk.CTkLabel(conn, text="", font=(UI_FONT, 10, "bold"),
+                                        text_color=TEXT_FAINT, anchor="w")
+        self._active_lbl.pack(fill="x", padx=14, pady=(0, 6))
 
         # import pages lazily here to avoid circular issues
         from pages import (BackupPage, RestorePage, AgentMigrationPage,
-                           ValidationPage)
+                           ValidationPage, MigrationRunbookPage)
         from pages_extra import (
             AccountsSitesPage, AgentsPage, ThreatsPage, UsersRolesPage,
             ActivitiesPage, DeepVisibilityPage, ExclusionsBlocklistPage,
@@ -714,6 +832,7 @@ class App(ctk.CTk):
 
         nav_migration = [
             ("Connections", ConnectionsPage),
+            ("Migration Runbook", MigrationRunbookPage),
             ("Backup Source", BackupPage),
             ("Restore to Dest", RestorePage),
             ("Agent Migration", AgentMigrationPage),
@@ -725,111 +844,189 @@ class App(ctk.CTk):
                 nav_migration.insert(0, ("PSO Tickets", JiraPage))
             except ImportError:
                 pass
-        nav_ops = [
-            ("Accounts & Sites", AccountsSitesPage),
-            ("Agents", AgentsPage),
-            ("Threats", ThreatsPage),
-            ("Unified Alerts", UnifiedAlertsPage),
-            ("Purple AI", PurpleAIPage),
-            ("Exclusions & Block", ExclusionsBlocklistPage),
-            ("STAR Rules", STARRulesPage),
-            ("Users & Roles", UsersRolesPage),
-            ("Activities", ActivitiesPage),
-            ("Deep Visibility", DeepVisibilityPage),
-            ("Apps & CVEs", ApplicationsCVEsPage),
-            ("Threat Intel", ThreatIntelPage),
-            ("Ranger & Rogues", RangerPage),
-            ("Remote Scripts", RemoteScriptsPage),
-            ("Tags", TagsPage),
-            ("Raw API", RawAPIPage),
+        # Operations pages are grouped into collapsible categories so the
+        # MIGRATION workflow stays the visual focus instead of competing with
+        # a flat list of 16 buttons.
+        nav_ops_groups = [
+            ("Inventory", [
+                ("Accounts & Sites", AccountsSitesPage),
+                ("Agents", AgentsPage),
+                ("Apps & CVEs", ApplicationsCVEsPage),
+                ("Ranger & Rogues", RangerPage),
+                ("Tags", TagsPage),
+            ]),
+            ("Detection & Response", [
+                ("Threats", ThreatsPage),
+                ("Unified Alerts", UnifiedAlertsPage),
+                ("STAR Rules", STARRulesPage),
+                ("Threat Intel", ThreatIntelPage),
+                ("Deep Visibility", DeepVisibilityPage),
+                ("Purple AI", PurpleAIPage),
+            ]),
+            ("Policy & Control", [
+                ("Exclusions & Block", ExclusionsBlocklistPage),
+                ("Remote Scripts", RemoteScriptsPage),
+            ]),
+            ("Admin", [
+                ("Users & Roles", UsersRolesPage),
+                ("Activities", ActivitiesPage),
+            ]),
+            ("Advanced", [
+                ("Raw API", RawAPIPage),
+            ]),
         ]
+        nav_ops = [item for _grp, items in nav_ops_groups for item in items]
         nav = nav_migration + nav_ops
 
         nav_scroll = ctk.CTkScrollableFrame(
-            sb, fg_color="transparent", scrollbar_button_color="#333",
-            scrollbar_button_hover_color="#555")
+            sb, fg_color="transparent", scrollbar_button_color=NEUTRAL,
+            scrollbar_button_hover_color=NEUTRAL_HOVER)
         nav_scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
-        # Distinct, highlighted container for the MIGRATION workflow so it
-        # stands apart from the OPERATIONS tools below it.
-        mig_box = ctk.CTkFrame(nav_scroll, fg_color="#22244a",
-                               corner_radius=10)
-        mig_box.pack(fill="x", padx=8, pady=(2, 6))
-        ctk.CTkLabel(mig_box, text="MIGRATION",
-                     font=("Segoe UI", 9, "bold"),
-                     text_color="#9aa6d4").pack(
-            anchor="w", padx=12, pady=(8, 2))
+        def _eyebrow(parent, text, color, top, pad):
+            ctk.CTkLabel(parent, text=text, font=(UI_FONT, 10, "bold"),
+                         text_color=color, anchor="w").pack(
+                anchor="w", padx=pad, pady=(top, 4))
 
-        for i, (label, cls) in enumerate(nav):
-            if i == len(nav_migration):
-                ctk.CTkLabel(nav_scroll, text="OPERATIONS",
-                             font=("Segoe UI", 9, "bold"),
-                             text_color="#666").pack(
-                    anchor="w", padx=14, pady=(8, 2))
-            # Migration items live inside the highlighted box; ops items go
-            # directly into the scroll frame.
-            parent = mig_box if i < len(nav_migration) else nav_scroll
-            pad = (8, 6) if i < len(nav_migration) else 10
-            b = ctk.CTkButton(parent, text=label, anchor="w", height=34,
-                              font=("Segoe UI", 12), fg_color="transparent",
-                              text_color="white", hover_color=SIDEBAR_HOVER,
-                              corner_radius=8,
-                              command=lambda l=label: self._show(l))
-            bottom = 8 if i == len(nav_migration) - 1 else 1
-            b.pack(fill="x", padx=pad, pady=(1, bottom))
-            self._btns.append((label, b))
+        def _nav_item(parent, label, hover):
+            # Row = thin active-indicator bar + button, so the selected page
+            # gets a violet accent strip down its left edge.
+            row = ctk.CTkFrame(parent, fg_color="transparent", height=36)
+            row.pack(fill="x", padx=6, pady=1)
+            row.pack_propagate(False)
+            bar = ctk.CTkFrame(row, width=3, fg_color="transparent",
+                               corner_radius=2)
+            bar.pack(side="left", fill="y", padx=(2, 0), pady=5)
+            btn = ctk.CTkButton(
+                row, text=label, anchor="w", height=34, font=(UI_FONT, 12),
+                fg_color="transparent", text_color=TEXT_MUTED,
+                hover_color=hover, corner_radius=theme.RADIUS_SM,
+                command=lambda l=label: self._show(l))
+            btn.pack(side="left", fill="x", expand=True, padx=(6, 4))
+            self._btns.append((label, btn, bar))
 
-        # credit at bottom of sidebar
-        ctk.CTkLabel(sb, text="Made by Ran Jacobi",
-                     font=("Segoe UI", 9), text_color="#555").pack(
-            side="bottom", pady=(0, 8))
-        ctk.CTkLabel(sb, text="v1.5.2",
-                     font=("Segoe UI", 9), text_color="#444").pack(
-            side="bottom", pady=(0, 2))
+        # Collapsible operations categories. self._nav_groups maps each group
+        # title → {expand, collapse, labels} so _show() can auto-open the
+        # group that owns the page being shown.
+        self._nav_groups = {}
 
-        # right side: content + console
+        def _nav_group(parent, title, items):
+            collapsed = {"v": True}
+            content = ctk.CTkFrame(parent, fg_color="transparent")
+            header = ctk.CTkButton(
+                parent, text=f"▸  {title}", anchor="w", height=30,
+                font=(UI_FONT, 11, "bold"), fg_color="transparent",
+                text_color=TEXT_MUTED, hover_color=SIDEBAR_HOVER,
+                corner_radius=theme.RADIUS_SM)
+
+            def _set(open_):
+                collapsed["v"] = not open_
+                if open_:
+                    content.pack(after=header, fill="x", padx=0, pady=(0, 2))
+                    header.configure(text=f"▾  {title}")
+                else:
+                    content.pack_forget()
+                    header.configure(text=f"▸  {title}")
+
+            header.configure(command=lambda: _set(collapsed["v"]))
+            header.pack(fill="x", padx=8, pady=(2, 0))
+            for label, _cls in items:
+                _nav_item(content, label, SIDEBAR_HOVER)
+            self._nav_groups[title] = {
+                "expand": lambda: _set(True),
+                "labels": [lbl for lbl, _c in items],
+            }
+
+        # MIGRATION workflow lives inside a distinct violet-tinted panel so it
+        # reads as the primary workflow, set apart from the OPERATIONS tools.
+        mig_box = ctk.CTkFrame(nav_scroll, fg_color=MIG_PANEL,
+                               corner_radius=theme.RADIUS_MD,
+                               border_width=1, border_color=MIG_BORDER)
+        mig_box.pack(fill="x", padx=8, pady=(2, 8))
+        _eyebrow(mig_box, "MIGRATION", BRAND_LIGHT, 8, 14)
+        for label, cls in nav_migration:
+            _nav_item(mig_box, label, SIDEBAR_HOVER)
+        ctk.CTkFrame(mig_box, fg_color="transparent", height=4).pack()
+
+        _eyebrow(nav_scroll, "OPERATIONS", TEXT_FAINT, 6, 18)
+        for title, items in nav_ops_groups:
+            _nav_group(nav_scroll, title, items)
+
+        # Footer: brand credit + version
+        footer = ctk.CTkFrame(sb, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", pady=(4, 10))
+        ctk.CTkLabel(footer, text="v2.0.0", font=(UI_FONT, 10, "bold"),
+                     text_color=TEXT_MUTED).pack()
+        ctk.CTkLabel(footer, text="Built by Ran Jacobi · Professional Services",
+                     font=(UI_FONT, 9), text_color=TEXT_FAINT).pack(pady=(1, 0))
+
+        # ── center column: page content fills it; OUTPUT lives in a drawer
+        #    that slides up from a slim always-visible status bar ──────────
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True)
 
-        # main area
         self.content = ctk.CTkFrame(right, fg_color="transparent")
-        self.content.pack(fill="both", expand=True)
+        self.content.pack(side="top", fill="both", expand=True)
 
-        # ── CLI Output Console ──────────────────────────────────────
-        self._console_frame = ctk.CTkFrame(right, fg_color="#0d0d1a",
-                                           corner_radius=8)
-        self._console_frame.pack(fill="both", side="bottom", expand=True,
-                                 padx=6, pady=(4, 6))
+        # Status bar (always visible): live status + latest log line + toggle.
+        bar = ctk.CTkFrame(right, fg_color=CARD_ELEVATED, height=30,
+                           corner_radius=0)
+        bar.pack(side="bottom", fill="x")
+        bar.pack_propagate(False)
+        self.status = ctk.CTkLabel(bar, text="Ready", anchor="w",
+                                   font=(UI_FONT, 11), text_color=TEXT_MUTED)
+        self.status.pack(side="left", padx=12)
+        self._drawer_btn = ctk.CTkButton(
+            bar, text="▴  OUTPUT", width=104, height=22,
+            font=(UI_FONT, 10, "bold"), fg_color=NEUTRAL,
+            hover_color=NEUTRAL_HOVER, text_color=GREEN,
+            corner_radius=theme.RADIUS_SM, command=self._toggle_console)
+        self._drawer_btn._busy_exempt = True   # log toggle usable during runs
+        self._drawer_btn.pack(side="right", padx=8, pady=4)
+        self._log_preview = ctk.CTkLabel(bar, text="", anchor="e",
+                                         font=(MONO_FONT, 10),
+                                         text_color=TEXT_FAINT)
+        self._log_preview.pack(side="right", padx=8, fill="x", expand=True)
 
-        console_header = ctk.CTkFrame(self._console_frame,
-                                      fg_color="#151528", height=30,
-                                      corner_radius=0)
-        console_header.pack(fill="x")
-        ctk.CTkLabel(console_header, text="⬤  OUTPUT",
-                     font=("Segoe UI", 10, "bold"),
-                     text_color="#00b894").pack(side="left", padx=10)
-        ctk.CTkButton(console_header, text="Clear", width=50, height=22,
-                      font=("Segoe UI", 10), fg_color="#333",
-                      hover_color="#555",
-                      command=self._clear_console).pack(
-            side="right", padx=4, pady=2)
-        ctk.CTkButton(console_header, text="Toggle", width=50, height=22,
-                      font=("Segoe UI", 10), fg_color="#333",
-                      hover_color="#555",
-                      command=self._toggle_console).pack(
-            side="right", padx=4, pady=2)
+        # The drawer itself — built once, packed above the bar only when open.
+        self._drawer_h = 260
+        self._drawer = ctk.CTkFrame(right, height=self._drawer_h,
+                                    fg_color=CONSOLE_BG, corner_radius=0,
+                                    border_width=1, border_color=BORDER)
+        self._drawer.pack_propagate(False)
 
+        # Drag handle on the drawer's top edge → resize its height.
+        d_grip = ctk.CTkFrame(self._drawer, height=5, fg_color=BORDER,
+                              cursor="sb_v_double_arrow")
+        d_grip.pack(side="top", fill="x")
+        d_grip.bind("<B1-Motion>", self._resize_console)
+        d_grip.bind("<Enter>", lambda e: d_grip.configure(fg_color=BRAND))
+        d_grip.bind("<Leave>", lambda e: d_grip.configure(fg_color=BORDER))
+
+        drawer_header = ctk.CTkFrame(self._drawer, fg_color=CARD_ELEVATED,
+                                     height=32, corner_radius=0)
+        drawer_header.pack(fill="x")
+        drawer_header.pack_propagate(False)
+        ctk.CTkLabel(drawer_header, text="●  OUTPUT", font=(UI_FONT, 11, "bold"),
+                     text_color=GREEN).pack(side="left", padx=12)
+        collapse_btn = ctk.CTkButton(drawer_header, text="▾  Collapse",
+                      width=88, height=24, font=(UI_FONT, 11, "bold"),
+                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                      corner_radius=theme.RADIUS_SM,
+                      command=self._toggle_console)
+        collapse_btn._busy_exempt = True
+        collapse_btn.pack(side="right", padx=(2, 8), pady=4)
+        clear_btn = ctk.CTkButton(drawer_header, text="Clear", width=54,
+                      height=24, font=(UI_FONT, 11), fg_color=NEUTRAL,
+                      hover_color=NEUTRAL_HOVER, corner_radius=theme.RADIUS_SM,
+                      command=self._clear_console)
+        clear_btn._busy_exempt = True
+        clear_btn.pack(side="right", padx=2, pady=4)
         self._console = ctk.CTkTextbox(
-            self._console_frame, font=("Consolas", 11), height=220,
-            fg_color="#0d0d1a", text_color="#cccccc",
-            corner_radius=0)
-        self._console.pack(fill="both", expand=True, padx=2, pady=(0, 2))
+            self._drawer, font=(MONO_FONT, 11), fg_color=CONSOLE_BG,
+            text_color=TEXT_MUTED, corner_radius=0)
+        self._console.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         self._console.configure(state="disabled")
-
-        # status bar
-        self.status = ctk.CTkLabel(right, text="Ready", anchor="w",
-                                   font=("Segoe UI", 11), height=24)
-        self.status.pack(side="bottom", fill="x", padx=10)
 
         # create pages
         for label, cls in nav:
@@ -844,9 +1041,18 @@ class App(ctk.CTk):
         p = self.pages[label]
         p.pack(fill="both", expand=True)
         self._current = p
-        for lbl, btn in self._btns:
-            btn.configure(fg_color=SIDEBAR_SEL if lbl == label
-                          else "transparent")
+        # Auto-expand the operations category that owns this page so its
+        # active indicator is visible even when navigated to programmatically.
+        for grp in getattr(self, "_nav_groups", {}).values():
+            if label in grp["labels"]:
+                grp["expand"]()
+        for lbl, btn, bar in self._btns:
+            selected = lbl == label
+            btn.configure(
+                fg_color=SIDEBAR_SEL if selected else "transparent",
+                text_color=TEXT if selected else TEXT_MUTED,
+                font=(UI_FONT, 12, "bold") if selected else (UI_FONT, 12))
+            bar.configure(fg_color=BRAND if selected else "transparent")
         if hasattr(p, "on_show"):
             p.on_show()
         elif hasattr(p, "_console_var"):
@@ -854,12 +1060,63 @@ class App(ctk.CTk):
         else:
             self.set_active_console("")
 
+    def _iter_buttons(self, widget):
+        """Yield every CTkButton in the widget tree under `widget`."""
+        for child in widget.winfo_children():
+            if isinstance(child, ctk.CTkButton):
+                yield child
+            yield from self._iter_buttons(child)
+
+    def set_busy(self, busy: bool, allow=()):
+        """Lock the UI during a critical operation (backup/restore).
+
+        Every button is disabled except those in `allow` (the running page
+        keeps managing its own Start/Stop/Skip/etc.) and any marked
+        `_busy_exempt` (the OUTPUT drawer controls, so the log stays usable).
+        Prior states are saved on lock and restored on unlock — including the
+        sidebar nav, so the user can't switch pages mid-run.
+        """
+        allow_ids = {id(w) for w in allow}
+        if busy:
+            # Re-entry guard: a second lock without an intervening unlock would
+            # snapshot the already-disabled states and leave the UI stuck
+            # disabled forever after the eventual unlock. Ignore redundant locks.
+            if self._busy:
+                return
+            self._busy = True
+            self._saved_btn_states = {}
+            for w in self._iter_buttons(self):
+                if id(w) in allow_ids or getattr(w, "_busy_exempt", False):
+                    continue
+                try:
+                    self._saved_btn_states[w] = w.cget("state")
+                    w.configure(state="disabled")
+                except Exception:
+                    pass
+        else:
+            self._busy = False
+            for w, st in self._saved_btn_states.items():
+                try:
+                    w.configure(state=st)
+                except Exception:
+                    pass  # widget may have been destroyed/rebuilt
+            self._saved_btn_states = {}
+
     def connect(self, role):
         ctx = self.cfg.get_by_role(role)
         if not ctx:
             return
         api = S1API(ctx.url, ctx.api_token,
                     verify_ssl=not getattr(ctx, "ignore_ssl_errors", False))
+        # Surface API rate-limiting so a slow backup/restore explains itself
+        # instead of looking hung. Throttled at most once every ~10 events to
+        # avoid flooding the log on a heavily-limited tenant.
+        def _on_throttle(info, _r=role):
+            if info.get("events", 0) % 10 == 1:
+                cli_log(f"⏳ {_r} console is rate-limiting us "
+                        f"(429 ×{info['events']}); backing off and retrying — "
+                        f"this is normal on large tenants.", "warning")
+        api.on_throttle = _on_throttle
         if role == "source":
             self.source_api = api
             self.src_lbl.configure(
@@ -869,22 +1126,31 @@ class App(ctk.CTk):
             self.dst_lbl.configure(
                 text=f"{ctx.name}\n{ctx.display_url}", text_color=ACCENT)
 
+    def log_audit(self, action, **fields):
+        """Append one operation to the audit history (best-effort)."""
+        try:
+            self.audit.record(
+                action, when=datetime.now().isoformat(timespec="seconds"),
+                **fields)
+        except Exception:
+            pass
+
     def set_active_console(self, role: str):
         """Highlight which console (source/destination) is active for current operation."""
         if role == "source":
-            self._src_frame.configure(fg_color="#0f5e3f")
-            self._dst_frame.configure(fg_color="#3b0d1e")
+            self._src_frame.configure(fg_color=theme.GREEN_BG)
+            self._dst_frame.configure(fg_color="transparent")
             self._active_lbl.configure(
-                text="▶ ACTIVE: SOURCE", text_color=GREEN)
+                text="▶  ACTIVE: SOURCE", text_color=GREEN)
         elif role == "destination":
-            self._src_frame.configure(fg_color="#0d3b2e")
-            self._dst_frame.configure(fg_color="#5e0f2a")
+            self._src_frame.configure(fg_color="transparent")
+            self._dst_frame.configure(fg_color=theme.ACCENT_BG)
             self._active_lbl.configure(
-                text="▶ ACTIVE: DESTINATION", text_color=ACCENT)
+                text="▶  ACTIVE: DESTINATION", text_color=ACCENT)
         else:
-            self._src_frame.configure(fg_color="#0d3b2e")
-            self._dst_frame.configure(fg_color="#3b0d1e")
-            self._active_lbl.configure(text="", text_color="#888")
+            self._src_frame.configure(fg_color="transparent")
+            self._dst_frame.configure(fg_color="transparent")
+            self._active_lbl.configure(text="", text_color=TEXT_FAINT)
 
     def set_status(self, msg):
         self.status.configure(text=msg)
@@ -908,19 +1174,51 @@ class App(ctk.CTk):
         self._console.insert("end", line)
         self._console.see("end")
         self._console.configure(state="disabled")
+        # Mirror the latest line into the always-visible status bar so the log
+        # is glanceable even while the drawer is collapsed.
+        if level != "banner":
+            preview = line.strip()
+            if len(preview) > 90:
+                preview = preview[:90] + "…"
+            color = {"error": ACCENT, "warning": WARN,
+                     "success": GREEN}.get(level, TEXT_FAINT)
+            self._log_preview.configure(text=preview, text_color=color)
 
     def _clear_console(self):
         self._console.configure(state="normal")
         self._console.delete("1.0", "end")
         self._console.configure(state="disabled")
 
+    def show_console(self):
+        """Ensure the OUTPUT drawer is open (e.g. after a ? help click)."""
+        if not self._console_visible:
+            self._toggle_console()
+        else:
+            self._console.see("end")
+
     def _toggle_console(self):
+        """Slide the OUTPUT drawer up over the page, or tuck it away.
+        Collapsed, the latest log line still shows in the status bar."""
         if self._console_visible:
-            self._console.pack_forget()
+            self._drawer.pack_forget()
+            self._drawer_btn.configure(text="▴  OUTPUT")
             self._console_visible = False
         else:
-            self._console.pack(fill="both", expand=True, padx=2, pady=(0, 2))
+            # side=bottom after the status bar → drawer sits just above it
+            self._drawer.pack(side="bottom", fill="x")
+            self._drawer_btn.configure(text="▾  OUTPUT")
             self._console_visible = True
+            self._console.see("end")
+
+    def _resize_console(self, event):
+        """Drag the grip on the drawer's top edge to set its height."""
+        # Drawer bottom edge sits just above the 30px status bar; height is the
+        # gap from the pointer up to that edge.
+        y_in_win = self.winfo_pointery() - self.winfo_rooty()
+        drawer_bottom = self.winfo_height() - 30
+        new_h = max(120, min(self.winfo_height() - 160, drawer_bottom - y_in_win))
+        self._drawer_h = new_h
+        self._drawer.configure(height=new_h)
 
     def _startup_banner(self):
         self.cli_log("═" * 60, "banner")

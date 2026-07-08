@@ -10,7 +10,11 @@ from tkinter import messagebox, filedialog
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app import run_async, LogBox, CARD, GREEN, ACCENT, WARN, cli_log, _ConsoleProxy, _help_btn
+from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
+                 ACCENT_HOVER, WARN, WARN_HOVER, INFO, cli_log,
+                 _ConsoleProxy, _help_btn, UI_FONT, MONO_FONT, BRAND,
+                 BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
+                 TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
 
 
@@ -31,8 +35,8 @@ class ResultTable(ctk.CTkScrollableFrame):
 
     def _header(self):
         for j, col in enumerate(self.columns):
-            ctk.CTkLabel(self, text=col, font=("Segoe UI", 11, "bold"),
-                         text_color="#aaa").grid(
+            ctk.CTkLabel(self, text=col, font=(UI_FONT, 11, "bold"),
+                         text_color=TEXT_MUTED).grid(
                 row=0, column=j, padx=6, pady=(4, 2), sticky="w")
 
     def clear(self):
@@ -50,7 +54,7 @@ class ResultTable(ctk.CTkScrollableFrame):
                 val = json.dumps(val, default=str)[:60]
             else:
                 val = str(val)[:60]
-            ctk.CTkLabel(self, text=val, font=("Segoe UI", 11)).grid(
+            ctk.CTkLabel(self, text=val, font=(UI_FONT, 11)).grid(
                 row=r, column=j, padx=6, pady=1, sticky="w")
 
     def load(self, items: list[dict], batch_size: int = 50):
@@ -86,30 +90,30 @@ class AccountsSitesPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Accounts & Sites",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Browse accounts → sites → groups hierarchy on the SOURCE console.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn_row, text="Load Hierarchy", height=36,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load).pack(side="left", padx=(0, 4))
         _help_btn(btn_row,
                   "Fetch accounts, sites, and groups tree from SOURCE."
                   ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Export Report", height=36,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn_row,
                   "Export hierarchy as HTML/Excel/JSON."
                   ).pack(side="left", padx=(0, 8))
         self.count_lbl = ctk.CTkLabel(btn_row, text="",
-                                      font=("Segoe UI", 12),
-                                      text_color="gray")
+                                      font=(UI_FONT, 12),
+                                      text_color=TEXT_MUTED)
         self.count_lbl.pack(side="left", padx=8)
 
         self.tree = ctk.CTkScrollableFrame(self, fg_color=CARD, corner_radius=12)
@@ -170,19 +174,19 @@ class AccountsSitesPage(ctk.CTkFrame):
                     f = ctk.CTkFrame(self.tree, fg_color="transparent")
                     f.pack(fill="x", pady=(6, 0), padx=4)
                     ctk.CTkLabel(f, text=f"📁 {name}",
-                                 font=("Segoe UI", 14, "bold"),
+                                 font=(UI_FONT, 14, "bold"),
                                  text_color=GREEN).pack(anchor="w")
                 elif kind == "site":
                     f = ctk.CTkFrame(self.tree, fg_color="transparent")
                     f.pack(fill="x", padx=24)
                     ctk.CTkLabel(f, text=f"🌐 {name}  (id={nid[:12]}…)",
-                                 font=("Segoe UI", 12)).pack(anchor="w")
+                                 font=(UI_FONT, 12)).pack(anchor="w")
                 else:
                     f = ctk.CTkFrame(self.tree, fg_color="transparent")
                     f.pack(fill="x", padx=48)
                     ctk.CTkLabel(f, text=f"📂 {name}",
-                                 font=("Segoe UI", 11),
-                                 text_color="gray").pack(anchor="w")
+                                 font=(UI_FONT, 11),
+                                 text_color=TEXT_MUTED).pack(anchor="w")
                 self._tree_rendered += 1
             if self._tree_pending:
                 self.after(1, _render_batch_inner)
@@ -234,11 +238,11 @@ class AgentsPage(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
 
         ctk.CTkLabel(self, text="Agents",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="List, search, and perform actions on agents.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # filters
@@ -247,13 +251,13 @@ class AgentsPage(ctk.CTkFrame):
         filt.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(filt, text="Name filter:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         self.name_entry = ctk.CTkEntry(filt, placeholder_text="Computer name contains…", height=32)
         self.name_entry.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
 
         ctk.CTkLabel(filt, text="Site filter:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=1, column=0, padx=12, pady=8, sticky="w")
         self.site_entry = ctk.CTkEntry(filt, placeholder_text="(Optional) site name", height=32)
         self.site_entry.grid(row=1, column=1, padx=12, pady=8, sticky="ew")
@@ -262,31 +266,31 @@ class AgentsPage(ctk.CTkFrame):
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         self.list_btn = ctk.CTkButton(btn, text="List Agents", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._list)
         self.list_btn.pack(side="left", padx=(0, 4))
         self.count_btn = ctk.CTkButton(btn, text="Count", height=34,
                       command=self._count)
         self.count_btn.pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Init Scan", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=lambda: self._action("scan")).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Abort Scan", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=lambda: self._action("abort")).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Uninstall", height=34,
-                      fg_color=ACCENT, hover_color="#c0392b",
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
                       command=lambda: self._action("uninstall")).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "List: fetch agents with filters. Count: total count only. "
                   "Init/Abort Scan: trigger or cancel full disk scan. "
                   "Uninstall: queue agent removal. Export: save as report."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         # result list
@@ -420,24 +424,24 @@ class ThreatsPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Threats",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View threats, timeline, and notes from the SOURCE console.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Load Threats", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load: fetch all threats. Timeline/Notes: enter a threat ID "
                   "first, then click to view its timeline or analyst notes."
                   ).pack(side="left", padx=(0, 6))
 
-        ctk.CTkLabel(btn, text="Threat ID:", font=("Segoe UI", 13)).pack(side="left", padx=(16, 4))
+        ctk.CTkLabel(btn, text="Threat ID:", font=(UI_FONT, 13)).pack(side="left", padx=(16, 4))
         self.tid_entry = ctk.CTkEntry(btn, placeholder_text="for timeline/notes", width=200, height=32)
         self.tid_entry.pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Timeline", height=34,
@@ -445,9 +449,9 @@ class ThreatsPage(ctk.CTkFrame):
         ctk.CTkButton(btn, text="Notes", height=34,
                       command=self._notes).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12), text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12), text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -551,17 +555,17 @@ class UsersRolesPage(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
 
         ctk.CTkLabel(self, text="Users & Roles",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Manage users, roles, and 2FA enrollment.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         filt = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
         filt.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         filt.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(filt, text="Search:", font=("Segoe UI", 13)).grid(
+        ctk.CTkLabel(filt, text="Search:", font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         self.search_entry = ctk.CTkEntry(filt, placeholder_text="email or name…", height=32)
         self.search_entry.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
@@ -569,7 +573,7 @@ class UsersRolesPage(ctk.CTkFrame):
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="List Users", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._list_users).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="List Roles", height=34,
                       command=self._list_roles).pack(side="left", padx=(0, 4))
@@ -578,17 +582,17 @@ class UsersRolesPage(ctk.CTkFrame):
         ctk.CTkButton(btn, text="Token Details", height=34,
                       command=self._token_details).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Enroll 2FA (all unenrolled)", height=34,
-                      fg_color=ACCENT, hover_color="#c0392b",
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
                       command=self._enroll_2fa).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "List Users/Roles: query console users or RBAC roles. "
                   "My User: show current token's user. Token Details: show "
                   "token scope/expiry. Enroll 2FA: enroll all unenrolled users."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12), text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12), text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -716,29 +720,29 @@ class ActivitiesPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Activities",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View activity log from the SOURCE console.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Load Activities", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Activity Types", height=34,
                       command=self._types).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load Activities: fetch the console activity log. "
                   "Activity Types: list all known activity type IDs."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -799,11 +803,11 @@ class DeepVisibilityPage(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(self, text="Deep Visibility",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Run Deep Visibility (S1QL) queries and view results.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
@@ -811,7 +815,7 @@ class DeepVisibilityPage(ctk.CTkFrame):
         card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(card, text="S1QL Query:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         self.query_entry = ctk.CTkEntry(card,
                                         placeholder_text='e.g. AgentName IS NOT EMPTY',
@@ -819,7 +823,7 @@ class DeepVisibilityPage(ctk.CTkFrame):
         self.query_entry.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
 
         ctk.CTkLabel(card, text="Hours back:",
-                     font=("Segoe UI", 13)).grid(
+                     font=(UI_FONT, 13)).grid(
             row=1, column=0, padx=12, pady=8, sticky="w")
         self.hours_entry = ctk.CTkEntry(card, placeholder_text="24", width=80, height=32)
         self.hours_entry.grid(row=1, column=1, padx=12, pady=8, sticky="w")
@@ -827,17 +831,17 @@ class DeepVisibilityPage(ctk.CTkFrame):
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Run Query", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._run).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Submit an S1QL query to Deep Visibility and poll for "
                   "results. Enter the query and how many hours back to search."
                   ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.log = _ConsoleProxy(self.app)
@@ -913,32 +917,32 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Exclusions & Blocklist",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View exclusions and blocklist entries from the SOURCE console.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
 
-        ctk.CTkLabel(btn, text="Type:", font=("Segoe UI", 13)).pack(
+        ctk.CTkLabel(btn, text="Type:", font=(UI_FONT, 13)).pack(
             side="left", padx=(0, 4))
         self.type_var = ctk.StringVar(value="path")
         ctk.CTkOptionMenu(btn, values=self.EXCL_TYPES,
                           variable=self.type_var, width=140,
                           height=34).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Load Exclusions", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load_excl).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Load Unified", height=34,
-                      fg_color="#8e44ad", hover_color="#7d3c98",
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
                       command=self._load_unified).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Load Blocklist", height=34,
                       command=self._load_block).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load Exclusions: fetch legacy exclusions by selected type "
@@ -947,8 +951,8 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
                   "including tag-based exclusions. "
                   "Load Blocklist: fetch SHA1 hash block entries."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1030,33 +1034,33 @@ class STARRulesPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="STAR Rules",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View and manage Custom Detection (STAR) rules.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Load STAR Rules", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export to JSON", height=34,
                       command=self._export_json).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Import from JSON", height=34,
-                      fg_color=ACCENT, hover_color="#c0392b",
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
                       command=self._import).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load: fetch Custom Detection (STAR) rules. "
                   "Export to JSON: save rules as raw JSON for backup. "
                   "Import from JSON: create rules from a JSON file."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1155,30 +1159,30 @@ class ApplicationsCVEsPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Applications & CVEs",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View installed applications and associated vulnerabilities.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Load Applications", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load_apps).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Risky Apps (CVEs)", height=34,
                       fg_color=WARN, text_color="black",
                       command=self._load_risky).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load Applications: list installed apps. "
                   "Risky Apps: filter apps with known CVEs."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1252,11 +1256,11 @@ class ThreatIntelPage(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
 
         ctk.CTkLabel(self, text="Threat Intelligence",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Manage IOCs (Indicators of Compromise) — view, add, delete.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # add IOC card
@@ -1269,7 +1273,7 @@ class ThreatIntelPage(ctk.CTkFrame):
             ("Value:", "IOC value"),
             ("External ID:", "optional ext. identifier"),
         ]):
-            ctk.CTkLabel(card, text=lbl, font=("Segoe UI", 13)).grid(
+            ctk.CTkLabel(card, text=lbl, font=(UI_FONT, 13)).grid(
                 row=i, column=0, padx=12, pady=4, sticky="w")
         self.ioc_source = ctk.CTkEntry(card, placeholder_text="e.g. MyFeed", height=30)
         self.ioc_source.grid(row=0, column=1, padx=12, pady=4, sticky="ew")
@@ -1286,20 +1290,20 @@ class ThreatIntelPage(ctk.CTkFrame):
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="List IOCs", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._list).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Add IOC", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._add).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "List IOCs: fetch threat intelligence indicators. "
                   "Add IOC: create a new IOC entry (fill fields above)."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1371,29 +1375,29 @@ class RangerPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Ranger & Rogues",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Network discovery — view Ranger findings and rogue devices.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Load Ranger", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._ranger).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Load Rogues", height=34,
                       command=self._rogues).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Ranger: network discovery findings. "
                   "Rogues: unmanaged/rogue devices found on the network."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1466,29 +1470,29 @@ class RemoteScriptsPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Remote Scripts & Tasks",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View RSO scripts and bulk task history.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Load Scripts", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._scripts).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Load Tasks", height=34,
                       command=self._tasks).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load Scripts: list available RSO scripts. "
                   "Load Tasks: show bulk task history (scheduled/completed)."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1551,33 +1555,33 @@ class TagsPage(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(self, text="Tags",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="View firewall and network quarantine tags.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
-        ctk.CTkLabel(btn, text="Type:", font=("Segoe UI", 13)).pack(
+        ctk.CTkLabel(btn, text="Type:", font=(UI_FONT, 13)).pack(
             side="left", padx=(0, 4))
         self.tag_type = ctk.CTkOptionMenu(btn,
                                           values=["firewall", "network-quarantine"],
                                           width=180, height=34)
         self.tag_type.pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Load Tags", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load tags by type: Firewall or Network Quarantine. "
                   "Requires a license that includes these features."
                   ).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.table = ResultTable(self,
@@ -1629,25 +1633,25 @@ class RawAPIPage(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(self, text="Raw API",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Send raw GET/POST/PUT/DELETE requests to the S1 API.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
         card.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         card.grid_columnconfigure(2, weight=1)
 
-        ctk.CTkLabel(card, text="Method:", font=("Segoe UI", 13)).grid(
+        ctk.CTkLabel(card, text="Method:", font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="w")
         self.method_var = ctk.StringVar(value="GET")
         ctk.CTkOptionMenu(card, values=["GET", "POST", "PUT", "DELETE"],
                           variable=self.method_var, width=100, height=32).grid(
             row=0, column=1, padx=6, pady=8, sticky="w")
 
-        ctk.CTkLabel(card, text="Endpoint:", font=("Segoe UI", 13)).grid(
+        ctk.CTkLabel(card, text="Endpoint:", font=(UI_FONT, 13)).grid(
             row=1, column=0, padx=12, pady=8, sticky="w")
         self.endpoint_entry = ctk.CTkEntry(card,
                                            placeholder_text="/agents, /threats, etc.",
@@ -1655,15 +1659,15 @@ class RawAPIPage(ctk.CTkFrame):
         self.endpoint_entry.grid(row=1, column=1, columnspan=2, padx=6,
                                  pady=8, sticky="ew")
 
-        ctk.CTkLabel(card, text="JSON Body:", font=("Segoe UI", 13)).grid(
+        ctk.CTkLabel(card, text="JSON Body:", font=(UI_FONT, 13)).grid(
             row=2, column=0, padx=12, pady=8, sticky="nw")
-        self.body_text = ctk.CTkTextbox(card, height=80, font=("Consolas", 12))
+        self.body_text = ctk.CTkTextbox(card, height=80, font=(MONO_FONT, 12))
         self.body_text.grid(row=2, column=1, columnspan=2, padx=6, pady=8, sticky="ew")
 
         btn = ctk.CTkFrame(self, fg_color="transparent")
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         ctk.CTkButton(btn, text="Send Request", height=34,
-                      fg_color=GREEN, hover_color="#00a381",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._send).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Send a raw API request to the S1 console. "
@@ -1671,10 +1675,10 @@ class RawAPIPage(ctk.CTkFrame):
                   "For POST/PUT/DELETE, it is sent as the request body."
                   ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color="#2980b9",
+                      fg_color=BRAND,
                       command=self._export).pack(side="left", padx=(0, 6))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         self.log = _ConsoleProxy(self.app)
@@ -1747,11 +1751,11 @@ class PurpleAIPage(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
 
         ctk.CTkLabel(self, text="Purple AI",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Natural language queries against SDL telemetry via Purple AI.",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # input card
@@ -1759,15 +1763,15 @@ class PurpleAIPage(ctk.CTkFrame):
         card.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         card.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card, text="Question:", font=("Segoe UI", 13)).grid(
+        ctk.CTkLabel(card, text="Question:", font=(UI_FONT, 13)).grid(
             row=0, column=0, padx=12, pady=8, sticky="nw")
-        self.query_text = ctk.CTkTextbox(card, height=60, font=("Segoe UI", 13))
+        self.query_text = ctk.CTkTextbox(card, height=60, font=(UI_FONT, 13))
         self.query_text.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
 
         opt_frame = ctk.CTkFrame(card, fg_color="transparent")
         opt_frame.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 8), sticky="ew")
 
-        ctk.CTkLabel(opt_frame, text="View:", font=("Segoe UI", 12)).pack(
+        ctk.CTkLabel(opt_frame, text="View:", font=(UI_FONT, 12)).pack(
             side="left", padx=(0, 4))
         self.view_var = ctk.StringVar(value="EDR")
         ctk.CTkOptionMenu(opt_frame,
@@ -1775,7 +1779,7 @@ class PurpleAIPage(ctk.CTkFrame):
                           variable=self.view_var, width=130, height=30).pack(
             side="left", padx=(0, 12))
 
-        ctk.CTkLabel(opt_frame, text="Hours:", font=("Segoe UI", 12)).pack(
+        ctk.CTkLabel(opt_frame, text="Hours:", font=(UI_FONT, 12)).pack(
             side="left", padx=(0, 4))
         self.hours_var = ctk.StringVar(value="24")
         ctk.CTkEntry(opt_frame, textvariable=self.hours_var,
@@ -1786,8 +1790,8 @@ class PurpleAIPage(ctk.CTkFrame):
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         self._ask_btn = ctk.CTkButton(
             btn, text="🟣 Ask Purple AI", height=36,
-            fg_color="#7b2d8e", hover_color="#5e2270",
-            font=("Segoe UI", 14, "bold"), command=self._ask)
+            fg_color=BRAND, hover_color=BRAND_HOVER,
+            font=(UI_FONT, 14, "bold"), command=self._ask)
         self._ask_btn.pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Ask a natural language question. Purple AI translates it to "
@@ -1795,10 +1799,10 @@ class PurpleAIPage(ctk.CTkFrame):
                   "Domain: SDL telemetry (process, network, file events, indicators, "
                   "ingested logs). NOT for console entities like alerts, agents, sites."
                   ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn, text="Clear", height=36, fg_color="#555",
+        ctk.CTkButton(btn, text="Clear", height=36, fg_color=NEUTRAL,
                       command=self._clear).pack(side="left", padx=(0, 4))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         # results area
@@ -1809,7 +1813,7 @@ class PurpleAIPage(ctk.CTkFrame):
 
         # summary label
         self._summary_lbl = ctk.CTkLabel(result_frame, text="",
-                                          font=("Segoe UI", 13),
+                                          font=(UI_FONT, 13),
                                           wraplength=800, justify="left",
                                           anchor="nw")
         self._summary_lbl.grid(row=0, column=0, padx=12, pady=(12, 4),
@@ -1817,9 +1821,9 @@ class PurpleAIPage(ctk.CTkFrame):
 
         # response textbox (for message + power query)
         self._result_box = ctk.CTkTextbox(result_frame,
-                                           font=("Consolas", 12),
-                                           fg_color="#0d0d1a",
-                                           text_color="#cccccc")
+                                           font=(MONO_FONT, 12),
+                                           fg_color=CONSOLE_BG,
+                                           text_color=TEXT_MUTED)
         self._result_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self._result_box.configure(state="disabled")
 
@@ -1884,13 +1888,13 @@ class PurpleAIPage(ctk.CTkFrame):
             suggestions = r.get("suggested_questions") or []
             if suggestions:
                 ctk.CTkLabel(self._suggestions_frame, text="Suggested:",
-                             font=("Segoe UI", 11, "bold"),
-                             text_color="#888").pack(side="left", padx=(0, 6))
+                             font=(UI_FONT, 11, "bold"),
+                             text_color=TEXT_MUTED).pack(side="left", padx=(0, 6))
                 for sq in suggestions[:3]:
                     ctk.CTkButton(
                         self._suggestions_frame, text=sq[:60],
-                        height=26, font=("Segoe UI", 10),
-                        fg_color="#333", hover_color="#555",
+                        height=26, font=(UI_FONT, 10),
+                        fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
                         command=lambda q=sq: self._use_suggestion(q)
                     ).pack(side="left", padx=2)
             cli_log(f"Purple AI response: {state}", "success")
@@ -1938,11 +1942,11 @@ class UnifiedAlertsPage(ctk.CTkFrame):
         self.grid_rowconfigure(5, weight=1)
 
         ctk.CTkLabel(self, text="Unified Alerts",
-                     font=("Segoe UI", 22, "bold")).grid(
+                     font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
                      text="Modern multi-source alert triage via Unified Alert Management (GraphQL).",
-                     font=("Segoe UI", 13), text_color="gray").grid(
+                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
         # filters card
@@ -1950,21 +1954,21 @@ class UnifiedAlertsPage(ctk.CTkFrame):
         filt.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
         filt.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(filt, text="Status:", font=("Segoe UI", 12)).grid(
+        ctk.CTkLabel(filt, text="Status:", font=(UI_FONT, 12)).grid(
             row=0, column=0, padx=(12, 4), pady=6, sticky="w")
         self.status_var = ctk.StringVar(value="ALL")
         ctk.CTkOptionMenu(filt, values=["ALL", "NEW", "IN_PROGRESS", "RESOLVED"],
                           variable=self.status_var, width=120, height=30).grid(
             row=0, column=1, padx=4, pady=6, sticky="w")
 
-        ctk.CTkLabel(filt, text="Severity:", font=("Segoe UI", 12)).grid(
+        ctk.CTkLabel(filt, text="Severity:", font=(UI_FONT, 12)).grid(
             row=0, column=2, padx=(12, 4), pady=6, sticky="w")
         self.severity_var = ctk.StringVar(value="ALL")
         ctk.CTkOptionMenu(filt, values=["ALL", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
                           variable=self.severity_var, width=120, height=30).grid(
             row=0, column=3, padx=4, pady=6, sticky="w")
 
-        ctk.CTkLabel(filt, text="View:", font=("Segoe UI", 12)).grid(
+        ctk.CTkLabel(filt, text="View:", font=(UI_FONT, 12)).grid(
             row=0, column=4, padx=(12, 4), pady=6, sticky="w")
         self.view_var = ctk.StringVar(value="ALL")
         ctk.CTkOptionMenu(filt, values=["ALL", "ENDPOINT", "IDENTITY", "CLOUD",
@@ -1972,7 +1976,7 @@ class UnifiedAlertsPage(ctk.CTkFrame):
                           variable=self.view_var, width=130, height=30).grid(
             row=0, column=5, padx=(4, 12), pady=6, sticky="w")
 
-        ctk.CTkLabel(filt, text="Page size:", font=("Segoe UI", 12)).grid(
+        ctk.CTkLabel(filt, text="Page size:", font=(UI_FONT, 12)).grid(
             row=1, column=0, padx=(12, 4), pady=6, sticky="w")
         self.pagesize_var = ctk.StringVar(value="50")
         ctk.CTkEntry(filt, textvariable=self.pagesize_var,
@@ -1989,26 +1993,26 @@ class UnifiedAlertsPage(ctk.CTkFrame):
         btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
         self._load_btn = ctk.CTkButton(
             btn, text="Load Alerts", height=36,
-            fg_color=GREEN, hover_color="#00a381",
-            font=("Segoe UI", 14, "bold"), command=self._load)
+            fg_color=GREEN, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"), command=self._load)
         self._load_btn.pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btn, text="Next Page", height=36, fg_color="#2980b9",
+        ctk.CTkButton(btn, text="Next Page", height=36, fg_color=BRAND,
                       command=self._next_page).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btn, text="Facets", height=36, fg_color="#555",
+        ctk.CTkButton(btn, text="Facets", height=36, fg_color=NEUTRAL,
                       command=self._load_facets).pack(side="left", padx=(0, 4))
         _help_btn(btn,
                   "Load: fetch alerts with filters. Next Page: paginate. "
                   "Facets: show severity/status/product distribution.\n\n"
                   "Detail: enter alert ID below to view notes, history, timeline."
                   ).pack(side="left", padx=(0, 8))
-        self.info_lbl = ctk.CTkLabel(btn, text="", font=("Segoe UI", 12),
-                                     text_color="gray")
+        self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
+                                     text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
         # detail row
         det = ctk.CTkFrame(self, fg_color="transparent")
         det.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 4))
-        ctk.CTkLabel(det, text="Alert ID:", font=("Segoe UI", 12)).pack(
+        ctk.CTkLabel(det, text="Alert ID:", font=(UI_FONT, 12)).pack(
             side="left", padx=(0, 4))
         self.alert_id_entry = ctk.CTkEntry(det, placeholder_text="for detail/notes/history",
                                             width=280, height=30)
@@ -2024,15 +2028,15 @@ class UnifiedAlertsPage(ctk.CTkFrame):
 
         # triage buttons
         ctk.CTkButton(det, text="→ Resolve", height=30, width=80,
-                      fg_color="#27ae60", hover_color="#1e8449",
+                      fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=lambda: self._triage("RESOLVED")).pack(
             side="left", padx=(12, 4))
         ctk.CTkButton(det, text="→ In Progress", height=30, width=100,
-                      fg_color="#2980b9", hover_color="#1f6da3",
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
                       command=lambda: self._triage("IN_PROGRESS")).pack(
             side="left", padx=(0, 4))
         ctk.CTkButton(det, text="Export CSV", height=30, width=90,
-                      fg_color="#555",
+                      fg_color=NEUTRAL,
                       command=self._export_csv).pack(side="right")
 
         # results table
@@ -2176,7 +2180,7 @@ class UnifiedAlertsPage(ctk.CTkFrame):
                          for v in vals[:5]]
                 text = f"{fid} — {', '.join(parts)}"
                 ctk.CTkLabel(self._facets_frame, text=text,
-                             font=("Segoe UI", 10), text_color="#aaa").pack(
+                             font=(UI_FONT, 10), text_color=TEXT_MUTED).pack(
                     anchor="w")
                 cli_log(f"  {text}", "info")
             cli_log("Facets loaded", "success")

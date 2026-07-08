@@ -1,4 +1,8 @@
 customtkinter>=5.2.2
-requests>=2.34.2
+requests>=2.33.1
 openpyxl>=3.1.5
 Pillow>=12.2.0
+# Optional but recommended: stores API tokens in the OS keyring instead of
+# plaintext in contexts.json. The app degrades gracefully to file storage if
+# this (or its OS backend) is unavailable; S1CC_DISABLE_KEYRING=1 forces file.
+keyring>=24.0.0

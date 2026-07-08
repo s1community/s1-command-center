@@ -137,6 +137,211 @@ def generate_html(title: str, columns: list[str], rows: list[dict],
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Backup redaction (safe-to-share copies)
+# ═══════════════════════════════════════════════════════════════════════
+
+REDACTED = "***REDACTED***"
+
+# A key is treated as secret if its name contains any of these (case-insensitive).
+# Backups embed real secrets in the settings blocks — SMTP relay passwords, AD
+# bind credentials, syslog tokens, SSO client secrets / private keys, webhook
+# auth headers — so a backup JSON shared on a ticket or chat is a credential
+# leak. Redaction produces a sanitised COPY for sharing; the working backup
+# used for restore is never modified.
+_SECRET_KEY_PARTS = (
+    "password", "passwd", "passphrase", "secret", "token", "apikey",
+    "api_key", "privatekey", "private_key", "clientsecret", "client_secret",
+    "bindpassword", "bind_password", "credential", "authorization", "bearer",
+)
+
+
+def _is_secret_key(key) -> bool:
+    k = str(key).lower().replace("-", "").replace("_", "")
+    return any(p.replace("_", "") in k for p in _SECRET_KEY_PARTS)
+
+
+def _redact_obj(obj, counter):
+    """Recursively return a redacted deep copy, counting masked values."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if _is_secret_key(k) and v not in (None, "", [], {}):
+                out[k] = REDACTED
+                counter[0] += 1
+            else:
+                out[k] = _redact_obj(v, counter)
+        return out
+    if isinstance(obj, list):
+        return [_redact_obj(i, counter) for i in obj]
+    return obj
+
+
+def count_backup_secrets(nodes) -> int:
+    """How many secret values a backup contains (0 = safe to share as-is)."""
+    counter = [0]
+    _redact_obj(nodes or [], counter)
+    return counter[0]
+
+
+def redact_backup(nodes):
+    """Return (redacted_copy, count) — a deep copy of the backup with every
+    secret-looking value masked. Input is not mutated."""
+    counter = [0]
+    redacted = _redact_obj(nodes or [], counter)
+    return redacted, counter[0]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Migration Manifest (for the PSO ticket-closing workflow)
+# ═══════════════════════════════════════════════════════════════════════
+
+def build_migration_manifest(meta: dict, results: list[dict]) -> dict:
+    """Turn a Migration Validation result set (meta + results, the structure
+    produced by ValidationPage._run_validation) into a structured, portable
+    manifest of what was migrated and how it verified.
+
+    Pure function — no GUI/network. Safe to unit-test."""
+    meta = meta or {}
+    results = results or []
+
+    n = len(results)
+    missing = sum(1 for r in results if not r.get("matched"))
+    with_diffs = sum(1 for r in results
+                     if r.get("matched") and r.get("diffs", 0) > 0)
+    identical = n - missing - with_diffs
+    total_diffs = sum(r.get("diffs", 0) for r in results if r.get("matched"))
+
+    if n == 0:
+        status = "incomplete"
+    elif missing == 0 and with_diffs == 0:
+        status = "verified"
+    else:
+        status = "differences"
+
+    nodes = []
+    for r in results:
+        if not r.get("matched"):
+            outcome = "missing"
+            diffs = []
+        elif r.get("diffs", 0) == 0:
+            outcome = "identical"
+            diffs = []
+        else:
+            outcome = "differences"
+            diffs = [
+                {
+                    "element": x.get("cat"),
+                    "src": x.get("src"),
+                    "dst": x.get("dst"),
+                    "missing": x.get("missing", []),
+                    "extra": x.get("extra", []),
+                }
+                for x in r.get("rows", []) if x.get("status") == "diff"
+            ]
+        nodes.append({
+            "type": r.get("type"),
+            "path": r.get("path"),
+            "result": outcome,
+            "differences": diffs,
+        })
+
+    return {
+        "tool": "S1 Command Center",
+        "kind": "migration-manifest",
+        "version": 1,
+        "generatedAt": meta.get("when"),
+        "source": meta.get("src_url"),
+        "destination": meta.get("dst_url"),
+        "levels": meta.get("levels", []),
+        "scope": {
+            "source": meta.get("src_filters", {}),
+            "destination": meta.get("dst_filters", {}),
+        },
+        "summary": {
+            "nodesCompared": n,
+            "identical": identical,
+            "withDifferences": with_diffs,
+            "missingOnDestination": missing,
+            "totalDifferences": total_diffs,
+            "status": status,
+        },
+        "nodes": nodes,
+    }
+
+
+def manifest_to_pso_comment(manifest: dict) -> str:
+    """Render a migration manifest as a Markdown comment ready for the PSO
+    Jira ticket-closing workflow ('done with PSO-XXX'). Mirrors the agreed
+    Migration Summary template so the comment can be posted as-is."""
+    m = manifest or {}
+    s = m.get("summary", {})
+    when = (m.get("generatedAt") or "")[:10] or "—"
+    status = s.get("status")
+
+    if status == "verified":
+        headline = "Migration completed successfully ✅"
+        status_line = "All settings transferred and verified."
+    elif status == "differences":
+        headline = "Migration completed — review needed ⚠️"
+        status_line = (
+            f"{s.get('totalDifferences', 0)} difference(s) across "
+            f"{s.get('withDifferences', 0)} node(s); "
+            f"{s.get('missingOnDestination', 0)} scope(s) missing on "
+            f"destination. See details below.")
+    else:
+        headline = "Migration validation incomplete"
+        status_line = "No nodes were compared — re-run validation."
+
+    src_scope = (m.get("scope", {}).get("source") or {})
+    scope_txt = (f"account: {src_scope.get('account') or 'all'} · "
+                 f"site: {src_scope.get('site') or 'all'}")
+    levels = ", ".join(m.get("levels", [])) or "—"
+
+    lines = [
+        headline,
+        "",
+        "**Migration Summary**",
+        f"- **Source:** {m.get('source') or '?'}",
+        f"- **Destination:** {m.get('destination') or '?'}",
+        f"- **Completed:** {when}",
+        f"- **Scope:** levels [{levels}] · {scope_txt}",
+        f"- **Validation:** {s.get('nodesCompared', 0)} node(s) compared — "
+        f"{s.get('identical', 0)} identical, "
+        f"{s.get('withDifferences', 0)} with differences, "
+        f"{s.get('missingOnDestination', 0)} missing on destination",
+        f"- **Status:** {status_line}",
+    ]
+
+    # Per-node difference detail (only when there is something to flag).
+    flagged = [nd for nd in m.get("nodes", [])
+               if nd.get("result") in ("differences", "missing")]
+    if flagged:
+        lines += ["", "**Items needing attention**"]
+        for nd in flagged:
+            if nd.get("result") == "missing":
+                lines.append(
+                    f"- `{nd.get('path')}` — scope missing on destination "
+                    f"(renamed or not created)")
+                continue
+            for d in nd.get("differences", []):
+                detail = []
+                if d.get("missing"):
+                    miss = d["missing"]
+                    shown = ", ".join(miss[:8])
+                    if len(miss) > 8:
+                        shown += f" (+{len(miss) - 8} more)"
+                    detail.append(f"missing: {shown}")
+                if d.get("extra"):
+                    detail.append(f"{len(d['extra'])} extra on dest")
+                tail = f" ({'; '.join(detail)})" if detail else ""
+                lines.append(
+                    f"- `{nd.get('path')}` / {d.get('element')}: "
+                    f"{d.get('src')} → {d.get('dst')}{tail}")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Excel Report (via openpyxl)
 # ═══════════════════════════════════════════════════════════════════════
 
