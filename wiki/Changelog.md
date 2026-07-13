@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.1 — 2026-07-13
+
+### Improvements
+- **Reset All is a true clean slate** — 🔄 Reset All now permanently deletes every saved connection (source & destination, plus their OS-keyring tokens) in addition to clearing all page fields, so nothing carries over into the next migration.
+- **Jira-ready completion report** — The Migration Complete popup's "📋 Copy All" text now leads with a `cc: @migration-team` mention placeholder and a `Migration was completed with S1 Command Center vX.Y.Z for the <scope>` summary line, ready to paste straight into the ticket.
+
 ## v2.0.0 — 2026-07-08
 
 Major version milestone. Rolls up the v1.8.x migration-workflow and verification work into a stable **2.0** release, plus the firewall-rule migration fixes below.

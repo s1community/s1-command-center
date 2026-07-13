@@ -16,6 +16,7 @@ from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
 from s1_api import S1APIError
+from config import APP_VERSION
 
 EXCL_TYPES = ["white_hash", "path", "file_type", "certificate", "browser"]
 
@@ -4610,9 +4611,17 @@ class RestorePage(ctk.CTkFrame):
         ]
 
         # Plain-text version of the whole report for one-click copy.
+        # First line = Jira mention placeholder for the migration team (edit
+        # after pasting so Jira resolves the @-mentions), followed by the
+        # standard completion sentence with the tool version + scope name.
+        scope_name = customer
         report_text = "\n".join(
-            [f"Migration {'Completed Successfully' if clean else 'Completed — with warnings'}",
-             f"for {customer}", ""]
+            ["cc: @migration-team",
+             f"Migration was completed with S1 Command Center v{APP_VERSION} "
+             f"for the {scope_name}",
+             ""]
+            + [f"Migration {'Completed Successfully' if clean else 'Completed — with warnings'}",
+               f"for {customer}", ""]
             + [f"{k}: {v}" for k, v in rows]
             + (["", "Elements: " + ", ".join(elements)] if elements else []))
 

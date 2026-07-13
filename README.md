@@ -104,7 +104,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.0.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.0.1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -345,6 +345,11 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.0.1 — 2026-07-13
+#### Improvements
+- **Reset All is a true clean slate** — 🔄 Reset All now permanently deletes every saved connection (source & destination, plus their OS-keyring tokens) in addition to clearing all page fields, so nothing carries over into the next migration.
+- **Jira-ready completion report** — The Migration Complete popup's "📋 Copy All" text now leads with a `cc: @migration-team` mention placeholder and a `Migration was completed with S1 Command Center vX.Y.Z for the <scope>` summary line, ready to paste into the ticket.
 
 ### v2.0.0 — 2026-07-08
 Major version milestone — rolls up the v1.7–v1.8 migration-workflow & verification work into a stable **2.0**, plus the firewall-rule migration fixes below.

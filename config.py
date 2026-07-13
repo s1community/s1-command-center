@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+# Single source of truth for the app version (footer, reports, etc.).
+APP_VERSION = "2.0.1"
+
 CONFIG_DIR    = os.path.join(os.path.expanduser("~"), ".s1-command-center")
 CONFIG_FILE   = os.path.join(CONFIG_DIR, "contexts.json")
 PROFILES_FILE = os.path.join(CONFIG_DIR, "migration_profiles.json")
@@ -128,6 +131,21 @@ class ConfigManager:
         if len(self.contexts) == before:
             self.contexts = [c for c in self.contexts if c.name != url_or_name]
         # Best-effort: drop any keyring entries for removed contexts.
+        kr = _keyring()
+        if kr is not None:
+            for c in gone:
+                try:
+                    kr.delete_password(KEYRING_SERVICE, c.url)
+                except Exception:
+                    pass
+        self.save()
+
+    def clear(self):
+        """Wipe ALL saved connections (and their keyring tokens) for a clean
+        slate. Best-effort on keyring so a missing/locked backend never blocks
+        the reset."""
+        gone = list(self.contexts)
+        self.contexts = []
         kr = _keyring()
         if kr is not None:
             for c in gone:

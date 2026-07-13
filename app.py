@@ -174,8 +174,9 @@ class ConnectionsPage(ctk.CTkFrame):
                       font=(UI_FONT, 12, "bold"),
                       command=self._reset_all).pack(side="left", padx=(8, 0))
         _help_btn(paste_row,
-                  "Clear ALL fields across all pages — connections, backup "
-                  "filters, restore data, output console — to start fresh."
+                  "Clear ALL fields across all pages — backup filters, restore "
+                  "data, output console — AND permanently delete every saved "
+                  "connection, to start fresh."
                   ).pack(side="left", padx=(4, 0))
         self._paste_status = ctk.CTkLabel(paste_row, text="",
                                           font=(UI_FONT, 11),
@@ -588,8 +589,9 @@ class ConnectionsPage(ctk.CTkFrame):
         """Clear ALL fields across all pages to start a fresh migration."""
         if not messagebox.askyesno(
                 "Reset All",
-                "This will clear ALL fields, connections, backup data, "
-                "restore data, and the output console.\n\n"
+                "This will clear ALL fields, backup data, restore data, and the "
+                "output console, and PERMANENTLY delete every saved connection "
+                "(source & destination).\n\n"
                 "Are you sure you want to start fresh?"):
             return
 
@@ -600,6 +602,10 @@ class ConnectionsPage(ctk.CTkFrame):
             if "ssl_var" in card:
                 card["ssl_var"].set(False)
             card["status"].configure(text="Not connected", text_color="gray")
+
+        # wipe ALL saved connections from disk (+ keyring) for a clean slate
+        self.app.cfg.clear()
+        self._refresh_list()
 
         # disconnect APIs
         self.app.source_api = None
@@ -955,7 +961,7 @@ class App(ctk.CTk):
         # Footer: brand credit + version
         footer = ctk.CTkFrame(sb, fg_color="transparent")
         footer.pack(side="bottom", fill="x", pady=(4, 10))
-        ctk.CTkLabel(footer, text="v2.0.0", font=(UI_FONT, 10, "bold"),
+        ctk.CTkLabel(footer, text=f"v{APP_VERSION}", font=(UI_FONT, 10, "bold"),
                      text_color=TEXT_MUTED).pack()
         ctk.CTkLabel(footer, text="Built by Ran Jacobi · Professional Services",
                      font=(UI_FONT, 9), text_color=TEXT_FAINT).pack(pady=(1, 0))
