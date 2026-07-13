@@ -27,7 +27,7 @@
 
 **S1 Command Center** is a desktop application built for SentinelOne engineers and administrators to manage, migrate, and audit SentinelOne console configurations. It provides a visual interface for operations that typically require CLI tools or direct API calls.
 
-Built with Python and CustomTkinter, it delivers a modern dark-themed UI with real-time progress tracking, detailed reporting, and full audit trails.
+Built with Python and CustomTkinter, it delivers a modern UI with **light & dark themes**, real-time progress tracking, detailed reporting, and full audit trails.
 
 ## Features
 
@@ -36,6 +36,7 @@ Built with Python and CustomTkinter, it delivers a modern dark-themed UI with re
 - **Paste from Ticket** — One-click import of migration ticket fields into all pages
 - **Auto-connect** — Automatically reconnects to saved consoles on startup
 - **Reset All** — Clear all fields and start a fresh migration in one click
+- **Settings Page** — A ⚙ Settings panel (sidebar footer) for theme (Light / Dark / System), UI scale, start-in-fullscreen, OUTPUT-console-on-launch, default snapshot-first, OS-keychain storage, and default ignore-SSL; preferences persist across restarts **and app updates**
 
 ### Backup
 - **Full Configuration Backup** — Captures policies, exclusions, blocklist, firewall rules, device control, STAR rules, tags, threat intel, settings, and more
@@ -50,6 +51,7 @@ Built with Python and CustomTkinter, it delivers a modern dark-themed UI with re
 ### Restore
 - **Smart Auto-load** — Automatically loads the latest backup file
 - **Mangle Rename** — Rename accounts, sites, or groups in the backup before restoring
+- **Account-name guard** — Warns before restoring if the backup's account name isn't on the destination console and offers to jump to Structure Operations → Mangle Rename, so you don't accidentally create a brand-new account
 - **Auto Target Context** — Automatically sets the restore target on start
 - **SKU Mismatch Detection** — Detects license bundle conflicts and offers to fix them automatically
 - **Duplicate Detection** — Identifies existing items and skips them (exclusions, blocklist, hashes, STAR rules, filters)
@@ -104,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.0.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -305,6 +307,8 @@ Connections are stored in `~/.s1-command-center/contexts.json` with:
 - Role assignment (source/destination)
 - Automatic save on changes
 
+API tokens are written to that file with owner-only (`0600`) permissions. OS-keychain storage is **off by default** — on macOS it otherwise prompts for the login-keychain password on every token read/write. To store tokens in the OS keychain instead (macOS Keychain / Windows Credential Manager / Secret Service), set `S1CC_ENABLE_KEYRING=1`.
+
 ## API Token Requirements
 
 The API token needs these minimum permissions for full backup/restore:
@@ -345,6 +349,33 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.0 — 2026-07-13
+UI/UX release.
+#### New
+- **Settings page** — a **⚙ Settings** button in the sidebar footer opens a preferences page: **theme (Light / Dark / System)**, UI scale, start-in-fullscreen, open OUTPUT console on launch, default "Snapshot first" for restores, OS-keychain token storage, and default "Ignore SSL errors" for new connections. Preferences auto-save (plus a **Save Settings** button) to `~/.s1-command-center/settings.json` and **persist across restarts and app updates**.
+- **Light / Dark mode** — a full light theme with a live Light / Dark / System switch.
+#### Improvements
+- **Restore page re-organized by workflow** — the action bar is grouped into three labeled phases: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback).
+- **Restore account-name guard** — if none of the backup's account names exist on the destination console, the app warns before restoring and offers to jump to Structure Operations → Mangle Rename, so you don't accidentally create a brand-new account.
+- **Picture logo** — the sidebar shows the app's radar logo instead of the text "S1" tile (falls back to the tile if unavailable).
+- **Fullscreen** — toggle with ⌘⇧F (or F11); press Esc to exit.
+- **Help tooltips** — the "?" buttons now show a hover/click tooltip instead of writing help into the OUTPUT console.
+#### Bug Fixes
+- **App no longer closes itself on macOS** — a help tooltip used a `-topmost` borderless window that could tear down the whole app a few seconds after launch. Fixed (plus a regression check).
+
+### v2.0.3 — 2026-07-13
+#### Bug Fixes
+- **App no longer crashes on startup** — v2.0.1 and v2.0.2 crashed immediately on launch with `NameError: name 'APP_VERSION' is not defined`: the sidebar footer referenced the app version without `app.py` importing it. Fixed the import and added a regression test so it can't recur.
+
+### v2.0.2 — 2026-07-13
+#### Improvements
+- **No more macOS keychain prompts** — OS-keychain token storage is now opt-in (`S1CC_ENABLE_KEYRING=1`) instead of on by default, so macOS no longer shows the "S1 Command Center wants to use your confidential information…" login-keychain prompt on every token read/write. Tokens are kept in the owner-only (`0600`) `contexts.json` unless you opt back in.
+
+### v2.0.1 — 2026-07-13
+#### Improvements
+- **Reset All is a true clean slate** — 🔄 Reset All now permanently deletes every saved connection (source & destination, plus their OS-keyring tokens) in addition to clearing all page fields, so nothing carries over into the next migration.
+- **Jira-ready completion report** — The Migration Complete popup's "📋 Copy All" text now leads with a `cc: @migration-team` mention placeholder and a `Migration was completed with S1 Command Center vX.Y.Z for the <scope>` summary line, ready to paste into the ticket.
 
 ### v2.0.0 — 2026-07-08
 Major version milestone — rolls up the v1.7–v1.8 migration-workflow & verification work into a stable **2.0**, plus the firewall-rule migration fixes below.

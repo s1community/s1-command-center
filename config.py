@@ -6,24 +6,36 @@ import os
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+# Single source of truth for the app version (footer, reports, etc.).
+APP_VERSION = "2.1.0"
+
 CONFIG_DIR    = os.path.join(os.path.expanduser("~"), ".s1-command-center")
 CONFIG_FILE   = os.path.join(CONFIG_DIR, "contexts.json")
 PROFILES_FILE = os.path.join(CONFIG_DIR, "migration_profiles.json")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
 # ── Optional OS keyring for API tokens ───────────────────────────────────
-# When the `keyring` package and a working OS backend are available (macOS
-# Keychain / Windows Credential Manager / Secret Service), API tokens are
-# stored there instead of in plaintext in contexts.json — the file then holds
-# only a sentinel. If keyring is missing or fails, everything degrades to the
-# previous plaintext-file behaviour (no lockout). Set S1CC_DISABLE_KEYRING=1
-# to force plaintext.
+# OS-keychain storage is OFF by default. On macOS it triggers the "S1 Command
+# Center wants to use your confidential information stored in
+# 's1-command-center' in your keychain" prompt on every token read/write,
+# which is intrusive when running unsigned/from source. By default tokens are
+# therefore kept in the owner-only (0600) contexts.json, so no keychain prompt
+# ever appears.
+#
+# Opt back into OS-keychain storage (macOS Keychain / Windows Credential
+# Manager / Secret Service) with S1CC_ENABLE_KEYRING=1. When enabled, tokens
+# go to the keychain and the file holds only a sentinel; it still degrades to
+# plaintext-in-file on any keychain failure (no lockout).
 KEYRING_SERVICE = "s1-command-center"
 _KEYRING_SENTINEL = "__keyring__"
 
 
 def _keyring():
-    """Return the keyring module if usable, else None. Indirection so tests
-    can monkeypatch it."""
+    """Return the keyring module only when explicitly opted in, else None.
+    Disabled by default so macOS never shows the login-keychain access prompt.
+    Indirection so tests can monkeypatch it."""
+    if not os.environ.get("S1CC_ENABLE_KEYRING"):
+        return None
     if os.environ.get("S1CC_DISABLE_KEYRING"):
         return None
     try:
@@ -128,6 +140,21 @@ class ConfigManager:
         if len(self.contexts) == before:
             self.contexts = [c for c in self.contexts if c.name != url_or_name]
         # Best-effort: drop any keyring entries for removed contexts.
+        kr = _keyring()
+        if kr is not None:
+            for c in gone:
+                try:
+                    kr.delete_password(KEYRING_SERVICE, c.url)
+                except Exception:
+                    pass
+        self.save()
+
+    def clear(self):
+        """Wipe ALL saved connections (and their keyring tokens) for a clean
+        slate. Best-effort on keyring so a missing/locked backend never blocks
+        the reset."""
+        gone = list(self.contexts)
+        self.contexts = []
         kr = _keyring()
         if kr is not None:
             for c in gone:
@@ -260,3 +287,69 @@ class ProfileManager:
 
     def names(self) -> list[str]:
         return [p.name for p in self.profiles]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  App Settings — small persistent UI preferences (no secrets)
+# ═══════════════════════════════════════════════════════════════════════
+
+_DEFAULT_SETTINGS = {
+    "appearance_mode": "Dark",     # "System" | "Dark" | "Light"
+    "ui_scale": 0.0,               # 0.0 = auto-fit to window; else fixed 0.7–2.0
+    "start_fullscreen": False,
+    "console_open_on_start": False,
+    "restore_snapshot_default": True,
+    "enable_keyring": False,       # store tokens in OS keychain (macOS prompts)
+    "default_ignore_ssl": False,   # pre-tick 'Ignore SSL errors' for new conns
+}
+
+
+_SETTINGS_SCHEMA = 1
+
+
+class SettingsManager:
+    """Loads/saves lightweight app preferences to settings.json (owner-only).
+
+    The file lives in the user's home config dir (CONFIG_DIR), which is OUTSIDE
+    the app bundle — so preferences survive every app upgrade/reinstall and the
+    app always reopens with the saved settings. Missing keys fall back to
+    _DEFAULT_SETTINGS; unknown keys (e.g. written by a newer or older build) are
+    PRESERVED rather than dropped, so nothing is ever lost across versions. Any
+    read/write error degrades to in-memory defaults and never blocks startup."""
+
+    def __init__(self):
+        self.data = dict(_DEFAULT_SETTINGS)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        self.load()
+
+    def load(self):
+        if not os.path.exists(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                raw = json.load(f)
+        except Exception:
+            return  # corrupt/unreadable → keep defaults
+        if isinstance(raw, dict):
+            # Defaults first, then everything the file had on top: known keys
+            # get the saved value, and any unrecognised keys ride along so a
+            # cross-version settings file is never truncated on the next save.
+            self.data = {**_DEFAULT_SETTINGS, **raw}
+
+    def get(self, key, default=None):
+        return self.data.get(key, _DEFAULT_SETTINGS.get(key, default))
+
+    def set(self, key, value):
+        self.data[key] = value
+        self.save()
+
+    def save(self):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        payload = dict(self.data)
+        payload["_schema"] = _SETTINGS_SCHEMA
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.chmod(SETTINGS_FILE, 0o600)
+        except OSError:
+            pass  # best-effort (e.g. Windows / unusual filesystems)

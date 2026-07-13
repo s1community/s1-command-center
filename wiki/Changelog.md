@@ -1,5 +1,39 @@
 # Changelog
 
+## v2.1.0 — 2026-07-13
+
+UI/UX release.
+
+### New
+- **Settings page** — a **⚙ Settings** button in the sidebar footer opens a preferences page: theme (Light / Dark / System), UI scale, start-in-fullscreen, open OUTPUT console on launch, default "Snapshot first" for restores, OS-keychain token storage, and default "Ignore SSL errors" for new connections. Preferences auto-save (plus a **Save Settings** button) to `~/.s1-command-center/settings.json` and persist across restarts **and app updates** (unknown/future keys are preserved so nothing is lost across versions).
+- **Light / Dark mode** — a full light theme with a live Light / Dark / System switch (CustomTkinter widgets flip instantly; the diff/progress/tooltip tk panels follow via a small colour-token system).
+
+### Improvements
+- **Restore page re-organized by workflow** — the action bar is grouped into three labeled phases: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback).
+- **Restore account-name guard** — before restoring, if none of the backup's account names exist on the destination console, the app warns and offers to jump to Structure Operations → Mangle Rename, so a mismatched name doesn't silently create a new account.
+- **Picture logo in the sidebar** — the header shows the app's radar logo image instead of the text "S1" tile (falls back to the tile if unavailable).
+- **Fullscreen** — ⌘⇧F (or F11) toggles fullscreen, Esc exits.
+- **Help tooltips** — the "?" buttons show a hover/click tooltip instead of writing help into the OUTPUT console.
+
+### Bug Fixes
+- **App no longer closes itself on macOS** — a help tooltip used a `-topmost` borderless `Toplevel` that could tear down the whole app a few seconds after launch. Removed `-topmost`; added a heartbeat check to catch this class of regression.
+
+## v2.0.3 — 2026-07-13
+
+### Bug Fixes
+- **App no longer crashes on startup** — v2.0.1 and v2.0.2 crashed immediately on launch with `NameError: name 'APP_VERSION' is not defined`: the sidebar footer referenced the app version without `app.py` importing it from `config`. Fixed the import and added a regression test so it can't recur.
+
+## v2.0.2 — 2026-07-13
+
+### Improvements
+- **No more macOS keychain prompts** — OS-keychain token storage is now opt-in (`S1CC_ENABLE_KEYRING=1`) instead of on by default, so macOS no longer shows the "S1 Command Center wants to use your confidential information stored in 's1-command-center'" login-keychain prompt on every token read/write. Tokens are kept in the owner-only (`0600`) `contexts.json` unless you opt back in; it still degrades to file storage on any keychain failure.
+
+## v2.0.1 — 2026-07-13
+
+### Improvements
+- **Reset All is a true clean slate** — 🔄 Reset All now permanently deletes every saved connection (source & destination, plus their OS-keyring tokens) in addition to clearing all page fields, so nothing carries over into the next migration.
+- **Jira-ready completion report** — The Migration Complete popup's "📋 Copy All" text now leads with a `cc: @migration-team` mention placeholder and a `Migration was completed with S1 Command Center vX.Y.Z for the <scope>` summary line, ready to paste straight into the ticket.
+
 ## v2.0.0 — 2026-07-08
 
 Major version milestone. Rolls up the v1.8.x migration-workflow and verification work into a stable **2.0** release, plus the firewall-rule migration fixes below.
