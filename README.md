@@ -27,7 +27,7 @@
 
 **S1 Command Center** is a desktop application built for SentinelOne engineers and administrators to manage, migrate, and audit SentinelOne console configurations. It provides a visual interface for operations that typically require CLI tools or direct API calls.
 
-Built with Python and CustomTkinter, it delivers a modern dark-themed UI with real-time progress tracking, detailed reporting, and full audit trails.
+Built with Python and CustomTkinter, it delivers a modern UI with **light & dark themes**, real-time progress tracking, detailed reporting, and full audit trails.
 
 ## Features
 
@@ -36,6 +36,7 @@ Built with Python and CustomTkinter, it delivers a modern dark-themed UI with re
 - **Paste from Ticket** — One-click import of migration ticket fields into all pages
 - **Auto-connect** — Automatically reconnects to saved consoles on startup
 - **Reset All** — Clear all fields and start a fresh migration in one click
+- **Settings Page** — A ⚙ Settings panel (sidebar footer) for theme (Light / Dark / System), UI scale, start-in-fullscreen, OUTPUT-console-on-launch, default snapshot-first, OS-keychain storage, and default ignore-SSL; preferences persist across restarts **and app updates**
 
 ### Backup
 - **Full Configuration Backup** — Captures policies, exclusions, blocklist, firewall rules, device control, STAR rules, tags, threat intel, settings, and more
@@ -50,6 +51,7 @@ Built with Python and CustomTkinter, it delivers a modern dark-themed UI with re
 ### Restore
 - **Smart Auto-load** — Automatically loads the latest backup file
 - **Mangle Rename** — Rename accounts, sites, or groups in the backup before restoring
+- **Account-name guard** — Warns before restoring if the backup's account name isn't on the destination console and offers to jump to Structure Operations → Mangle Rename, so you don't accidentally create a brand-new account
 - **Auto Target Context** — Automatically sets the restore target on start
 - **SKU Mismatch Detection** — Detects license bundle conflicts and offers to fix them automatically
 - **Duplicate Detection** — Identifies existing items and skips them (exclusions, blocklist, hashes, STAR rules, filters)
