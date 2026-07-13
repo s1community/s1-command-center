@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.0.3 — 2026-07-13
+
+### Bug Fixes
+- **App no longer crashes on startup** — v2.0.1 and v2.0.2 crashed immediately on launch with `NameError: name 'APP_VERSION' is not defined`: the sidebar footer referenced the app version without `app.py` importing it from `config`. Fixed the import and added a regression test so it can't recur.
+
 ## v2.0.2 — 2026-07-13
 
 ### Improvements

@@ -7,7 +7,7 @@
 #define AppURL        "https://github.com/s1community/s1-command-center"
 #define AppExeName    "S1 Command Center.exe"
 #ifndef AppVersion
-  #define AppVersion  "2.0.2"
+  #define AppVersion  "2.0.3"
 #endif
 
 [Setup]

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional, Callable
 
 from s1_api import S1API, S1APIError
-from config import ConfigManager, ProfileManager, CONFIG_DIR
+from config import ConfigManager, ProfileManager, CONFIG_DIR, APP_VERSION
 from migtools import AuditLog
 import theme
 
