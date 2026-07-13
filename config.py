@@ -12,6 +12,7 @@ APP_VERSION = "2.1.0"
 CONFIG_DIR    = os.path.join(os.path.expanduser("~"), ".s1-command-center")
 CONFIG_FILE   = os.path.join(CONFIG_DIR, "contexts.json")
 PROFILES_FILE = os.path.join(CONFIG_DIR, "migration_profiles.json")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
 # ── Optional OS keyring for API tokens ───────────────────────────────────
 # OS-keychain storage is OFF by default. On macOS it triggers the "S1 Command
@@ -286,3 +287,69 @@ class ProfileManager:
 
     def names(self) -> list[str]:
         return [p.name for p in self.profiles]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  App Settings — small persistent UI preferences (no secrets)
+# ═══════════════════════════════════════════════════════════════════════
+
+_DEFAULT_SETTINGS = {
+    "appearance_mode": "Dark",     # "System" | "Dark" | "Light"
+    "ui_scale": 0.0,               # 0.0 = auto-fit to window; else fixed 0.7–2.0
+    "start_fullscreen": False,
+    "console_open_on_start": False,
+    "restore_snapshot_default": True,
+    "enable_keyring": False,       # store tokens in OS keychain (macOS prompts)
+    "default_ignore_ssl": False,   # pre-tick 'Ignore SSL errors' for new conns
+}
+
+
+_SETTINGS_SCHEMA = 1
+
+
+class SettingsManager:
+    """Loads/saves lightweight app preferences to settings.json (owner-only).
+
+    The file lives in the user's home config dir (CONFIG_DIR), which is OUTSIDE
+    the app bundle — so preferences survive every app upgrade/reinstall and the
+    app always reopens with the saved settings. Missing keys fall back to
+    _DEFAULT_SETTINGS; unknown keys (e.g. written by a newer or older build) are
+    PRESERVED rather than dropped, so nothing is ever lost across versions. Any
+    read/write error degrades to in-memory defaults and never blocks startup."""
+
+    def __init__(self):
+        self.data = dict(_DEFAULT_SETTINGS)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        self.load()
+
+    def load(self):
+        if not os.path.exists(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                raw = json.load(f)
+        except Exception:
+            return  # corrupt/unreadable → keep defaults
+        if isinstance(raw, dict):
+            # Defaults first, then everything the file had on top: known keys
+            # get the saved value, and any unrecognised keys ride along so a
+            # cross-version settings file is never truncated on the next save.
+            self.data = {**_DEFAULT_SETTINGS, **raw}
+
+    def get(self, key, default=None):
+        return self.data.get(key, _DEFAULT_SETTINGS.get(key, default))
+
+    def set(self, key, value):
+        self.data[key] = value
+        self.save()
+
+    def save(self):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        payload = dict(self.data)
+        payload["_schema"] = _SETTINGS_SCHEMA
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.chmod(SETTINGS_FILE, 0o600)
+        except OSError:
+            pass  # best-effort (e.g. Windows / unusual filesystems)

@@ -2,10 +2,21 @@
 
 ## v2.1.0 — 2026-07-13
 
+UI/UX release.
+
+### New
+- **Settings page** — a **⚙ Settings** button in the sidebar footer opens a preferences page: theme (Light / Dark / System), UI scale, start-in-fullscreen, open OUTPUT console on launch, default "Snapshot first" for restores, OS-keychain token storage, and default "Ignore SSL errors" for new connections. Preferences auto-save (plus a **Save Settings** button) to `~/.s1-command-center/settings.json` and persist across restarts **and app updates** (unknown/future keys are preserved so nothing is lost across versions).
+- **Light / Dark mode** — a full light theme with a live Light / Dark / System switch (CustomTkinter widgets flip instantly; the diff/progress/tooltip tk panels follow via a small colour-token system).
+
 ### Improvements
-- **Restore page re-organized by workflow** — the Restore action bar is now grouped into three labeled phases in the order you work: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback). Pre-restore tools no longer appear below the Restore button.
-- **Picture logo in the sidebar** — the header shows the app's radar logo image instead of the text "S1" tile (falls back to the tile if the image is unavailable).
-- **Fullscreen support** — ⌘⌃F (or F11) toggles fullscreen, Esc exits. macOS Tk doesn't hook the native green-button fullscreen, so this provides a reliable path.
+- **Restore page re-organized by workflow** — the action bar is grouped into three labeled phases: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback).
+- **Restore account-name guard** — before restoring, if none of the backup's account names exist on the destination console, the app warns and offers to jump to Structure Operations → Mangle Rename, so a mismatched name doesn't silently create a new account.
+- **Picture logo in the sidebar** — the header shows the app's radar logo image instead of the text "S1" tile (falls back to the tile if unavailable).
+- **Fullscreen** — ⌘⇧F (or F11) toggles fullscreen, Esc exits.
+- **Help tooltips** — the "?" buttons show a hover/click tooltip instead of writing help into the OUTPUT console.
+
+### Bug Fixes
+- **App no longer closes itself on macOS** — a help tooltip used a `-topmost` borderless `Toplevel` that could tear down the whole app a few seconds after launch. Removed `-topmost`; added a heartbeat check to catch this class of regression.
 
 ## v2.0.3 — 2026-07-13
 

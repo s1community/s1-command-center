@@ -18,45 +18,54 @@ import sys
 # Palette
 # ─────────────────────────────────────────────────────────────────────────
 
-# Surfaces — deepest → most elevated (a refined slate-charcoal, not near-black)
-APP_BG        = "#181922"   # window background behind everything
-SIDEBAR_BG    = "#1F2029"   # left navigation rail
-SIDEBAR_HOVER = "#2E2F3D"   # nav item hover
-SIDEBAR_SEL   = "#3A3460"   # nav item selected (violet-tinted)
-CARD          = "#262732"   # standard panel / card surface
-CARD_ELEVATED = "#2F3040"   # raised surface (headers, table rows)
-CONSOLE_BG    = "#171821"   # CLI output console (darker for contrast)
-INPUT_BG      = "#1C1D26"   # entry / textbox fields
-BORDER        = "#3A3B4B"   # hairline separators / input borders
+# Every colour is a (LIGHT, DARK) pair. CustomTkinter widgets accept the tuple
+# directly and switch with set_appearance_mode(); raw tk widgets resolve it via
+# theme.tkcolor(). The DARK element is the original security-console palette.
+
+# Surfaces — deepest → most elevated
+APP_BG        = ("#F4F5F7", "#181922")   # window background behind everything
+SIDEBAR_BG    = ("#ECEEF2", "#1F2029")   # left navigation rail
+SIDEBAR_HOVER = ("#E0E3EA", "#2E2F3D")   # nav item hover
+SIDEBAR_SEL   = ("#E6DEFB", "#3A3460")   # nav item selected (violet-tinted)
+CARD          = ("#FFFFFF", "#262732")   # standard panel / card surface
+CARD_ELEVATED = ("#F0F1F4", "#2F3040")   # raised surface (headers, table rows)
+CONSOLE_BG    = ("#F7F8FA", "#171821")   # CLI output console
+INPUT_BG      = ("#FFFFFF", "#1C1D26")   # entry / textbox fields
+BORDER        = ("#D4D7DE", "#3A3B4B")   # hairline separators / input borders
 
 # Distinct panel behind the MIGRATION nav group
-MIG_PANEL     = "#2B2640"   # violet-tinted container
-MIG_BORDER    = "#43396E"   # subtle violet border around it
+MIG_PANEL     = ("#F1ECFE", "#2B2640")   # violet-tinted container
+MIG_BORDER    = ("#C9BCF3", "#43396E")   # subtle violet border around it
 
 # Brand (primary action / selection / focus)
-BRAND         = "#8B5CF6"   # SentinelOne violet (slightly brighter on lighter bg)
-BRAND_HOVER   = "#7C3AED"
-BRAND_LIGHT   = "#C4B5FD"   # for text/icons on dark, section accents
+BRAND         = ("#7C3AED", "#8B5CF6")   # SentinelOne violet
+BRAND_HOVER   = ("#6D28D9", "#7C3AED")
+BRAND_LIGHT   = ("#6D28D9", "#C4B5FD")   # section accents / eyebrow text
 
 # Semantic — role + status
-GREEN         = "#10B981"   # SOURCE / success
-GREEN_HOVER   = "#059669"
-GREEN_BG      = "#0C2E26"   # green-tinted chip background
-ACCENT        = "#F43F5E"   # DESTINATION / danger / error (rose-red)
-ACCENT_HOVER  = "#E11D48"
-ACCENT_BG     = "#2E0F1A"   # rose-tinted chip background
-WARN          = "#F59E0B"   # warnings
-WARN_HOVER    = "#D97706"
-INFO          = "#38BDF8"   # informational highlights
+GREEN         = ("#059669", "#10B981")   # SOURCE / success
+GREEN_HOVER   = ("#047857", "#059669")
+GREEN_BG      = ("#D1FAE5", "#0C2E26")   # green-tinted chip background
+ACCENT        = ("#E11D48", "#F43F5E")   # DESTINATION / danger / error
+ACCENT_HOVER  = ("#BE123C", "#E11D48")
+ACCENT_BG     = ("#FFE4E6", "#2E0F1A")   # rose-tinted chip background
+WARN          = ("#B45309", "#F59E0B")   # warnings
+WARN_HOVER    = ("#92400E", "#D97706")
+INFO          = ("#0284C7", "#38BDF8")   # informational highlights
 
-# Neutral controls
-NEUTRAL       = "#2B2B38"   # secondary/ghost button fill
-NEUTRAL_HOVER = "#3A3A4A"
+# Neutral controls — kept saturated in light mode so white button text reads
+NEUTRAL       = ("#64748B", "#2B2B38")   # secondary/ghost button fill
+NEUTRAL_HOVER = ("#475569", "#3A3A4A")
+
+# Soft "ghost" utility chips (help ?, footer gear, OUTPUT toggle) — light and
+# unobtrusive in light mode, subtle dark in dark mode. Pair with a BORDER.
+GHOST         = ("#F0F1F4", "#2B2B38")
+GHOST_HOVER   = ("#E2E5EA", "#3A3A4A")
 
 # Text
-TEXT          = "#E7E7EE"   # primary text
-TEXT_MUTED    = "#9CA3AF"   # secondary text / labels
-TEXT_FAINT    = "#6B7280"   # tertiary / disabled / captions
+TEXT          = ("#1A1C23", "#E7E7EE")   # primary text
+TEXT_MUTED    = ("#5A6270", "#9CA3AF")   # secondary text / labels
+TEXT_FAINT    = ("#8A909C", "#6B7280")   # tertiary / disabled / captions
 
 # ─────────────────────────────────────────────────────────────────────────
 # Typography — platform-native font families
@@ -123,12 +132,19 @@ def apply():
     """
     import customtkinter as ctk
 
-    ctk.set_appearance_mode("dark")
+    try:
+        from config import SettingsManager
+        mode = SettingsManager().get("appearance_mode", "Dark")
+    except Exception:
+        mode = "Dark"
+    ctk.set_appearance_mode(mode)
     ctk.set_default_color_theme("blue")  # complete base; patched below
 
     t = ctk.ThemeManager.theme
 
-    def dual(c):            # CTk colours are [light, dark]; we run dark-only
+    def dual(c):            # expand our (light, dark) tokens to CTk's [light, dark]
+        if isinstance(c, (tuple, list)):
+            return [c[0], c[1]]
         return [c, c]
 
     if "CTk" in t:
@@ -177,8 +193,10 @@ def apply():
 
     if "CTkSwitch" in t:
         t["CTkSwitch"].update({
-            "progress_color": dual(BRAND),
-            "button_color":   dual("#FFFFFF"),
+            "fg_color":           dual(("#C7CCD4", "#3A3A4A")),  # off-track
+            "progress_color":     dual(BRAND),                    # on-track
+            "button_color":       dual("#FFFFFF"),
+            "button_hover_color": dual(("#EDEFF3", "#FFFFFF")),
         })
 
     if "CTkProgressBar" in t:
@@ -213,7 +231,7 @@ def apply():
     for combo in ("CTkComboBox", "CTkOptionMenu"):
         if combo in t:
             t[combo].update({
-                "fg_color":     dual("#101018"),
+                "fg_color":     dual(("#FFFFFF", "#101018")),
                 "button_color": dual(BRAND),
                 "button_hover_color": dual(BRAND_HOVER),
                 "border_color": dual(BORDER),
@@ -236,3 +254,46 @@ def apply():
             "hover_color":  dual(NEUTRAL_HOVER),
             "text_color":   dual(TEXT),
         })
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Raw-tk colour helpers
+# CustomTkinter widgets take the (light, dark) tuples directly and follow
+# set_appearance_mode(). Plain tk widgets (Canvas/Text/PanedWindow/tooltips)
+# need a single string, so they resolve via tkcolor() and register with
+# tk_track() so refresh_tk() can repaint them when the mode changes.
+# ─────────────────────────────────────────────────────────────────────────
+_TK_TRACKED = []
+
+
+def tkcolor(token):
+    """Resolve a (light, dark) token to the single hex for the active mode."""
+    import customtkinter as ctk
+    if isinstance(token, (tuple, list)):
+        return token[0] if ctk.get_appearance_mode() == "Light" else token[1]
+    return token
+
+
+def tk_track(widget, apply_fn):
+    """Register a raw tk widget + a function that (re)applies its colours for
+    the current mode. Applies immediately and returns the widget."""
+    try:
+        apply_fn(widget)
+    except Exception:
+        pass
+    _TK_TRACKED.append((widget, apply_fn))
+    return widget
+
+
+def refresh_tk(*_args):
+    """Repaint every tracked raw tk widget for the current mode; prune dead ones."""
+    global _TK_TRACKED
+    alive = []
+    for w, fn in _TK_TRACKED:
+        try:
+            if int(w.winfo_exists()):
+                fn(w)
+                alive.append((w, fn))
+        except Exception:
+            pass
+    _TK_TRACKED = alive

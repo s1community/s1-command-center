@@ -349,10 +349,18 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 ### v2.1.0 — 2026-07-13
+UI/UX release.
+#### New
+- **Settings page** — a **⚙ Settings** button in the sidebar footer opens a preferences page: **theme (Light / Dark / System)**, UI scale, start-in-fullscreen, open OUTPUT console on launch, default "Snapshot first" for restores, OS-keychain token storage, and default "Ignore SSL errors" for new connections. Preferences auto-save (plus a **Save Settings** button) to `~/.s1-command-center/settings.json` and **persist across restarts and app updates**.
+- **Light / Dark mode** — a full light theme with a live Light / Dark / System switch.
 #### Improvements
-- **Restore page re-organized by workflow** — the action bar is now grouped into three clearly-labeled phases in the order you actually work: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback). Pre-restore tools no longer sit below the Restore button.
-- **Picture logo** — the sidebar header now shows the app's radar logo image instead of the text "S1" tile (falls back to the tile if the image is unavailable).
-- **Fullscreen support** — toggle fullscreen with ⌘⌃F (or F11); press Esc to exit. Works around Tk on macOS not wiring the native green-button fullscreen.
+- **Restore page re-organized by workflow** — the action bar is grouped into three labeled phases: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback).
+- **Restore account-name guard** — if none of the backup's account names exist on the destination console, the app warns before restoring and offers to jump to Structure Operations → Mangle Rename, so you don't accidentally create a brand-new account.
+- **Picture logo** — the sidebar shows the app's radar logo instead of the text "S1" tile (falls back to the tile if unavailable).
+- **Fullscreen** — toggle with ⌘⇧F (or F11); press Esc to exit.
+- **Help tooltips** — the "?" buttons now show a hover/click tooltip instead of writing help into the OUTPUT console.
+#### Bug Fixes
+- **App no longer closes itself on macOS** — a help tooltip used a `-topmost` borderless window that could tear down the whole app a few seconds after launch. Fixed (plus a regression check).
 
 ### v2.0.3 — 2026-07-13
 #### Bug Fixes

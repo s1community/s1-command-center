@@ -13,7 +13,8 @@ from datetime import datetime
 from typing import Optional, Callable
 
 from s1_api import S1API, S1APIError
-from config import ConfigManager, ProfileManager, CONFIG_DIR, APP_VERSION
+from config import (ConfigManager, ProfileManager, CONFIG_DIR, APP_VERSION,
+                    SettingsManager)
 from migtools import AuditLog
 import theme
 
@@ -46,6 +47,8 @@ BRAND_HOVER   = theme.BRAND_HOVER
 BRAND_LIGHT   = theme.BRAND_LIGHT
 NEUTRAL       = theme.NEUTRAL
 NEUTRAL_HOVER = theme.NEUTRAL_HOVER
+GHOST         = theme.GHOST
+GHOST_HOVER   = theme.GHOST_HOVER
 CONSOLE_BG    = theme.CONSOLE_BG
 TEXT          = theme.TEXT
 TEXT_MUTED    = theme.TEXT_MUTED
@@ -54,20 +57,62 @@ UI_FONT       = theme.UI_FONT
 MONO_FONT     = theme.MONO_FONT
 
 
+class _ToolTip:
+    """Lightweight hover/click tooltip — shows help text in a small popup next
+    to the widget instead of dumping it into the OUTPUT console."""
+    def __init__(self, widget, text, wraplength=340):
+        self.widget = widget
+        self.text = text
+        self.wraplength = wraplength
+        self._tip = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _e=None):
+        if self._tip is not None or not self.text:
+            return
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() + 8
+        y = self.widget.winfo_rooty() - 4
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        try:
+            tw.wm_attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tw.wm_geometry(f"+{x}+{y}")
+        border = tk.Frame(tw, background=theme.tkcolor(BORDER))
+        border.pack()
+        tk.Label(border, text=self.text, justify="left",
+                 wraplength=self.wraplength,
+                 background=theme.tkcolor(CARD_ELEVATED),
+                 foreground=theme.tkcolor(TEXT), font=(UI_FONT, 11),
+                 padx=10, pady=8).pack(padx=1, pady=1)
+
+    def _hide(self, _e=None):
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+    def _toggle(self, _e=None):
+        # Click also toggles, for trackpad users who miss the hover.
+        self._hide() if self._tip is not None else self._show()
+
+
 def _help_btn(parent, text):
-    """Create a small ? button that prints help to the OUTPUT console."""
+    """Create a small ? button that reveals its help in a hover/click tooltip
+    (no more OUTPUT-console spam on every click)."""
     import sys
-    def _show():
-        cli_log(text, "info")
-        # Surface the help in the OUTPUT drawer (which starts collapsed).
-        if _app_ref:
-            _app_ref.show_console()
     # Windows doesn't render high corner_radius well — use smaller radius
     cr = 13 if sys.platform == "darwin" else 6
+    # Soft pill: light-grey in light mode (NEUTRAL is a dark slate there, which
+    # looked heavy/ugly for a tiny "?"); unchanged dark styling in dark mode.
     btn = ctk.CTkButton(parent, text="?", width=28, height=28,
-                        font=(UI_FONT, 12, "bold"), fg_color=NEUTRAL,
-                        hover_color=NEUTRAL_HOVER, text_color=TEXT_MUTED,
-                        corner_radius=cr, command=_show)
+                        font=(UI_FONT, 12, "bold"),
+                        fg_color=GHOST, hover_color=GHOST_HOVER,
+                        text_color=TEXT_MUTED, border_width=1,
+                        border_color=BORDER, corner_radius=cr)
+    tip = _ToolTip(btn, text)
+    btn.configure(command=tip._toggle)
     return btn
 
 
@@ -243,7 +288,8 @@ class ConnectionsPage(ctk.CTkFrame):
             entries.append(e)
 
         # Ignore-SSL-errors checkbox row (above buttons)
-        ssl_var = tk.BooleanVar(value=False)
+        ssl_var = tk.BooleanVar(
+            value=bool(self.app.settings.get("default_ignore_ssl", False)))
         ssl_row = ctk.CTkFrame(card, fg_color="transparent")
         ssl_row.grid(row=4, column=0, columnspan=2, padx=12, pady=(2, 0),
                      sticky="w")
@@ -656,6 +702,181 @@ class ConnectionsPage(ctk.CTkFrame):
         self._refresh_list()
 
 
+class SettingsPage(ctk.CTkFrame):
+    """App preferences — persisted to settings.json via App.settings."""
+
+    _SCALES = {
+        "Auto (fit window)": 0.0,
+        "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25, "150%": 1.5,
+    }
+
+    def __init__(self, master, app, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.app = app
+        s = self.app.settings
+
+        ctk.CTkLabel(self, text="Settings",
+                     font=(UI_FONT, 22, "bold")).pack(
+            anchor="w", padx=20, pady=(20, 2))
+        ctk.CTkLabel(
+            self,
+            text="Preferences save automatically and persist across restarts "
+                 "and app updates.",
+            font=(UI_FONT, 13), text_color=TEXT_MUTED).pack(
+            anchor="w", padx=20, pady=(0, 12))
+
+        wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        wrap.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self._wrap = wrap
+
+        # ── Appearance & Display ──
+        card = self._card("Appearance & Display")
+        self._add_row(card, "Theme",
+                      "Light, dark, or follow the system setting. Switches live.")
+        self._theme_var = ctk.StringVar(value=s.get("appearance_mode", "Dark"))
+        ctk.CTkOptionMenu(card, values=["System", "Dark", "Light"],
+                          variable=self._theme_var, width=180,
+                          command=self._on_theme).grid(
+            row=self._row, column=1, sticky="e", padx=16, pady=6)
+        self._add_row(card, "UI scale",
+                      "Size of all text and controls. 'Auto' fits the window.")
+        self._scale_var = ctk.StringVar(
+            value=self._scale_to_label(s.get("ui_scale", 0.0)))
+        ctk.CTkOptionMenu(card, values=list(self._SCALES.keys()),
+                          variable=self._scale_var, width=180,
+                          command=self._on_scale).grid(
+            row=self._row, column=1, sticky="e", padx=16, pady=6)
+        self._switch(card, "Start in fullscreen",
+                     "Open filling the screen. Toggle anytime with ⌘⇧F, "
+                     "exit with Esc.",
+                     bool(s.get("start_fullscreen")), self._on_start_fullscreen)
+
+        # ── General ──
+        card = self._card("General")
+        self._switch(card, "Open OUTPUT console on launch",
+                     "Start with the log / console drawer already open.",
+                     bool(s.get("console_open_on_start")),
+                     self._on_console_start)
+
+        # ── Restore ──
+        card = self._card("Restore")
+        self._switch(card, "Snapshot destination before restore (default)",
+                     "Pre-tick 'Snapshot first' on the Restore page so a bad "
+                     "restore can be rolled back.",
+                     bool(s.get("restore_snapshot_default", True)),
+                     self._on_snapshot_default)
+
+        # ── Security & Storage ──
+        card = self._card("Security & Storage")
+        self._switch(card, "Store API tokens in OS keychain",
+                     "Use the macOS Keychain / Windows Credential Manager for "
+                     "tokens instead of the local file. macOS prompts for "
+                     "keychain access on each token read/write.",
+                     bool(s.get("enable_keyring")), self._on_keyring)
+        self._switch(card, "Ignore SSL errors for new connections",
+                     "Pre-tick 'Ignore SSL errors' when adding a new console "
+                     "(useful for lab / self-signed environments).",
+                     bool(s.get("default_ignore_ssl")), self._on_default_ssl)
+
+        # Save button. Settings already auto-save on every change; this writes
+        # the file on demand and confirms it, for peace of mind.
+        save_row = ctk.CTkFrame(wrap, fg_color="transparent")
+        save_row.pack(fill="x", padx=16, pady=(10, 2))
+        self._save_status = ctk.CTkLabel(save_row, text="", font=(UI_FONT, 11),
+                                         text_color=GREEN)
+        self._save_status.pack(side="right", padx=(8, 6))
+        ctk.CTkButton(save_row, text="💾  Save Settings", height=32, width=150,
+                      fg_color=BRAND, hover_color=BRAND_HOVER,
+                      font=(UI_FONT, 12, "bold"),
+                      command=self._save_settings).pack(side="right")
+
+        ctk.CTkLabel(
+            wrap,
+            text="Stored in ~/.s1-command-center/settings.json (outside the "
+                 "app), so your settings are kept across every app update.",
+            font=(UI_FONT, 10), text_color=TEXT_FAINT, justify="left",
+            wraplength=560).pack(anchor="w", padx=16, pady=(6, 4))
+
+    # ── layout helpers ──
+    def _card(self, title):
+        c = ctk.CTkFrame(self._wrap, fg_color=CARD, corner_radius=12)
+        c.pack(fill="x", padx=14, pady=6)
+        c.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(c, text=title, font=(UI_FONT, 14, "bold"),
+                     text_color=ACCENT).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 4))
+        self._row = 0
+        return c
+
+    def _add_row(self, card, title, desc):
+        self._row += 1
+        box = ctk.CTkFrame(card, fg_color="transparent")
+        box.grid(row=self._row, column=0, sticky="w", padx=16, pady=6)
+        ctk.CTkLabel(box, text=title, font=(UI_FONT, 13, "bold"),
+                     text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(box, text=desc, font=(UI_FONT, 11), wraplength=560,
+                     justify="left", text_color=TEXT_FAINT).pack(anchor="w")
+
+    def _switch(self, card, title, desc, initial, command):
+        self._add_row(card, title, desc)
+        var = ctk.BooleanVar(value=initial)
+        ctk.CTkSwitch(card, text="", variable=var, width=48,
+                      command=lambda: command(var)).grid(
+            row=self._row, column=1, sticky="e", padx=16, pady=6)
+        return var
+
+    def _scale_to_label(self, val):
+        for k, v in self._SCALES.items():
+            if abs(v - (val or 0.0)) < 1e-3:
+                return k
+        return "Auto (fit window)"
+
+    # ── handlers ──
+    def _on_scale(self, label):
+        val = self._SCALES.get(label, 0.0)
+        self.app.settings.set("ui_scale", val)
+        self.app.apply_ui_scale(val)
+
+    def _on_theme(self, mode):
+        ctk.set_appearance_mode(mode)   # CustomTkinter widgets switch live
+        theme.refresh_tk()              # repaint tracked raw-tk widgets
+        self.app.settings.set("appearance_mode", mode)
+
+    def _on_start_fullscreen(self, var):
+        self.app.settings.set("start_fullscreen", bool(var.get()))
+
+    def _on_console_start(self, var):
+        self.app.settings.set("console_open_on_start", bool(var.get()))
+
+    def _on_snapshot_default(self, var):
+        self.app.settings.set("restore_snapshot_default", bool(var.get()))
+
+    def _on_default_ssl(self, var):
+        self.app.settings.set("default_ignore_ssl", bool(var.get()))
+
+    def _on_keyring(self, var):
+        on = bool(var.get())
+        self.app.settings.set("enable_keyring", on)
+        if on:
+            os.environ["S1CC_ENABLE_KEYRING"] = "1"
+        else:
+            os.environ.pop("S1CC_ENABLE_KEYRING", None)
+        try:
+            self.app.cfg.save()   # migrate tokens to/from the OS keychain
+            cli_log("OS keychain storage "
+                    + ("enabled — tokens moved to the keychain." if on
+                       else "disabled — tokens kept in the local file."),
+                    "info")
+        except Exception as exc:
+            cli_log(f"Keychain toggle failed: {exc}", "error")
+
+    def _save_settings(self):
+        self.app.settings.save()
+        self._save_status.configure(text="Saved ✓")
+        self.after(2000, lambda: self._save_status.configure(text=""))
+        cli_log("Settings saved.", "success")
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -675,9 +896,15 @@ class App(ctk.CTk):
         # Auto UI scaling: grow every widget proportionally as the window gets
         # larger (and back down when smaller) so big/full-screen displays don't
         # look sparse and tiny. Debounced + bucketed to avoid thrash.
-        self._ui_scale = 1.0
-        self._auto_scale = True       # follows window size until user zooms
+        self.settings = SettingsManager()
+        if self.settings.get("enable_keyring"):
+            os.environ["S1CC_ENABLE_KEYRING"] = "1"
+        _saved_scale = self.settings.get("ui_scale", 0.0) or 0.0
+        self._ui_scale = _saved_scale if _saved_scale else 1.0
+        self._auto_scale = not _saved_scale   # 0.0 → follow window size
         self._scale_after = None
+        if _saved_scale:
+            ctk.set_widget_scaling(_saved_scale)
         self.bind("<Configure>", self._on_resize)
 
         # Manual zoom override (Cmd/Ctrl +/-/0) — once used, it pins the scale.
@@ -689,13 +916,12 @@ class App(ctk.CTk):
         for seq in ("<Command-0>", "<Control-0>"):
             self.bind(seq, lambda e: self._zoom_reset())
 
-        # Fullscreen — Tk on macOS doesn't hook the native green-button
-        # fullscreen Space (the button only "zooms", so it feels like nothing
-        # happens). Provide explicit toggles that work on every OS: F11 or
-        # ⌘⌃F to enter/leave, Esc to leave. macOS often reserves F11 for
-        # Mission Control, so ⌘⌃F is the reliable shortcut there.
+        # Fullscreen — bound to ⌘⇧F (reliable on macOS) plus F11 / ⌘⌃F for
+        # platforms where those aren't intercepted by the OS; Esc exits. (Tk on
+        # macOS doesn't hook the native green-button fullscreen.)
         self._is_fullscreen = False
-        for seq in ("<F11>", "<Command-Control-f>", "<Control-Command-f>"):
+        for seq in ("<F11>", "<Command-Control-f>", "<Control-Command-f>",
+                    "<Command-Shift-F>", "<Control-Shift-F>"):
             self.bind(seq, self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
         icon_path = os.path.join(os.path.dirname(__file__), "s1cc.ico")
@@ -721,6 +947,12 @@ class App(ctk.CTk):
         self._startup_banner()
         self.connect("source")
         self.connect("destination")
+
+        # Apply the saved "start in fullscreen" preference once the window is up.
+        if self.settings.get("start_fullscreen"):
+            self.after(250, self._toggle_fullscreen)
+        if self.settings.get("console_open_on_start"):
+            self.after(300, self.show_console)
 
     def _center_on_screen(self):
         """Place the window centered on whichever screen Tk reports."""
@@ -774,6 +1006,20 @@ class App(ctk.CTk):
         self._apply_auto_scale()
         self.set_status("UI zoom: auto-fit to window size")
 
+    def apply_ui_scale(self, val):
+        """Settings hook: apply a fixed UI scale (val>0) or return to
+        window-fit auto scaling (val==0). Mirrors the ⌘± / ⌘0 zoom controls."""
+        if val:
+            self._auto_scale = False
+            self._ui_scale = val
+            ctk.set_widget_scaling(val)
+            self.set_status(f"UI scale: {int(val * 100)}%")
+        else:
+            self._auto_scale = True
+            self._ui_scale = 0.0
+            self._apply_auto_scale()
+            self.set_status("UI scale: auto-fit to window")
+
     def _toggle_fullscreen(self, event=None):
         """Enter/leave true fullscreen. macOS Tk doesn't hook the native
         green-button fullscreen, so this is the reliable path."""
@@ -786,7 +1032,7 @@ class App(ctk.CTk):
                 self.geometry(f"{self.winfo_screenwidth()}x"
                               f"{self.winfo_screenheight()}+0+0")
         if hasattr(self, "status"):
-            self.set_status("Fullscreen on (Esc or ⌘⌃F to exit)"
+            self.set_status("Fullscreen on (Esc or ⌘⇧F to exit)"
                             if self._is_fullscreen else "Fullscreen off")
         return "break"
 
@@ -1011,13 +1257,24 @@ class App(ctk.CTk):
         for title, items in nav_ops_groups:
             _nav_group(nav_scroll, title, items)
 
-        # Footer: brand credit + version
+        # Footer: settings gear + version + brand credit
         footer = ctk.CTkFrame(sb, fg_color="transparent")
         footer.pack(side="bottom", fill="x", pady=(4, 10))
-        ctk.CTkLabel(footer, text=f"v{APP_VERSION}", font=(UI_FONT, 10, "bold"),
-                     text_color=TEXT_MUTED).pack()
+        ver_row = ctk.CTkFrame(footer, fg_color="transparent")
+        ver_row.pack()
+        gear = ctk.CTkButton(
+            ver_row, text="⚙  Settings", height=28,
+            font=(UI_FONT, 11, "bold"), fg_color=GHOST,
+            hover_color=GHOST_HOVER, text_color=TEXT_MUTED,
+            border_width=1, border_color=BORDER,
+            corner_radius=theme.RADIUS_SM,
+            command=lambda: self._show("Settings"))
+        gear.pack(side="left", padx=(0, 8))
+        _ToolTip(gear, "Appearance & display preferences")
+        ctk.CTkLabel(ver_row, text=f"v{APP_VERSION}", font=(UI_FONT, 10, "bold"),
+                     text_color=TEXT_MUTED).pack(side="left")
         ctk.CTkLabel(footer, text="Built by Ran Jacobi · Professional Services",
-                     font=(UI_FONT, 9), text_color=TEXT_FAINT).pack(pady=(1, 0))
+                     font=(UI_FONT, 9), text_color=TEXT_FAINT).pack(pady=(3, 0))
 
         # ── center column: page content fills it; OUTPUT lives in a drawer
         #    that slides up from a slim always-visible status bar ──────────
@@ -1037,8 +1294,9 @@ class App(ctk.CTk):
         self.status.pack(side="left", padx=12)
         self._drawer_btn = ctk.CTkButton(
             bar, text="▴  OUTPUT", width=104, height=22,
-            font=(UI_FONT, 10, "bold"), fg_color=NEUTRAL,
-            hover_color=NEUTRAL_HOVER, text_color=GREEN,
+            font=(UI_FONT, 10, "bold"), fg_color=GHOST,
+            hover_color=GHOST_HOVER, text_color=GREEN,
+            border_width=1, border_color=BORDER,
             corner_radius=theme.RADIUS_SM, command=self._toggle_console)
         self._drawer_btn._busy_exempt = True   # log toggle usable during runs
         self._drawer_btn.pack(side="right", padx=8, pady=4)
@@ -1091,6 +1349,9 @@ class App(ctk.CTk):
         for label, cls in nav:
             p = cls(self.content, self)
             self.pages[label] = p
+        # Settings isn't a nav-list item — it's reached via the footer gear —
+        # so register its page explicitly.
+        self.pages["Settings"] = SettingsPage(self.content, self)
 
         self._show("PSO Tickets" if is_admin else "Connections")
 

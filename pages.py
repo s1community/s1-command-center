@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox
 from datetime import datetime, timezone
 from typing import Optional
 
+import theme
 from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  ACCENT_HOVER, WARN, WARN_HOVER, INFO, cli_log,
                  _ConsoleProxy, _help_btn, UI_FONT, MONO_FONT, BRAND,
@@ -219,12 +220,13 @@ class ProgressTable(ctk.CTkFrame):
     nested CTkLabel widgets.
     """
 
+    # (bg, fg) per status; each is a (light, dark) pair — CTk labels accept them.
     STATUS_COLORS = {
-        "pending":  ("#444", "#888"),
-        "running":  ("#1a3a5c", "#4da6ff"),
-        "done":     ("#0d3b2e", "#00b894"),
-        "error":    ("#3b0d1e", "#e94560"),
-        "skipped":  ("#333", "#666"),
+        "pending":  (("#E4E7EC", "#444"),    ("#5A6270", "#888")),
+        "running":  (("#DBEAFE", "#1a3a5c"), ("#1D4ED8", "#4da6ff")),
+        "done":     (("#D1FAE5", "#0d3b2e"), ("#047857", "#00b894")),
+        "error":    (("#FFE4E6", "#3b0d1e"), ("#BE123C", "#e94560")),
+        "skipped":  (("#E4E7EC", "#333"),    ("#8A909C", "#666")),
     }
 
     def __init__(self, master, height: int = 300, **kw):
@@ -238,7 +240,9 @@ class ProgressTable(ctk.CTkFrame):
 
         # Outer canvas (the scrollable viewport).
         self._canvas = _tk.Canvas(
-            self, bg=CARD, highlightthickness=0, bd=0, height=height)
+            self, highlightthickness=0, bd=0, height=height)
+        theme.tk_track(self._canvas,
+                       lambda w: w.configure(bg=theme.tkcolor(CARD)))
         self._vscroll = _tk.Scrollbar(
             self, orient="vertical", command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=self._vscroll.set)
@@ -421,7 +425,8 @@ class ProgressTable(ctk.CTkFrame):
             w.wm_geometry(f"+{x}+{y}")
             lbl = _tk.Label(
                 w, text=text, justify="left",
-                background="#1f2329", foreground="#e0e0e0",
+                background=theme.tkcolor(CARD_ELEVATED),
+                foreground=theme.tkcolor(TEXT),
                 relief="solid", borderwidth=1,
                 font=(MONO_FONT, 10), padx=6, pady=3)
             lbl.pack()
@@ -3098,26 +3103,35 @@ class DiffPanel(ctk.CTkFrame):
         body.grid_rowconfigure(0, weight=1)
 
         self._left = tk.Text(
-            body, font=(MONO_FONT, 10), bg="#15171c", fg="#d0d0d0",
-            relief="flat", borderwidth=0, wrap="none", height=18,
-            insertbackground="#d0d0d0")
+            body, font=(MONO_FONT, 10), relief="flat", borderwidth=0,
+            wrap="none", height=18)
         self._left.grid(row=0, column=0, sticky="nsew", padx=(4, 2))
         self._right = tk.Text(
-            body, font=(MONO_FONT, 10), bg="#15171c", fg="#d0d0d0",
-            relief="flat", borderwidth=0, wrap="none", height=18,
-            insertbackground="#d0d0d0")
+            body, font=(MONO_FONT, 10), relief="flat", borderwidth=0,
+            wrap="none", height=18)
         self._right.grid(row=0, column=1, sticky="nsew", padx=(2, 4))
 
-        for w in (self._left, self._right):
-            w.tag_configure("hdr",  foreground="#9eaab8",
+        def _theme_diff(w):
+            w.configure(bg=theme.tkcolor(("#FFFFFF", "#15171c")),
+                        fg=theme.tkcolor(TEXT),
+                        insertbackground=theme.tkcolor(TEXT))
+            w.tag_configure("hdr",
+                            foreground=theme.tkcolor(("#5A6270", "#9eaab8")),
                             font=(MONO_FONT, 10, "bold"))
-            w.tag_configure("same", foreground="#6dbf6d")
-            w.tag_configure("diff", foreground="#f0b248",
+            w.tag_configure("same",
+                            foreground=theme.tkcolor(("#15803D", "#6dbf6d")))
+            w.tag_configure("diff",
+                            foreground=theme.tkcolor(("#B45309", "#f0b248")),
                             font=(MONO_FONT, 10, "bold"))
-            w.tag_configure("missing", foreground="#666",
+            w.tag_configure("missing",
+                            foreground=theme.tkcolor(("#9AA0AC", "#666")),
                             font=(MONO_FONT, 10, "italic"))
-            w.tag_configure("identity_diff", foreground="#e94560",
+            w.tag_configure("identity_diff",
+                            foreground=theme.tkcolor(("#BE123C", "#e94560")),
                             font=(MONO_FONT, 10, "bold"))
+
+        for w in (self._left, self._right):
+            theme.tk_track(w, _theme_diff)
             w.configure(state="disabled")
 
         self._status = ctk.CTkLabel(
@@ -3456,7 +3470,8 @@ class RestorePage(ctk.CTkFrame):
                       fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
                       font=(UI_FONT, 12),
                       command=self._open_set_defaults).pack(side="left", padx=(0, 12))
-        self._snapshot_var = ctk.BooleanVar(value=True)
+        self._snapshot_var = ctk.BooleanVar(
+            value=bool(self.app.settings.get("restore_snapshot_default", True)))
         ctk.CTkCheckBox(
             prep_row, text="📸 Snapshot first", variable=self._snapshot_var,
             font=(UI_FONT, 12)).pack(side="left", padx=(0, 2))
@@ -3578,8 +3593,9 @@ class RestorePage(ctk.CTkFrame):
         split = _tk.PanedWindow(
             self, orient="horizontal",
             sashwidth=8, sashrelief="raised",
-            bg=CARD, bd=0, sashpad=0,
+            bd=0, sashpad=0,
             opaqueresize=True)
+        theme.tk_track(split, lambda w: w.configure(bg=theme.tkcolor(CARD)))
         split.grid(row=9, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
         # CRITICAL: PanedWindow doesn't constrain its children's heights —
@@ -3587,10 +3603,10 @@ class RestorePage(ctk.CTkFrame):
         # expand to fit all its rows (defeating the whole point of being
         # scrollable). Fixed initial height + propagate-off keeps the
         # scrollable region clipped so the scrollbar actually engages.
-        left_pane = _tk.Frame(split, bg=CARD, bd=0, highlightthickness=0,
-                              height=400)
-        right_pane = _tk.Frame(split, bg=CARD, bd=0, highlightthickness=0,
-                               height=400)
+        left_pane = _tk.Frame(split, bd=0, highlightthickness=0, height=400)
+        right_pane = _tk.Frame(split, bd=0, highlightthickness=0, height=400)
+        for _p in (left_pane, right_pane):
+            theme.tk_track(_p, lambda w: w.configure(bg=theme.tkcolor(CARD)))
         left_pane.pack_propagate(False)
         right_pane.pack_propagate(False)
         split.add(left_pane, minsize=300, stretch="always", width=620)
@@ -4351,6 +4367,80 @@ class RestorePage(ctk.CTkFrame):
                 state="normal" if has_remaining else "disabled",
                 fg_color=WARN if has_remaining else "#555")
 
+    def _open_structure_ops_for_rename(self, src_name, dst_name=""):
+        """Expand Structure Operations and prefill the Mangle Rename fields so
+        the operator can rename the backup's account to the destination's."""
+        if getattr(self, "_mangle_collapsed", False):
+            self._toggle_mangle()
+        try:
+            self.mangle_src.delete(0, "end")
+            self.mangle_src.insert(0, src_name or "")
+            if dst_name:
+                self.mangle_dst.delete(0, "end")
+                self.mangle_dst.insert(0, dst_name)
+            self.mangle_status.configure(
+                text="Rename the account to match the destination, then Restore.",
+                text_color=WARN)
+            (self.mangle_dst if dst_name else self.mangle_src).focus_set()
+        except Exception:
+            pass
+
+    def _check_account_name_match(self, api):
+        """Before restoring, warn if NONE of the backup's account names exist on
+        the destination console — that usually means the operator forgot to
+        Mangle Rename the source account to the destination account name, and a
+        restore would create a brand-new account instead of landing on the
+        intended one. Returns "abort" if the restore should stop, else "ok"."""
+        # Distinct account names referenced by non-global nodes in the backup.
+        backup_accts = []
+        for n in self.backup_data:
+            if n.get("type") == "global":
+                continue
+            nm = (n.get("account") or {}).get("name")
+            if nm and nm not in backup_accts:
+                backup_accts.append(nm)
+        if not backup_accts:
+            return "ok"
+        try:
+            dest = api.get_accounts()
+        except Exception:
+            return "ok"   # network hiccup — don't block the restore
+        dest_names = [a.get("name") for a in dest if a.get("name")]
+        if not dest_names:
+            return "ok"   # nothing to rename into; the account will be created
+        # If ANY backup account already exists on the destination, assume the
+        # mapping is intentional and don't nag.
+        if any(nm in dest_names for nm in backup_accts):
+            return "ok"
+
+        src = backup_accts[0]
+        dst_preview = dest_names[0] if len(dest_names) == 1 else ""
+        dest_list = ", ".join(f'"{d}"' for d in dest_names[:5])
+        if len(dest_names) > 5:
+            dest_list += ", …"
+        msg = (
+            f'The backup\'s account "{src}" doesn\'t exist on the '
+            f"{self._console_var.get()} console.\n\n"
+            f"Destination account(s): {dest_list}\n\n"
+            "If you meant to restore INTO an existing account, you likely need "
+            "to Mangle Rename it first (Structure Operations) so the names "
+            f'match — otherwise a NEW account named "{src}" will be created.\n\n'
+            "Open Structure Operations to rename now?\n\n"
+            "  • Yes — open Structure Operations (Mangle Rename)\n"
+            "  • No — continue and create it as-is\n"
+            "  • Cancel — stop")
+        ans = messagebox.askyesnocancel("Account name mismatch", msg)
+        if ans is None:
+            return "abort"                      # Cancel
+        if ans:                                 # Yes → redirect to rename
+            self._open_structure_ops_for_rename(src, dst_preview)
+            cli_log(
+                f'Restore paused — account "{src}" isn\'t on the destination. '
+                "Mangle Rename it in Structure Operations, then Restore again.",
+                "warning")
+            return "abort"
+        return "ok"                             # No → continue as-is
+
     def _start_restore(self, auto=False):
         api = self._get_restore_api()
         if not api:
@@ -4375,6 +4465,11 @@ class RestorePage(ctk.CTkFrame):
 
         levels = {k: v.get() for k, v in self.restore_level_vars.items()}
         if not auto:
+            # Guard: if none of the backup's account names exist on the
+            # destination, the operator probably forgot to Mangle Rename the
+            # account (Structure Operations). Offer to jump there.
+            if self._check_account_name_match(api) == "abort":
+                return
             if levels.get("global"):
                 if not messagebox.askyesno(
                         "⚠️ Global Restore",
