@@ -104,7 +104,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.0.3 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -347,6 +347,12 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.0 — 2026-07-13
+#### Improvements
+- **Restore page re-organized by workflow** — the action bar is now grouped into three clearly-labeled phases in the order you actually work: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback). Pre-restore tools no longer sit below the Restore button.
+- **Picture logo** — the sidebar header now shows the app's radar logo image instead of the text "S1" tile (falls back to the tile if the image is unavailable).
+- **Fullscreen support** — toggle fullscreen with ⌘⌃F (or F11); press Esc to exit. Works around Tk on macOS not wiring the native green-button fullscreen.
 
 ### v2.0.3 — 2026-07-13
 #### Bug Fixes

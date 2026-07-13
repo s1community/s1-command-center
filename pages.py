@@ -3412,141 +3412,159 @@ class RestorePage(ctk.CTkFrame):
         _, self.restore_vars = _build_elements_section(
             self._restore_el_frame, row=0, title="Restore Elements")
 
-        # ── Row 1: Start / Control buttons ──
-        row1 = ctk.CTkFrame(self, fg_color="transparent")
-        row1.grid(row=6, column=0, sticky="ew", padx=20, pady=(8, 2))
+        # ─────────────────────────────────────────────────────────────
+        #  Action area — laid out in the order you actually work in:
+        #     1 · PREPARE  (verify + safety, before anything is written)
+        #     2 · RUN      (launch + live controls)
+        #     3 · REVIEW   (results + recovery, after the run)
+        # ─────────────────────────────────────────────────────────────
+        def _phase_label(parent, text):
+            return ctk.CTkLabel(parent, text=text, font=(UI_FONT, 11, "bold"),
+                                text_color=TEXT_FAINT, width=78, anchor="w")
 
-        # GROUP 1 – Launch (green tones)
-        self._start_btn = ctk.CTkButton(
-            row1, text="▶  Restore", height=38, width=130,
-            fg_color=GREEN, hover_color=GREEN_HOVER,
-            font=(UI_FONT, 14, "bold"),
-            command=lambda: self._start_restore(auto=False))
-        self._start_btn.pack(side="left", padx=(0, 4))
-        self._auto_btn = ctk.CTkButton(
-            row1, text="⚡ Auto Restore", height=38, width=150,
-            fg_color=GREEN_HOVER, hover_color=GREEN_HOVER,
-            font=(UI_FONT, 14, "bold"),
-            command=lambda: self._start_restore(auto=True))
-        self._auto_btn.pack(side="left", padx=(0, 4))
-        self._resume_btn = ctk.CTkButton(
-            row1, text="↻  Resume", height=38, width=120,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 14, "bold"),
-            command=self._resume_restore, state="disabled")
-        self._resume_btn.pack(side="left", padx=(0, 12))
+        # ── Phase 1 · PREPARE ──────────────────────────────────────────
+        prep_row = ctk.CTkFrame(self, fg_color="transparent")
+        prep_row.grid(row=6, column=0, sticky="ew", padx=20, pady=(10, 2))
+        _phase_label(prep_row, "1 · PREPARE").pack(side="left", padx=(0, 6))
 
-        # GROUP 2 – Runtime control (red/orange tones, disabled until running)
-        self._stop_btn = ctk.CTkButton(
-            row1, text="■  Stop", height=38, width=90,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            font=(UI_FONT, 13, "bold"),
-            command=self._stop, state="disabled")
-        self._stop_btn.pack(side="left", padx=(0, 4))
-        self._skip_btn = ctk.CTkButton(
-            row1, text="⏭  Skip Element", height=38, width=140,
-            fg_color=WARN_HOVER, hover_color=WARN_HOVER,
-            font=(UI_FONT, 13, "bold"),
-            command=self._skip_current_element, state="disabled")
-        self._skip_btn.pack(side="left", padx=(0, 12))
-
-        # Progress + timer (right-aligned)
-        self._status_lbl = ctk.CTkLabel(row1, text="",
-                                         font=(UI_FONT, 12, "bold"),
-                                         text_color=TEXT_MUTED)
-        self._status_lbl.pack(side="right", padx=(8, 0))
-        self._timer_lbl = ctk.CTkLabel(row1, text="",
-                                        font=(MONO_FONT, 12),
-                                        text_color=TEXT_MUTED)
-        self._timer_lbl.pack(side="right", padx=(8, 0))
-        self.progress = ctk.CTkProgressBar(row1, width=200)
-        self.progress.pack(side="right", padx=8)
-        self.progress.set(0)
-
-        # ── Row 2: Post-restore tools (blue tones) ──
-        row2 = ctk.CTkFrame(self, fg_color="transparent")
-        row2.grid(row=7, column=0, sticky="ew", padx=20, pady=(2, 4))
-
-        # GROUP 3 – Results (blue tones, enabled after restore)
-        self._export_btn = ctk.CTkButton(
-            row2, text="📋  Export Log", height=34, width=130,
-            fg_color=BRAND, hover_color=BRAND_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._export, state="disabled")
-        self._export_btn.pack(side="left", padx=(0, 4))
-        self._explain_btn = ctk.CTkButton(
-            row2, text="🛟  Explain Errors", height=34, width=150,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._show_errors_dialog, state="disabled")
-        self._explain_btn.pack(side="left", padx=(0, 4))
-        self._redact_btn = ctk.CTkButton(
-            row2, text="🛡  Redacted Copy", height=34, width=150,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._export_redacted, state="disabled")
-        self._redact_btn.pack(side="left", padx=(0, 4))
-        _help_btn(row2,
-                  "Save a sanitised copy of the loaded backup with all "
-                  "secrets (SMTP/AD/SSO/syslog passwords, tokens, keys) "
-                  "masked — safe to attach to a ticket or share. The original "
-                  "backup is untouched."
-                  ).pack(side="left", padx=(0, 12))
-        _help_btn(row2,
-                  "After a restore, click this to see plain-English "
-                  "explanations of every failure — what it means, why it "
-                  "happened, what to do, and how to copy the error to send "
-                  "to support."
-                  ).pack(side="left", padx=(0, 12))
-
-        # GROUP 4 – Pre-restore tools (muted purple)
         self._preflight_btn = ctk.CTkButton(
-            row2, text="✈  Pre-flight", height=34, width=120,
+            prep_row, text="✈  Pre-flight", height=34, width=120,
             fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
             font=(UI_FONT, 12, "bold"),
             command=self._preflight)
         self._preflight_btn.pack(side="left", padx=(0, 4))
-        _help_btn(row2,
+        _help_btn(prep_row,
                   "Readiness check before you restore — destination "
                   "reachable, token valid/not-expiring and scoped wide "
                   "enough, and whether the target scope already exists. "
                   "Read-only."
                   ).pack(side="left", padx=(0, 8))
         self._preview_btn = ctk.CTkButton(
-            row2, text="🔍  Preview vs Dest", height=34, width=160,
+            prep_row, text="🔍  Preview vs Dest", height=34, width=160,
             fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
             font=(UI_FONT, 12, "bold"),
             command=self._preview_changes)
         self._preview_btn.pack(side="left", padx=(0, 4))
-        _help_btn(row2,
+        _help_btn(prep_row,
                   "Dry run — compares the loaded backup against the LIVE "
                   "destination without writing anything. Shows how many items "
                   "per element would be newly created vs already exist, and "
                   "fills the Source-vs-Destination panel so you can review "
                   "before restoring."
                   ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(row2, text="⚙  Set Defaults", height=34, width=140,
+        ctk.CTkButton(prep_row, text="⚙  Set Defaults", height=34, width=140,
                       fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
                       font=(UI_FONT, 12),
-                      command=self._open_set_defaults).pack(side="left", padx=(0, 4))
-
-        # GROUP 5 – Rollback safety net
+                      command=self._open_set_defaults).pack(side="left", padx=(0, 12))
         self._snapshot_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            row2, text="📸 Snapshot first", variable=self._snapshot_var,
-            font=(UI_FONT, 12)).pack(side="left", padx=(12, 2))
-        _help_btn(row2,
+            prep_row, text="📸 Snapshot first", variable=self._snapshot_var,
+            font=(UI_FONT, 12)).pack(side="left", padx=(0, 2))
+        _help_btn(prep_row,
                   "Before restoring, back up the destination's current state "
                   "of the selected elements/scope to a snapshot file. If the "
                   "restore goes wrong, use Rollback to load that snapshot and "
                   "restore the destination back to how it was."
                   ).pack(side="left", padx=(0, 4))
+
+        # ── Phase 2 · RUN ──────────────────────────────────────────────
+        action_row = ctk.CTkFrame(self, fg_color="transparent")
+        action_row.grid(row=7, column=0, sticky="ew", padx=20, pady=(6, 2))
+        _phase_label(action_row, "2 · RUN").pack(side="left", padx=(0, 6))
+
+        # Launch (green tones)
+        self._start_btn = ctk.CTkButton(
+            action_row, text="▶  Restore", height=38, width=130,
+            fg_color=GREEN, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"),
+            command=lambda: self._start_restore(auto=False))
+        self._start_btn.pack(side="left", padx=(0, 4))
+        self._auto_btn = ctk.CTkButton(
+            action_row, text="⚡ Auto Restore", height=38, width=150,
+            fg_color=GREEN_HOVER, hover_color=GREEN_HOVER,
+            font=(UI_FONT, 14, "bold"),
+            command=lambda: self._start_restore(auto=True))
+        self._auto_btn.pack(side="left", padx=(0, 4))
+        self._resume_btn = ctk.CTkButton(
+            action_row, text="↻  Resume", height=38, width=120,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 14, "bold"),
+            command=self._resume_restore, state="disabled")
+        self._resume_btn.pack(side="left", padx=(0, 12))
+
+        # Runtime control (disabled until running)
+        self._stop_btn = ctk.CTkButton(
+            action_row, text="■  Stop", height=38, width=90,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=(UI_FONT, 13, "bold"),
+            command=self._stop, state="disabled")
+        self._stop_btn.pack(side="left", padx=(0, 4))
+        self._skip_btn = ctk.CTkButton(
+            action_row, text="⏭  Skip Element", height=38, width=140,
+            fg_color=WARN_HOVER, hover_color=WARN_HOVER,
+            font=(UI_FONT, 13, "bold"),
+            command=self._skip_current_element, state="disabled")
+        self._skip_btn.pack(side="left", padx=(0, 12))
+
+        # Progress + timer (right-aligned)
+        self._status_lbl = ctk.CTkLabel(action_row, text="",
+                                         font=(UI_FONT, 12, "bold"),
+                                         text_color=TEXT_MUTED)
+        self._status_lbl.pack(side="right", padx=(8, 0))
+        self._timer_lbl = ctk.CTkLabel(action_row, text="",
+                                        font=(MONO_FONT, 12),
+                                        text_color=TEXT_MUTED)
+        self._timer_lbl.pack(side="right", padx=(8, 0))
+        self.progress = ctk.CTkProgressBar(action_row, width=200)
+        self.progress.pack(side="right", padx=8)
+        self.progress.set(0)
+
+        # ── Phase 3 · REVIEW ───────────────────────────────────────────
+        review_row = ctk.CTkFrame(self, fg_color="transparent")
+        review_row.grid(row=8, column=0, sticky="ew", padx=20, pady=(6, 4))
+        _phase_label(review_row, "3 · REVIEW").pack(side="left", padx=(0, 6))
+
+        self._export_btn = ctk.CTkButton(
+            review_row, text="📋  Export Log", height=34, width=130,
+            fg_color=BRAND, hover_color=BRAND_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._export, state="disabled")
+        self._export_btn.pack(side="left", padx=(0, 4))
+        self._explain_btn = ctk.CTkButton(
+            review_row, text="🛟  Explain Errors", height=34, width=150,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._show_errors_dialog, state="disabled")
+        self._explain_btn.pack(side="left", padx=(0, 4))
+        _help_btn(review_row,
+                  "After a restore, click this to see plain-English "
+                  "explanations of every failure — what it means, why it "
+                  "happened, what to do, and how to copy the error to send "
+                  "to support."
+                  ).pack(side="left", padx=(0, 8))
+        self._redact_btn = ctk.CTkButton(
+            review_row, text="🛡  Redacted Copy", height=34, width=150,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._export_redacted, state="disabled")
+        self._redact_btn.pack(side="left", padx=(0, 4))
+        _help_btn(review_row,
+                  "Save a sanitised copy of the loaded backup with all "
+                  "secrets (SMTP/AD/SSO/syslog passwords, tokens, keys) "
+                  "masked — safe to attach to a ticket or share. The original "
+                  "backup is untouched."
+                  ).pack(side="left", padx=(0, 12))
         self._rollback_btn = ctk.CTkButton(
-            row2, text="↩  Rollback", height=34, width=120,
+            review_row, text="↩  Rollback", height=34, width=120,
             fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
             font=(UI_FONT, 12, "bold"),
             command=self._load_last_snapshot)
         self._rollback_btn.pack(side="left", padx=(0, 4))
+        _help_btn(review_row,
+                  "Undo the last restore: loads the pre-restore snapshot and "
+                  "restores the destination back to how it was. Only works if "
+                  "'Snapshot first' (Prepare) was enabled for that run."
+                  ).pack(side="left", padx=(0, 4))
 
         # progress table + diff panel (resizable side by side).
         # Use a tk.PanedWindow so the user can drag the divider to give
@@ -3555,14 +3573,14 @@ class RestorePage(ctk.CTkFrame):
         # an internal canvas (its real Tk path is `…!canvas.!progresstable`,
         # not `…!progresstable`). So we add plain tk.Frame holders and
         # nest the actual widgets inside them.
-        self.grid_rowconfigure(8, weight=1)
+        self.grid_rowconfigure(9, weight=1)
         import tkinter as _tk
         split = _tk.PanedWindow(
             self, orient="horizontal",
             sashwidth=8, sashrelief="raised",
             bg=CARD, bd=0, sashpad=0,
             opaqueresize=True)
-        split.grid(row=8, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        split.grid(row=9, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
         # CRITICAL: PanedWindow doesn't constrain its children's heights —
         # without pack_propagate(False) the inner CTkScrollableFrame would

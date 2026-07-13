@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.1.0 — 2026-07-13
+
+### Improvements
+- **Restore page re-organized by workflow** — the Restore action bar is now grouped into three labeled phases in the order you work: **1 · Prepare** (Pre-flight, Preview vs Dest, Set Defaults, Snapshot first), **2 · Run** (Restore, Auto Restore, Resume, Stop, Skip Element), and **3 · Review** (Export Log, Explain Errors, Redacted Copy, Rollback). Pre-restore tools no longer appear below the Restore button.
+- **Picture logo in the sidebar** — the header shows the app's radar logo image instead of the text "S1" tile (falls back to the tile if the image is unavailable).
+- **Fullscreen support** — ⌘⌃F (or F11) toggles fullscreen, Esc exits. macOS Tk doesn't hook the native green-button fullscreen, so this provides a reliable path.
+
 ## v2.0.3 — 2026-07-13
 
 ### Bug Fixes

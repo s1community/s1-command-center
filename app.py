@@ -3,6 +3,7 @@ S1 Command Center GUI — Main window, sidebar, connections page.
 Focused on: connect SOURCE + DESTINATION, then backup & restore.
 """
 import customtkinter as ctk
+from PIL import Image
 import threading
 import traceback
 import os
@@ -687,6 +688,16 @@ class App(ctk.CTk):
             self.bind(seq, lambda e: self._zoom(-0.1))
         for seq in ("<Command-0>", "<Control-0>"):
             self.bind(seq, lambda e: self._zoom_reset())
+
+        # Fullscreen — Tk on macOS doesn't hook the native green-button
+        # fullscreen Space (the button only "zooms", so it feels like nothing
+        # happens). Provide explicit toggles that work on every OS: F11 or
+        # ⌘⌃F to enter/leave, Esc to leave. macOS often reserves F11 for
+        # Mission Control, so ⌘⌃F is the reliable shortcut there.
+        self._is_fullscreen = False
+        for seq in ("<F11>", "<Command-Control-f>", "<Control-Command-f>"):
+            self.bind(seq, self._toggle_fullscreen)
+        self.bind("<Escape>", self._exit_fullscreen)
         icon_path = os.path.join(os.path.dirname(__file__), "s1cc.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
@@ -763,6 +774,36 @@ class App(ctk.CTk):
         self._apply_auto_scale()
         self.set_status("UI zoom: auto-fit to window size")
 
+    def _toggle_fullscreen(self, event=None):
+        """Enter/leave true fullscreen. macOS Tk doesn't hook the native
+        green-button fullscreen, so this is the reliable path."""
+        self._is_fullscreen = not self._is_fullscreen
+        try:
+            self.attributes("-fullscreen", self._is_fullscreen)
+        except Exception:
+            # Fallback for any platform without -fullscreen: fill the screen.
+            if self._is_fullscreen:
+                self.geometry(f"{self.winfo_screenwidth()}x"
+                              f"{self.winfo_screenheight()}+0+0")
+        if hasattr(self, "status"):
+            self.set_status("Fullscreen on (Esc or ⌘⌃F to exit)"
+                            if self._is_fullscreen else "Fullscreen off")
+        return "break"
+
+    def _exit_fullscreen(self, event=None):
+        """Esc leaves fullscreen — but only when we're actually in it, so
+        dialogs keep their own Escape handling the rest of the time."""
+        if not self._is_fullscreen:
+            return None
+        self._is_fullscreen = False
+        try:
+            self.attributes("-fullscreen", False)
+        except Exception:
+            pass
+        if hasattr(self, "status"):
+            self.set_status("Fullscreen off")
+        return "break"
+
     def _build(self):
         # ── Sidebar ──────────────────────────────────────────────────────
         sb = ctk.CTkFrame(self, width=258, fg_color=SIDEBAR_BG,
@@ -770,15 +811,27 @@ class App(ctk.CTk):
         sb.pack(side="left", fill="y")
         sb.pack_propagate(False)
 
-        # Brand lockup: violet logo mark + wordmark
+        # Brand lockup: app-icon picture logo + wordmark
         brand = ctk.CTkFrame(sb, fg_color="transparent")
         brand.pack(fill="x", padx=18, pady=(20, 14))
-        mark = ctk.CTkFrame(brand, width=40, height=40, fg_color=BRAND,
-                            corner_radius=theme.RADIUS_MD)
-        mark.pack(side="left")
-        mark.pack_propagate(False)
-        ctk.CTkLabel(mark, text="S1", font=(UI_FONT, 17, "bold"),
-                     text_color="#FFFFFF").pack(expand=True)
+        self._logo_img = None
+        logo_path = os.path.join(os.path.dirname(__file__), "s1cc.ico")
+        if os.path.exists(logo_path):
+            try:
+                self._logo_img = ctk.CTkImage(Image.open(logo_path),
+                                              size=(40, 40))
+            except Exception:
+                self._logo_img = None
+        if self._logo_img is not None:
+            ctk.CTkLabel(brand, image=self._logo_img, text="").pack(side="left")
+        else:
+            # Fallback to the original violet "S1" tile if the image is missing.
+            mark = ctk.CTkFrame(brand, width=40, height=40, fg_color=BRAND,
+                                corner_radius=theme.RADIUS_MD)
+            mark.pack(side="left")
+            mark.pack_propagate(False)
+            ctk.CTkLabel(mark, text="S1", font=(UI_FONT, 17, "bold"),
+                         text_color="#FFFFFF").pack(expand=True)
         wm = ctk.CTkFrame(brand, fg_color="transparent")
         wm.pack(side="left", padx=(11, 0))
         ctk.CTkLabel(wm, text="Command Center", font=(UI_FONT, 16, "bold"),
