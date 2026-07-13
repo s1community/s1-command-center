@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.0.2 — 2026-07-13
+
+### Improvements
+- **No more macOS keychain prompts** — OS-keychain token storage is now opt-in (`S1CC_ENABLE_KEYRING=1`) instead of on by default, so macOS no longer shows the "S1 Command Center wants to use your confidential information stored in 's1-command-center'" login-keychain prompt on every token read/write. Tokens are kept in the owner-only (`0600`) `contexts.json` unless you opt back in; it still degrades to file storage on any keychain failure.
+
 ## v2.0.1 — 2026-07-13
 
 ### Improvements

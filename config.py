@@ -7,26 +7,34 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 # Single source of truth for the app version (footer, reports, etc.).
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 CONFIG_DIR    = os.path.join(os.path.expanduser("~"), ".s1-command-center")
 CONFIG_FILE   = os.path.join(CONFIG_DIR, "contexts.json")
 PROFILES_FILE = os.path.join(CONFIG_DIR, "migration_profiles.json")
 
 # ── Optional OS keyring for API tokens ───────────────────────────────────
-# When the `keyring` package and a working OS backend are available (macOS
-# Keychain / Windows Credential Manager / Secret Service), API tokens are
-# stored there instead of in plaintext in contexts.json — the file then holds
-# only a sentinel. If keyring is missing or fails, everything degrades to the
-# previous plaintext-file behaviour (no lockout). Set S1CC_DISABLE_KEYRING=1
-# to force plaintext.
+# OS-keychain storage is OFF by default. On macOS it triggers the "S1 Command
+# Center wants to use your confidential information stored in
+# 's1-command-center' in your keychain" prompt on every token read/write,
+# which is intrusive when running unsigned/from source. By default tokens are
+# therefore kept in the owner-only (0600) contexts.json, so no keychain prompt
+# ever appears.
+#
+# Opt back into OS-keychain storage (macOS Keychain / Windows Credential
+# Manager / Secret Service) with S1CC_ENABLE_KEYRING=1. When enabled, tokens
+# go to the keychain and the file holds only a sentinel; it still degrades to
+# plaintext-in-file on any keychain failure (no lockout).
 KEYRING_SERVICE = "s1-command-center"
 _KEYRING_SENTINEL = "__keyring__"
 
 
 def _keyring():
-    """Return the keyring module if usable, else None. Indirection so tests
-    can monkeypatch it."""
+    """Return the keyring module only when explicitly opted in, else None.
+    Disabled by default so macOS never shows the login-keychain access prompt.
+    Indirection so tests can monkeypatch it."""
+    if not os.environ.get("S1CC_ENABLE_KEYRING"):
+        return None
     if os.environ.get("S1CC_DISABLE_KEYRING"):
         return None
     try:

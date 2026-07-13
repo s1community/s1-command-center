@@ -305,6 +305,8 @@ Connections are stored in `~/.s1-command-center/contexts.json` with:
 - Role assignment (source/destination)
 - Automatic save on changes
 
+API tokens are written to that file with owner-only (`0600`) permissions. OS-keychain storage is **off by default** — on macOS it otherwise prompts for the login-keychain password on every token read/write. To store tokens in the OS keychain instead (macOS Keychain / Windows Credential Manager / Secret Service), set `S1CC_ENABLE_KEYRING=1`.
+
 ## API Token Requirements
 
 The API token needs these minimum permissions for full backup/restore:
@@ -345,6 +347,10 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.0.2 — 2026-07-13
+#### Improvements
+- **No more macOS keychain prompts** — OS-keychain token storage is now opt-in (`S1CC_ENABLE_KEYRING=1`) instead of on by default, so macOS no longer shows the "S1 Command Center wants to use your confidential information…" login-keychain prompt on every token read/write. Tokens are kept in the owner-only (`0600`) `contexts.json` unless you opt back in.
 
 ### v2.0.1 — 2026-07-13
 #### Improvements
