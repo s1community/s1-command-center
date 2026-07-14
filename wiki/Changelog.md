@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.1.4 — 2026-07-14
+
+### Improvements
+- **Restore progress bar redesigned** — The progress bar, elapsed timer, and live status used to be packed to the right of the RUN buttons, so on a wide window they floated far from the controls with a large empty gap in the middle. They now sit in a dedicated **full-width strip directly under the RUN buttons**: the bar spans the whole page (taller, rounded, green fill) with the timer and status aligned to its right.
+
 ## v2.1.3 — 2026-07-14
 
 ### Improvements

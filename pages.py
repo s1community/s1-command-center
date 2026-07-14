@@ -3586,22 +3586,30 @@ class RestorePage(ctk.CTkFrame):
             command=self._skip_current_element, state="disabled")
         self._skip_btn.pack(side="left", padx=(0, 12))
 
-        # Progress + timer (right-aligned)
-        self._status_lbl = ctk.CTkLabel(action_row, text="",
-                                         font=(UI_FONT, 12, "bold"),
-                                         text_color=TEXT_MUTED)
-        self._status_lbl.pack(side="right", padx=(8, 0))
-        self._timer_lbl = ctk.CTkLabel(action_row, text="",
-                                        font=(MONO_FONT, 12),
-                                        text_color=TEXT_MUTED)
-        self._timer_lbl.pack(side="right", padx=(8, 0))
-        self.progress = ctk.CTkProgressBar(action_row, width=200)
-        self.progress.pack(side="right", padx=8)
+        # Progress strip lives in its own full-width row below (see
+        # progress_row) so it never crams the RUN buttons or floats mid-row.
+
+        progress_row = ctk.CTkFrame(self, fg_color="transparent")
+        progress_row.grid(row=8, column=0, sticky="ew", padx=20, pady=(2, 6))
+        progress_row.grid_columnconfigure(0, weight=1)   # bar stretches
+
+        self.progress = ctk.CTkProgressBar(progress_row, height=12,
+                                           corner_radius=6,
+                                           progress_color=GREEN)
+        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         self.progress.set(0)
+        self._timer_lbl = ctk.CTkLabel(progress_row, text="",
+                                       font=(MONO_FONT, 12),
+                                       text_color=TEXT_MUTED)
+        self._timer_lbl.grid(row=0, column=1, sticky="e", padx=(0, 10))
+        self._status_lbl = ctk.CTkLabel(progress_row, text="",
+                                        font=(UI_FONT, 12, "bold"),
+                                        text_color=TEXT_MUTED)
+        self._status_lbl.grid(row=0, column=2, sticky="e")
 
         # ── Phase 3 · REVIEW ───────────────────────────────────────────
         review_row = ctk.CTkFrame(self, fg_color="transparent")
-        review_row.grid(row=8, column=0, sticky="ew", padx=20, pady=(6, 4))
+        review_row.grid(row=9, column=0, sticky="ew", padx=20, pady=(6, 4))
         _phase_label(review_row, "3 · REVIEW").pack(side="left", padx=(0, 6))
 
         self._export_btn = ctk.CTkButton(
@@ -3653,7 +3661,7 @@ class RestorePage(ctk.CTkFrame):
         # an internal canvas (its real Tk path is `…!canvas.!progresstable`,
         # not `…!progresstable`). So we add plain tk.Frame holders and
         # nest the actual widgets inside them.
-        self.grid_rowconfigure(9, weight=1)
+        self.grid_rowconfigure(10, weight=1)
         import tkinter as _tk
         split = _tk.PanedWindow(
             self, orient="horizontal",
@@ -3661,7 +3669,7 @@ class RestorePage(ctk.CTkFrame):
             bd=0, sashpad=0,
             opaqueresize=True)
         theme.tk_track(split, lambda w: w.configure(bg=theme.tkcolor(CARD)))
-        split.grid(row=9, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        split.grid(row=10, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
         # CRITICAL: PanedWindow doesn't constrain its children's heights —
         # without pack_propagate(False) the inner CTkScrollableFrame would
