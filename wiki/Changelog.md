@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.1.2 — 2026-07-14
+
+### Bug Fixes
+- **Restore no longer looks like it's stuck "Snapshotting" while it's actually restoring** — After the pre-restore snapshot finished, the status label kept showing the last `📸 Snapshot …` text for the entire restore (the restore loop updated the node table but never the status label), so a running restore looked like it was still snapshotting. The snapshot label is now clearly prefixed `📸 Snapshot`, cleared the instant the snapshot completes, and the restore drives a live `Restoring i/total: <node>…` label — the current phase is always unambiguous.
+
 ## v2.1.1 — 2026-07-14
 
 Restore reliability release.

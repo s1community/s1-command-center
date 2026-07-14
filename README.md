@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.2 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,10 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.2 — 2026-07-14
+#### Bug Fixes
+- **Restore no longer looks like it's stuck "Snapshotting" while it's actually restoring** — the pre-restore snapshot label (`📸 Snapshot …`) lingered on the status line for the whole restore. It's now cleared when the snapshot finishes, and the restore shows a live `Restoring i/total: <node>…` label so the current phase is always clear.
 
 ### v2.1.1 — 2026-07-14
 Restore reliability release.

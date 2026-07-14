@@ -3934,7 +3934,7 @@ class RestorePage(ctk.CTkFrame):
             # many we're on (and hint that Skip works).
             self.after(0, lambda i=idx, t=total, p=n["path"]:
                        self._status_lbl.configure(
-                           text=f"Snapshotting {i}/{t}: {p} "
+                           text=f"📸 Snapshot {i}/{t}: {p} "
                                 f"(Skip to stop)…",
                            text_color=INFO))
             try:
@@ -4648,7 +4648,8 @@ class RestorePage(ctk.CTkFrame):
             if take_snapshot:
                 self._set_skip_label("snapshot")
                 self.after(0, lambda: self._status_lbl.configure(
-                    text="Snapshotting destination…", text_color=INFO))
+                    text="📸 Snapshot: backing up destination "
+                         "(for rollback)…", text_color=INFO))
                 try:
                     snap = self._take_dest_snapshot(
                         api, levels, scope_filters, elements)
@@ -4681,6 +4682,11 @@ class RestorePage(ctk.CTkFrame):
                         "(partial snapshot saved)")
                 self.after(0, lambda: self._skip_btn.configure(
                     state="normal", text=_SKIP_DEFAULT))
+                # Snapshot phase is done — clear its status text so the
+                # lingering "📸 Snapshot…" label doesn't make the actual
+                # restore look like it's still snapshotting.
+                self.after(0, lambda: self._status_lbl.configure(
+                    text="Restoring…", text_color=INFO))
             return self._run_restore(api, self.backup_data, elements,
                                      levels, scope_filters)
 
@@ -5042,6 +5048,10 @@ class RestorePage(ctk.CTkFrame):
 
             # ── resolve destination (auto-create if needed) ──
             ui(lambda n=nid: pt.set_running(n))
+            # Keep the status label in sync with the real phase so it never
+            # shows a stale "📸 Snapshot…" while the restore is running.
+            ui(lambda p=npath, x=i, t=total: self._status_lbl.configure(
+                text=f"Restoring {x+1}/{t}: {p}…", text_color=INFO))
             ui(lambda n=nid: pt.set_detail(n, "resolving…"))
             # Follow the active node in the diff panel so the operator
             # always sees source-vs-dest for whatever is currently being
