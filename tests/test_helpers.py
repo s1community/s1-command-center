@@ -13,6 +13,7 @@ from pages import (
     _whitelist,
     _scope,
     _clean_for_restore,
+    _drop_forensics_triggering,
     explain_error,
     _is_exists_error,
     _FW_RULE_FIELDS,
@@ -148,6 +149,50 @@ def test_clean_strips_source_identifiers():
 def test_clean_keeps_payload_fields():
     obj = {"agentInterval": 5, "name": "X"}
     assert _clean_for_restore(obj) == {"agentInterval": 5, "name": "X"}
+
+
+# ── STAR rule: activeResponse must be dropped on restore ────────────────
+# The /cloud-detection/rules GET returns `activeResponse` but the create
+# endpoint rejects it: "data: dict_values(['activeResponse']): Unknown
+# field (code 4000010)". _clean_for_restore (used by the STAR create path)
+# must strip it.
+
+def test_clean_drops_star_active_response():
+    rule = {"name": "hunt", "s1ql": "x", "activeResponse": True}
+    cleaned = _clean_for_restore(rule)
+    assert "activeResponse" not in cleaned
+    assert cleaned["name"] == "hunt"
+    assert cleaned["s1ql"] == "x"
+
+
+# ── policy: forensicsAutoTriggering must be droppable on restore ─────────
+# The forensics auto-trigger block references RemoteOps forensic-script
+# profiles by ID; those profiles don't exist on the destination, so S1
+# rejects the policy with "Bad auto-triggering policy information provided
+# (code 4000010)". _drop_forensics_triggering removes the block for retry.
+
+def test_drop_forensics_triggering_removes_block():
+    policy = {
+        "agentUiOn": True,
+        "forensicsAutoTriggering": {
+            "windowsEnabled": True,
+            "windowsProfileId": "src-only-id",
+        },
+    }
+    stripped = _drop_forensics_triggering(policy)
+    assert "forensicsAutoTriggering" not in stripped
+    assert stripped["agentUiOn"] is True
+
+
+def test_drop_forensics_triggering_is_noop_when_absent():
+    policy = {"agentUiOn": True, "mitigationMode": "protect"}
+    assert _drop_forensics_triggering(policy) == policy
+
+
+def test_drop_forensics_triggering_does_not_mutate_input():
+    policy = {"forensicsAutoTriggering": {"windowsEnabled": True}}
+    _drop_forensics_triggering(policy)
+    assert "forensicsAutoTriggering" in policy
 
 
 # ── explain_error ───────────────────────────────────────────────────────

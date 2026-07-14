@@ -537,6 +537,11 @@ _STRIP_FIELDS = {
     "generatedAlerts", "lastAlertTime", "reachedLimit",
     "statusReason", "expired", "source",
     "reportingAgents", "activeFirewallRules",
+    # STAR-rule read-only flag: the GET returns `activeResponse` (whether
+    # the rule has an auto-response / RemoteOps action) but the create
+    # endpoint rejects it with "data: dict_values(['activeResponse']):
+    # Unknown field (code 4000010)".
+    "activeResponse",
     # site/group read-only
     "activeLicenses", "activeAgents", "totalAgents",
     "registrationToken", "healthStatus", "numberOfSites",
@@ -554,6 +559,21 @@ _STRIP_FIELDS = {
 def _clean_for_restore(obj: dict) -> dict:
     """Remove source-specific fields before pushing to destination."""
     return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
+
+
+def _drop_forensics_triggering(policy: dict) -> dict:
+    """Return a copy of a policy without its `forensicsAutoTriggering` block.
+
+    That block enables the agent to auto-run a RemoteOps forensic-collection
+    script on detection, and it references the script *profiles* by ID
+    (`windowsProfileId` / `macosProfileId` / `linuxProfileId`). Those
+    profiles live on the SOURCE console and don't exist on the destination,
+    so pushing the source policy verbatim is rejected with "Bad
+    auto-triggering policy information provided (code 4000010)". Dropping the
+    block lets the destination keep its own default (auto-triggering
+    disabled); the operator can re-point it once the profiles are recreated.
+    """
+    return {k: v for k, v in policy.items() if k != "forensicsAutoTriggering"}
 
 
 def _scope_inherits_config(node: dict, cfg) -> bool:
@@ -1522,6 +1542,51 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str,
 # ─── Migration-validation helpers ──────────────────────────────────────
 # Reused by ValidationPage to enumerate the scope tree on BOTH consoles
 # and explain, in plain English, every difference found between them.
+
+# Human-readable names for the "⏭ Skip <element>" button. During a restore
+# the button renames itself to name the step currently running, so the operator
+# always knows exactly what a Skip click will jump past. Keys are the internal
+# restore step labels; unknown labels fall back to the raw label.
+_SKIP_DEFAULT = "⏭  Skip Element"
+_SKIP_LABELS = {
+    "snapshot": "snapshot",
+    "policy": "policy",
+    "excl": "exclusions",
+    "unified-excl": "unified excl",
+    "blocklist": "blocklist",
+    "fw-cfg": "FW config",
+    "fw-rules": "FW rules",
+    "nq-cfg": "NQ config",
+    "nq-rules": "NQ rules",
+    "dc-cfg": "DC config",
+    "dc-rules": "DC rules",
+    "tags-fw": "FW tags",
+    "tags-nq": "NQ tags",
+    "star": "STAR rules",
+    "dv-filters": "saved filters",
+    "overrides": "overrides",
+    "threat-intel": "threat intel",
+    "log-rules": "log rules",
+    "upgrade-pol": "upgrade pols",
+    "locations": "locations",
+    "webhooks": "webhooks",
+    "sched-rep": "reports",
+    "recipients": "recipients",
+    "set-noti": "notifications",
+    "set-sysl": "syslog",
+    "set-acti": "AD settings",
+    "set-smtp": "SMTP",
+    "set-sso": "SSO",
+}
+
+
+def _skip_button_text(label: str) -> str:
+    """Return the Skip-button caption for the restore step `label`
+    (e.g. 'fw-rules' → '⏭  Skip FW rules'). Empty label → the idle default."""
+    if not label:
+        return _SKIP_DEFAULT
+    return f"⏭  Skip {_SKIP_LABELS.get(label, label)}"
+
 
 # Friendly labels for the categories produced by _summarize_node_payload.
 _CAT_LABELS = {
@@ -3515,7 +3580,7 @@ class RestorePage(ctk.CTkFrame):
             command=self._stop, state="disabled")
         self._stop_btn.pack(side="left", padx=(0, 4))
         self._skip_btn = ctk.CTkButton(
-            action_row, text="⏭  Skip Element", height=38, width=140,
+            action_row, text=_SKIP_DEFAULT, height=38, width=180,
             fg_color=WARN_HOVER, hover_color=WARN_HOVER,
             font=(UI_FONT, 13, "bold"),
             command=self._skip_current_element, state="disabled")
@@ -3853,11 +3918,25 @@ class RestorePage(ctk.CTkFrame):
             raise RuntimeError("Backup engine unavailable for snapshot")
 
         nodes = _enumerate_tree(api, filters or {}, levels or {})
+        total = len(nodes)
         out_nodes = []
-        for n in nodes:
+        for idx, n in enumerate(nodes, 1):
+            # Honor the Skip button ("⏭ Skip snapshot") — stop capturing and
+            # let the restore proceed. Whatever was captured so far is kept.
+            if self._skip_element or self._cancelled:
+                break
             ntype, sid = n["type"], n["id"]
             scope = (_scope(ntype, sid) if ntype != "global"
                      else {"tenant": "true"})
+            # Per-node progress so the snapshot never looks frozen: a full
+            # destination backup can take a while, and a single static
+            # "Snapshotting…" label reads as a hang. Show which node of how
+            # many we're on (and hint that Skip works).
+            self.after(0, lambda i=idx, t=total, p=n["path"]:
+                       self._status_lbl.configure(
+                           text=f"Snapshotting {i}/{t}: {p} "
+                                f"(Skip to stop)…",
+                           text_color=INFO))
             try:
                 data = bp._read_node(api, ntype, sid, scope, elements, self.log)
             except Exception as exc:
@@ -4321,6 +4400,14 @@ class RestorePage(ctk.CTkFrame):
         self._skip_btn.configure(state="disabled")
         cli_log("Skip requested — jumping to next element…", "warning")
 
+    def _set_skip_label(self, label: str):
+        """Rename the Skip button so it names the element/phase currently
+        running (e.g. '⏭ Skip policy'), giving the operator a clear picture
+        of what a Skip click will jump past. Safe to call from the restore
+        worker thread — the widget update is marshalled to the UI thread."""
+        text = _skip_button_text(label)
+        self.after(0, lambda: self._skip_btn.configure(text=text))
+
     def _stop(self):
         self._cancelled = True
         self._stop_btn.configure(state="disabled")
@@ -4341,7 +4428,7 @@ class RestorePage(ctk.CTkFrame):
             self._auto_btn.configure(state="disabled")
             self._resume_btn.configure(state="disabled")
             self._stop_btn.configure(state="normal")
-            self._skip_btn.configure(state="normal")
+            self._skip_btn.configure(state="normal", text=_SKIP_DEFAULT)
             self._export_btn.configure(state="disabled")
             self._explain_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
@@ -4350,7 +4437,7 @@ class RestorePage(ctk.CTkFrame):
             self._start_btn.configure(state="normal")
             self._auto_btn.configure(state="normal")
             self._stop_btn.configure(state="disabled")
-            self._skip_btn.configure(state="disabled")
+            self._skip_btn.configure(state="disabled", text=_SKIP_DEFAULT)
             self._export_btn.configure(state="normal")
             # enable Explain Errors only if the last run produced any
             has_failures = any(
@@ -4559,6 +4646,7 @@ class RestorePage(ctk.CTkFrame):
 
         def do():
             if take_snapshot:
+                self._set_skip_label("snapshot")
                 self.after(0, lambda: self._status_lbl.configure(
                     text="Snapshotting destination…", text_color=INFO))
                 try:
@@ -4582,6 +4670,17 @@ class RestorePage(ctk.CTkFrame):
                         f"⚠ Destination snapshot FAILED: {exc} — "
                         f"rollback will not be available.")
                     cli_log(f"Destination snapshot failed: {exc}", "error")
+                # A Skip clicked during the (potentially long) snapshot phase
+                # leaves _skip_element set and the button disabled. Clear both
+                # so the restore itself stays fully skippable; the partial
+                # snapshot that was captured is still saved.
+                if self._skip_element:
+                    self._skip_element = False
+                    self._operation_log.append(
+                        "    ⏭ snapshot: skipped remaining by user request "
+                        "(partial snapshot saved)")
+                self.after(0, lambda: self._skip_btn.configure(
+                    state="normal", text=_SKIP_DEFAULT))
             return self._run_restore(api, self.backup_data, elements,
                                      levels, scope_filters)
 
@@ -5100,6 +5199,7 @@ class RestorePage(ctk.CTkFrame):
 
             def _r(label, fn, *a, **kw):
                 """Restore helper: call fn, track ok/skip/fail."""
+                self._set_skip_label(label)
                 ui(lambda n=nid, l=label: pt.set_detail(n, f"restoring {l}…"))
                 try:
                     fn(*a, **kw)
@@ -5117,11 +5217,22 @@ class RestorePage(ctk.CTkFrame):
                         })
                         self._operation_log.append(
                             f"    ✗ {label}: {exc}")
+                # A single API call can't be interrupted mid-flight, so a Skip
+                # clicked during this step lands too late to stop it. Absorb the
+                # flag here (and re-enable the button) so it doesn't leak into —
+                # and wrongly skip — the NEXT element. Cancel (Stop) is left set.
+                if self._skip_element:
+                    self._skip_element = False
+                    ui(lambda: self._skip_btn.configure(state="normal"))
+                    self._operation_log.append(
+                        f"    ⏭ {label}: Skip clicked but step already "
+                        f"completed (single-shot, not interruptible)")
 
             def _r_bulk(label, items, fn):
                 """Bulk restore: create items one by one, skip existing."""
                 item_list = items or []
                 total_items = len(item_list)
+                self._set_skip_label(label)
                 ui(lambda n=nid, l=label, c=total_items:
                    pt.set_detail(n, f"restoring {l} (0/{c})…"))
                 ok = skip = fail = 0
@@ -5168,6 +5279,18 @@ class RestorePage(ctk.CTkFrame):
                     self._operation_log.append(
                         f"    ✗ {label} last error: {last_err_msg}")
                     cli_log(f"{npath} {label}: {last_err_msg}", "error")
+
+            def _skip_reset(label):
+                """After a custom (non-_r_bulk) loop breaks on a Skip click,
+                clear the flag and re-enable the button so the NEXT element is
+                skippable again, and record it in the operation log. Cancel
+                (Stop) is intentionally left set so the outer node loop halts
+                too."""
+                if self._skip_element:
+                    self._skip_element = False
+                    ui(lambda: self._skip_btn.configure(state="normal"))
+                    self._operation_log.append(
+                        f"    ⏭ {label}: skipped remaining by user request")
 
             def _summarize(result_key, ok, skip, fail, last_err):
                 """Shared 'N new, N exist, N err' summary row + last-error log
@@ -5225,15 +5348,41 @@ class RestorePage(ctk.CTkFrame):
 
             # ── Policy ──
             if "policy" in elements and data.get("policy"):
-                _r("policy", api.set_policy, ntype, dest_id or "",
-                   data["policy"])
+                def _restore_policy(pol):
+                    try:
+                        return api.set_policy(ntype, dest_id or "", pol)
+                    except Exception as exc:
+                        msg = (str(exc) + " "
+                               + str(getattr(exc, "detail", ""))).lower()
+                        # The source policy's forensics auto-triggering
+                        # references RemoteOps forensic-script profiles by
+                        # ID; those profiles don't exist on the destination,
+                        # so S1 rejects the policy with "Bad auto-triggering
+                        # policy information provided (code 4000010)". Drop
+                        # that block and retry so the rest of the policy
+                        # still lands.
+                        if "auto-triggering" in msg or "triggering" in msg:
+                            self._operation_log.append(
+                                "    ↳ dropped forensicsAutoTriggering "
+                                "(source RemoteOps forensic profile not on "
+                                "destination) and retried policy")
+                            return api.set_policy(
+                                ntype, dest_id or "",
+                                _drop_forensics_triggering(pol))
+                        raise
+                _r("policy", _restore_policy, data["policy"])
 
             # ── Exclusions ──
             if "exclusions" in elements and data.get("exclusions"):
+                self._set_skip_label("excl")
                 e_ok = e_skip = e_fail = 0
                 e_last_err = ""
                 for etype, items in data["exclusions"].items():
+                    if self._skip_element or self._cancelled:
+                        break
                     for item in (items or []):
+                        if self._skip_element or self._cancelled:
+                            break
                         try:
                             payload = _whitelist(item, _EXCL_FIELDS)
                             # Scrub invisible bidi/zero-width chars that
@@ -5261,10 +5410,12 @@ class RestorePage(ctk.CTkFrame):
                                     "name": item.get("value", "?")[:80],
                                     "error": full_err[:500],
                                 })
+                _skip_reset("excl")
                 _summarize("excl", e_ok, e_skip, e_fail, e_last_err)
 
             # ── Unified Exclusions ──
             if "unified_exclusions" in elements and data.get("unified_exclusions"):
+                self._set_skip_label("unified-excl")
                 u_ok = u_skip = u_fail = 0
                 u_last_err = ""
                 # Build the unified-exclusion filter with scopeLevel
@@ -5280,6 +5431,8 @@ class RestorePage(ctk.CTkFrame):
                 if _ue_slid:
                     ue_filter["scopeLevelId"] = _ue_slid
                 for item in data["unified_exclusions"]:
+                    if self._skip_element or self._cancelled:
+                        break
                     try:
                         payload = _whitelist(item, _UNIFIED_EXCL_FIELDS)
                         # Map common field-name variants
@@ -5320,6 +5473,7 @@ class RestorePage(ctk.CTkFrame):
                                          or item.get("value", "?"))[:80],
                                 "error": full_err[:500],
                             })
+                _skip_reset("unified-excl")
                 _summarize("unified-excl", u_ok, u_skip, u_fail, u_last_err)
 
             # ── Blocklist ──
@@ -5354,6 +5508,7 @@ class RestorePage(ctk.CTkFrame):
                     log(f"  fw-rules: 0 rules at {ntype} scope "
                         f"({_fw_inherited} inherited rules skipped)")
             if "firewall_rules" in elements and fw_r:
+                self._set_skip_label("fw-rules")
                 sorted_fw = sorted(fw_r,
                     key=lambda r: r.get("order", 9999))
                 new_fw_ids = []
@@ -5361,6 +5516,8 @@ class RestorePage(ctk.CTkFrame):
                 fw_last_err = ""
                 fw_loc_stripped = 0
                 for rule in sorted_fw:
+                    if self._skip_element or self._cancelled:
+                        break
                     cleaned = _whitelist(rule, _FW_RULE_FIELDS)
                     # avoid conflict: use os_types if present, drop osType
                     if "os_types" in cleaned and "osType" in cleaned:
@@ -5428,6 +5585,7 @@ class RestorePage(ctk.CTkFrame):
                         f"created without their original location "
                         f"binding (source location IDs don't exist on "
                         f"this destination — re-attach manually).")
+                _skip_reset("fw-rules")
                 _summarize("fw-rules", fw_ok, fw_skip, fw_fail, fw_last_err)
                 if len(new_fw_ids) > 1:
                     try:
@@ -5473,11 +5631,14 @@ class RestorePage(ctk.CTkFrame):
                     log(f"  dc-rules: 0 rules at {ntype} scope "
                         f"({len(dc_r)} inherited rules skipped)")
                 else:
+                    self._set_skip_label("dc-rules")
                     sorted_dc = sorted(dc_r_scoped,
                                        key=lambda r: r.get("order", 9999))
                     new_dc_ids = []
                     dc_ok = dc_skip = dc_fail = 0
                     for rule in sorted_dc:
+                        if self._skip_element or self._cancelled:
+                            break
                         rname = rule.get("ruleName", "?")
                         try:
                             resp = api.create_device_control_rule(
@@ -5502,6 +5663,7 @@ class RestorePage(ctk.CTkFrame):
                                     "name": str(rname)[:80],
                                     "error": full_err[:500],
                                 })
+                    _skip_reset("dc-rules")
                     parts = []
                     if dc_ok:   parts.append(f"{dc_ok} new")
                     if dc_skip: parts.append(f"{dc_skip} exist")
@@ -5641,6 +5803,7 @@ class RestorePage(ctk.CTkFrame):
             # fails with "Password is missing". Show a gentle skip
             # instead of a scary error.
             if stg.get("smtp"):
+                self._set_skip_label("set-smtp")
                 ui(lambda n=nid: pt.set_detail(n, "restoring set-smtp…"))
                 try:
                     api.set_smtp_settings(scope,
@@ -5712,17 +5875,23 @@ class RestorePage(ctk.CTkFrame):
             # ── Threat Intel ──
             ti = data.get("threatIntel") or []
             if "threat_intel" in elements and ti:
+                self._set_skip_label("threat-intel")
                 ok = fail = 0
                 batch = []
                 for ioc in ti:
+                    if self._skip_element or self._cancelled:
+                        break
                     batch.append(ioc)
                     if len(batch) >= 100:
                         try: api.upsert_threat_intel(scope, batch); ok += len(batch)
                         except Exception: fail += len(batch)
                         batch = []
-                if batch:
+                # Flush the final partial batch only if we weren't asked to
+                # skip/stop mid-stream (an interrupted run leaves it unsent).
+                if batch and not (self._skip_element or self._cancelled):
                     try: api.upsert_threat_intel(scope, batch); ok += len(batch)
                     except Exception: fail += len(batch)
+                _skip_reset("threat-intel")
                 results.append(("threat-intel", f"{ok}/{ok+fail}"))
 
             # ── Log collection rules ──
