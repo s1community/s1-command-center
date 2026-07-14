@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.1.1 — 2026-07-14
+
+Restore reliability release.
+
+### Bug Fixes
+- **Policy restore no longer fails on forensics auto-triggering** — Restoring a policy whose `forensicsAutoTriggering` points at a RemoteOps forensic-script profile that doesn't exist on the destination failed the *entire* policy with *"Bad auto-triggering policy information provided (code 4000010)"* (hit on every group policy). Restore now detects this, drops just the forensics-auto-trigger block, and retries so the rest of the policy still lands — re-point it manually once the profile exists on the destination. Verified live against a destination console (error reproduced, then fixed).
+- **STAR custom-detection rules no longer rejected on restore** — Creating a STAR rule failed with *"data: activeResponse: Unknown field (code 4000010)"*. `activeResponse` is a read-only flag the API returns on read but rejects on create; it is now stripped before the rule is created. Verified live.
+
+### Improvements
+- **"Snapshot first" is now interruptible and shows progress** — The pre-restore destination snapshot could look frozen: it is a full backup of the destination scope with no progress feedback, and Skip/Stop had no effect during it. It now reports per-node progress (`i/total: path`) and honors **Skip**/**Stop** mid-snapshot (whatever was captured so far is still saved for rollback).
+- **Per-element Skip button** — The Skip button now names the element/phase currently running (e.g. *"⏭ Skip FW rules"*), and every restore step — bulk items, custom loops, the snapshot phase, and single-shot settings — honors it and re-enables between elements, so each element is independently skippable without a Skip click leaking into the next element.
+
+### Tests
+- Regression coverage for the policy forensics-drop retry and the STAR `activeResponse` strip. 109 tests total.
+
 ## v2.1.0 — 2026-07-13
 
 UI/UX release.

@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,15 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.1 — 2026-07-14
+Restore reliability release.
+#### Bug Fixes
+- **Policy restore no longer fails on forensics auto-triggering** — Restoring a policy whose `forensicsAutoTriggering` references a RemoteOps forensic-script profile that doesn't exist on the destination failed the whole policy with *"Bad auto-triggering policy information provided (code 4000010)"*. Restore now drops just that block and retries so the rest of the policy lands. Verified live.
+- **STAR custom-detection rules no longer rejected on restore** — Creating a STAR rule failed with *"data: activeResponse: Unknown field (code 4000010)"*; the read-only `activeResponse` field is now stripped before create. Verified live.
+#### Improvements
+- **"Snapshot first" is now interruptible and shows progress** — the pre-restore destination snapshot shows per-node progress (`i/total: path`) and honors **Skip**/**Stop** mid-snapshot instead of looking frozen (captured data is still saved for rollback).
+- **Per-element Skip button** — the Skip button names the element/phase currently running (e.g. "⏭ Skip FW rules") and every restore step honors it and re-enables between elements, so each element is independently skippable.
 
 ### v2.1.0 — 2026-07-13
 UI/UX release.
