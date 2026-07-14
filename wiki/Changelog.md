@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.1.3 — 2026-07-14
+
+### Improvements
+- **macOS Keychain toggle now warns before it bites** — Enabling **Settings → Security & Storage → "Store API tokens in OS keychain"** on an *unsigned* build makes macOS prompt for keychain permission on **every launch** and again after **every update** (the "Always Allow" grant is tied to the app's code signature, which changes each build). The toggle now shows a confirmation explaining this before it turns on, and reverts if you decline. Default remains **OFF** — tokens live in an owner-only (`0600`) file with no prompts. **If you're getting the keychain prompt after upgrading, turn this toggle OFF** and your tokens migrate back to the file.
+
 ## v2.1.2 — 2026-07-14
 
 ### Bug Fixes

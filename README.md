@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.2 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.3 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,10 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.3 — 2026-07-14
+#### Improvements
+- **macOS Keychain toggle now warns before it bites** — Enabling "Store API tokens in OS keychain" on an unsigned build makes macOS prompt for keychain permission on every launch and after every update. The toggle now confirms this before enabling and reverts if you decline. Default stays OFF (owner-only `0600` file, no prompts). Getting the prompt after an upgrade? Turn this toggle OFF in Settings → Security & Storage.
 
 ### v2.1.2 — 2026-07-14
 #### Bug Fixes
