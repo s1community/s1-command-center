@@ -788,8 +788,11 @@ class S1API:
     def enroll_2fa(self, user_ids: list[str]) -> dict:
         return self._post("/users/enroll-2fa", body={"data": {"ids": user_ids}})
 
-    def get_roles(self) -> list[dict]:
-        return self.get_all("/rbac/roles")
+    def get_roles(self, params: Optional[dict] = None, **kw) -> list[dict]:
+        return self.get_all("/rbac/roles", params=params, **kw)
+
+    def get_role(self, role_id: str, params: Optional[dict] = None) -> dict:
+        return self.get_data(f"/rbac/role/{role_id}", params=params)
 
     def get_token_details(self, token: str) -> dict:
         return self._post("/users/api-token-details", body={

@@ -920,12 +920,38 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
                      font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
-                     text="View exclusions and blocklist entries from the SOURCE console.",
+                     text="View exclusions and blocklist entries from the "
+                          "SOURCE console. Leave Account/Site blank for the "
+                          "global (tenant) scope, or name a scope to see its "
+                          "own entries.",
                      font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
-        btn = ctk.CTkFrame(self, fg_color="transparent")
-        btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        controls = ctk.CTkFrame(self, fg_color="transparent")
+        controls.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+
+        scope_row = ctk.CTkFrame(controls, fg_color="transparent")
+        scope_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(scope_row, text="Account:", font=(UI_FONT, 13)).pack(
+            side="left", padx=(0, 4))
+        self.acct_entry = ctk.CTkEntry(scope_row, width=180, height=34,
+                                       placeholder_text="(blank = tenant)")
+        self.acct_entry.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(scope_row, text="Site:", font=(UI_FONT, 13)).pack(
+            side="left", padx=(0, 4))
+        self.site_entry = ctk.CTkEntry(scope_row, width=180, height=34,
+                                       placeholder_text="(blank = all)")
+        self.site_entry.pack(side="left", padx=(0, 6))
+        _help_btn(scope_row,
+                  "Scope the query. Blank Account + Site = global (tenant) "
+                  "scope. Name an Account to see that account's exclusions; "
+                  "add a Site to narrow further. This is why 'Load' can come "
+                  "back empty: account/site-scoped exclusions aren't returned "
+                  "by the tenant-scope query."
+                  ).pack(side="left", padx=(0, 6))
+
+        btn = ctk.CTkFrame(controls, fg_color="transparent")
+        btn.pack(fill="x")
 
         ctk.CTkLabel(btn, text="Type:", font=(UI_FONT, 13)).pack(
             side="left", padx=(0, 4))
@@ -961,6 +987,44 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
                                  height=300)
         self.table.grid(row=3, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
+    def _resolve_scope(self, api):
+        acct_name = self.acct_entry.get().strip()
+        site_name = self.site_entry.get().strip()
+        acct_id = ""
+        if acct_name:
+            for a in (api.get_accounts() or []):
+                if (a.get("name") or "").strip().lower() == acct_name.lower():
+                    acct_id = str(a.get("id", ""))
+                    break
+            if not acct_id:
+                raise ValueError(f"Account '{acct_name}' not found on this "
+                                 f"console.")
+        if site_name:
+            sp = {"name": site_name}
+            if acct_id:
+                sp["accountIds"] = acct_id
+            sites = api.get_sites(params=sp) or []
+            match = next(
+                (s for s in sites
+                 if (s.get("name") or "").strip().lower() == site_name.lower()),
+                None)
+            if not match:
+                raise ValueError(f"Site '{site_name}' not found"
+                                 + (f" in account '{acct_name}'." if acct_name
+                                    else "."))
+            return {"siteIds": str(match.get("id", ""))}
+        if acct_id:
+            return {"accountIds": acct_id}
+        return {"tenant": "true"}
+
+    @staticmethod
+    def _scope_label(scope: dict) -> str:
+        if "siteIds" in scope:
+            return "site scope"
+        if "accountIds" in scope:
+            return "account scope"
+        return "tenant scope"
+
     def _load_excl(self):
         api = _pick_api(self.app)
         if not api:
@@ -968,16 +1032,20 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
         et = self.type_var.get()
 
         def do():
-            return api.get_exclusions({"tenant": "true"}, et)
+            scope = self._resolve_scope(api)
+            return scope, api.get_exclusions(scope, et)
 
-        def done(items):
-            self.info_lbl.configure(text=f"{len(items)} {et} exclusions")
-            cli_log(f"Retrieved {len(items)} '{et}' exclusions", "success")
+        def done(result):
+            scope, items = result
+            lbl = self._scope_label(scope)
+            self.info_lbl.configure(text=f"{len(items)} {et} exclusions ({lbl})")
+            cli_log(f"Retrieved {len(items)} '{et}' exclusions ({lbl})",
+                    "success")
             self.table.columns = ["type", "value", "osType",
                                   "description", "id"]
             self.table.load(items)
 
-        run_async(self, do, done)
+        run_async(self, do, done, self._load_fail)
 
     def _load_unified(self):
         api = _pick_api(self.app)
@@ -985,17 +1053,21 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
             return
 
         def do():
-            return api.get_unified_exclusions({"tenant": "true"})
+            scope = self._resolve_scope(api)
+            return scope, api.get_unified_exclusions(scope)
 
-        def done(items):
+        def done(result):
+            scope, items = result
+            lbl = self._scope_label(scope)
             self.info_lbl.configure(
-                text=f"{len(items)} unified exclusions")
-            cli_log(f"Retrieved {len(items)} unified exclusions", "success")
+                text=f"{len(items)} unified exclusions ({lbl})")
+            cli_log(f"Retrieved {len(items)} unified exclusions ({lbl})",
+                    "success")
             self.table.columns = ["exclusionName", "type", "value",
                                   "osType", "modeType", "id"]
             self.table.load(items)
 
-        run_async(self, do, done)
+        run_async(self, do, done, self._load_fail)
 
     def _load_block(self):
         api = _pick_api(self.app)
@@ -1003,16 +1075,25 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
             return
 
         def do():
-            return api.get_blocklist({"tenant": "true"})
+            scope = self._resolve_scope(api)
+            return scope, api.get_blocklist(scope)
 
-        def done(items):
-            self.info_lbl.configure(text=f"{len(items)} blocklist entries")
-            cli_log(f"Retrieved {len(items)} blocklist entries", "success")
+        def done(result):
+            scope, items = result
+            lbl = self._scope_label(scope)
+            self.info_lbl.configure(
+                text=f"{len(items)} blocklist entries ({lbl})")
+            cli_log(f"Retrieved {len(items)} blocklist entries ({lbl})",
+                    "success")
             self.table.columns = ["value", "source", "osType",
                                   "description", "id"]
             self.table.load(items)
 
-        run_async(self, do, done)
+        run_async(self, do, done, self._load_fail)
+
+    def _load_fail(self, e):
+        self.info_lbl.configure(text=str(e)[:80])
+        cli_log(f"Load failed: {e}", "error")
 
     def _export(self):
         stats = [{"label": "Total Items", "value": len(self.table._rows)}]

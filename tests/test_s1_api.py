@@ -167,6 +167,39 @@ def test_non_json_error_body_falls_back_to_text():
     assert ei.value.detail == "plain text error"
 
 
+def test_get_roles_passes_account_scope():
+    api = _client([FakeResp(200, {"data": [{"id": "r1", "name": "Custom"}]})])
+    roles = api.get_roles(params={"accountIds": "A1"})
+    assert roles == [{"id": "r1", "name": "Custom"}]
+    _method, url, params, _json = api.session.calls[0]
+    assert url.endswith("/rbac/roles")
+    assert params["accountIds"] == "A1"
+
+
+def test_get_roles_no_params_still_works():
+    api = _client([FakeResp(200, {"data": []})])
+    assert api.get_roles() == []
+
+
+def test_get_role_hits_definition_endpoint_with_scope():
+    api = _client([FakeResp(200, {"data": {"id": "r1", "name": "Custom",
+                                           "permissions": [{"id": "p"}]}})])
+    role = api.get_role("r1", params={"accountIds": "A1"})
+    assert role["permissions"] == [{"id": "p"}]
+    _method, url, params, _json = api.session.calls[0]
+    assert url.endswith("/rbac/role/r1")
+    assert params["accountIds"] == "A1"
+
+
+def test_create_role_posts_data_envelope():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_role({"name": "Custom", "permissions": []})
+    method, url, _params, body = api.session.calls[0]
+    assert method == "POST"
+    assert url.endswith("/rbac/role")
+    assert body == {"data": {"name": "Custom", "permissions": []}}
+
+
 # ── throttle telemetry ───────────────────────────────────────────────────
 
 def test_throttle_counter_increments_on_429():

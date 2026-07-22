@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.4 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.5 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,14 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.5 — 2026-07-22
+#### Improvements
+- **Account-scoped RBAC roles are now backed up and restored** — role backup now queries the selected account scope and captures full role definitions; restore re-creates custom account roles before creating console users so role assignments can map by name.
+- **Restore element info icons work again** — the ⓘ buttons now open hover/click tooltips instead of silently writing help text to the output console.
+- **Restore log export defaults to JSON** — JSON is now the default export format, and the HTML report expands the full operation log by default when selected.
+- **Source vs destination validation now compares every item** — large exclusion sets are no longer sampled at 50 entries, so missing path exclusions deep in a 300-item list are surfaced in the validation export.
+- **Operations → Exclusions & Blocklist is scope-aware** — add Account/Site filters to load account/site-scoped exclusions instead of only tenant-scoped entries.
 
 ### v2.1.4 — 2026-07-14
 #### Improvements

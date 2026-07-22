@@ -75,10 +75,6 @@ class _ToolTip:
         y = self.widget.winfo_rooty() - 4
         self._tip = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
-        try:
-            tw.wm_attributes("-topmost", True)
-        except tk.TclError:
-            pass
         tw.wm_geometry(f"+{x}+{y}")
         border = tk.Frame(tw, background=theme.tkcolor(BORDER))
         border.pack()

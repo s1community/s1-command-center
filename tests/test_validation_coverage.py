@@ -137,3 +137,35 @@ def test_missing_star_rule_is_detectable():
     d = dict((c, names) for c, _n, names in _summarize_node_payload(dst))
     assert "Detect-X" in s["star_rules"]
     assert "Detect-X" not in d["star_rules"]
+
+
+def test_all_path_exclusions_compared_beyond_50():
+    paths = [{"value": f"/opt/app/data/file-{i:04d}.tmp"} for i in range(300)]
+    node = {"exclusions": {"path": paths}}
+    out = dict((c, (n, names)) for c, n, names in _summarize_node_payload(node))
+    count, names = out["excl/path"]
+    assert count == 300
+    assert len(names) == 300
+    assert "/opt/app/data/file-0299.tmp" in names
+
+
+def test_missing_exclusion_past_index_50_is_detectable():
+    src_paths = [{"value": f"/p/{i}"} for i in range(120)]
+    dst_paths = [p for p in src_paths if p["value"] != "/p/90"]
+    s = dict((c, names) for c, _n, names in
+             _summarize_node_payload({"exclusions": {"path": src_paths}}))
+    d = dict((c, names) for c, _n, names in
+             _summarize_node_payload({"exclusions": {"path": dst_paths}}))
+    from collections import Counter
+    missing = sorted((Counter(s["excl/path"]) - Counter(d["excl/path"]))
+                     .elements())
+    assert missing == ["/p/90"]
+
+
+def test_long_paths_sharing_60char_prefix_stay_distinct():
+    base = "/very/long/shared/prefix/that/exceeds/sixty/characters/for/sure/"
+    a = {"value": base + "alpha.exe"}
+    b = {"value": base + "bravo.exe"}
+    out = dict((c, names) for c, _n, names in
+               _summarize_node_payload({"exclusions": {"path": [a, b]}}))
+    assert len(set(out["excl/path"])) == 2

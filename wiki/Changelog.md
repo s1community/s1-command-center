@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.1.5 — 2026-07-22
+
+### Improvements
+- **Account-scoped RBAC roles are now backed up and restored** — role backup now queries the selected account scope and captures full role definitions; restore re-creates custom account roles before creating console users so role assignments can map by name.
+- **Restore element info icons work again** — the ⓘ buttons now open hover/click tooltips instead of silently writing help text to the output console.
+- **Restore log export defaults to JSON** — JSON is now the default export format, and the HTML report expands the full operation log by default when selected.
+- **Source vs destination validation now compares every item** — large exclusion sets are no longer sampled at 50 entries, so missing path exclusions deep in a 300-item list are surfaced in the validation export.
+- **Operations → Exclusions & Blocklist is scope-aware** — add Account/Site filters to load account/site-scoped exclusions instead of only tenant-scoped entries.
+
+### Tests
+- Added regression coverage for scoped RBAC role APIs, role restore payload cleanup, and validation of exclusion lists beyond 50 items. 121 tests total.
+
 ## v2.1.4 — 2026-07-14
 
 ### Improvements

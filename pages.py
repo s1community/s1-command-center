@@ -12,7 +12,7 @@ from typing import Optional
 import theme
 from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  ACCENT_HOVER, WARN, WARN_HOVER, INFO, cli_log,
-                 _ConsoleProxy, _help_btn, UI_FONT, MONO_FONT, BRAND,
+                 _ConsoleProxy, _help_btn, _ToolTip, UI_FONT, MONO_FONT, BRAND,
                  BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
                  TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
@@ -155,12 +155,12 @@ def _build_elements_section(parent, row, title="Elements"):
             tip = ctk.CTkLabel(f, text="ⓘ", font=(UI_FONT, 10),
                                text_color=TEXT_FAINT, cursor="hand2", width=16)
             tip.pack(side="left", padx=(2, 0))
-            tip.bind("<Enter>", lambda e, t=help_text, w=tip:
-                     w.configure(text_color=INFO))
+            tt = _ToolTip(tip, f"{el}: {help_text}", wraplength=300)
+            tip.bind("<Enter>", lambda e, w=tip:
+                     w.configure(text_color=INFO), add="+")
             tip.bind("<Leave>", lambda e, w=tip:
-                     w.configure(text_color=TEXT_FAINT))
-            tip.bind("<Button-1>", lambda e, t=help_text, n=el:
-                     cli_log(f"ⓘ {n}: {t}", "info"))
+                     w.configure(text_color=TEXT_FAINT), add="+")
+            tip.bind("<Button-1>", lambda e, t=tt: t._toggle(), add="+")
         elem_vars[el] = var
 
     # select all / deselect all
@@ -559,6 +559,29 @@ _STRIP_FIELDS = {
 def _clean_for_restore(obj: dict) -> dict:
     """Remove source-specific fields before pushing to destination."""
     return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
+
+
+_ROLE_STRIP_FIELDS = {
+    "id", "createdAt", "updatedAt", "createdBy", "created_by_id",
+    "created_by_name", "creator", "creatorId",
+    "updatedBy", "updatedById", "updater", "updaterId",
+    "usersInRole", "usersInRoles", "users",
+    "predefined", "editable", "inherited", "inheritedFrom",
+    "accountId", "accountName", "accountIds",
+    "siteId", "siteName", "siteIds",
+    "groupId", "groupName", "groupIds",
+    "scopeId", "scopeName",
+}
+
+
+def _build_role_payload(role_def: dict, dest_account_id: str = "") -> dict:
+    payload = {k: v for k, v in (role_def or {}).items()
+               if k not in _ROLE_STRIP_FIELDS}
+    if not isinstance(payload.get("scope"), str):
+        payload.pop("scope", None)
+    if dest_account_id:
+        payload["accountIds"] = [dest_account_id]
+    return payload
 
 
 def _drop_forensics_triggering(policy: dict) -> dict:
@@ -1266,9 +1289,14 @@ def _item_id(item, label="") -> str:
 # is produced from a backup node's `data` dict AND from a live destination
 # query, so the two columns line up element-by-element.
 
+_CMP_NAME_MAXLEN = 256
+
 # (category, count, top_names[])  — ordering matters: it's the row order
 # the panel renders in.
 def _summarize_node_payload(data: dict) -> list:
+    def _nm(v):
+        return str(v)[:_CMP_NAME_MAXLEN]
+
     out = []
     pol = (data or {}).get("policy") or {}
     if pol:
@@ -1282,62 +1310,61 @@ def _summarize_node_payload(data: dict) -> list:
         for etype in EXCL_TYPES:
             items = excls.get(etype) or []
             out.append((f"excl/{etype}", len(items),
-                        [str(i.get("value", ""))[:60] for i in items[:50]]))
+                        [_nm(i.get("value", "")) for i in items]))
 
     u_excls = (data or {}).get("unified_exclusions") or []
     if u_excls:
         out.append(("unified_exclusions", len(u_excls),
-                    [str(i.get("exclusionName") or i.get("value", ""))[:60]
-                     for i in u_excls[:50]]))
+                    [_nm(i.get("exclusionName") or i.get("value", ""))
+                     for i in u_excls]))
 
     bl = (data or {}).get("restrictions") \
         or (data or {}).get("blocklist") or []
     out.append(("blocklist", len(bl),
-                [str(b.get("value", ""))[:60] for b in bl[:50]]))
+                [_nm(b.get("value", "")) for b in bl]))
 
     fw = (data or {}).get("firewall", {}) or {}
     fw_rules = fw.get("rules") or []
     out.append(("fw-rules", len(fw_rules),
-                [str(r.get("name", ""))[:60] for r in fw_rules[:50]]))
+                [_nm(r.get("name", "")) for r in fw_rules]))
     fw_locs = fw.get("locations") or []
     out.append(("fw-locations", len(fw_locs),
-                [str(l.get("name", ""))[:60] for l in fw_locs[:50]]))
+                [_nm(l.get("name", "")) for l in fw_locs]))
 
     dc = (data or {}).get("deviceControl", {}) or {}
     dc_rules = dc.get("rules") or []
     out.append(("dc-rules", len(dc_rules),
-                [str(r.get("ruleName") or r.get("name", ""))[:60]
-                 for r in dc_rules[:50]]))
+                [_nm(r.get("ruleName") or r.get("name", ""))
+                 for r in dc_rules]))
 
     nq = (data or {}).get("networkQuarantine", {}) or {}
     nq_rules = nq.get("rules") or []
     out.append(("nq-rules", len(nq_rules),
-                [str(r.get("name", ""))[:60] for r in nq_rules[:50]]))
+                [_nm(r.get("name", "")) for r in nq_rules]))
 
     dv = (data or {}).get("deepVisibility", {}) or {}
     flt = dv.get("filters") or (data or {}).get("saved_filters") or []
     out.append(("saved_filters", len(flt),
-                [str(f.get("name", ""))[:60] for f in flt[:50]]))
+                [_nm(f.get("name", "")) for f in flt]))
 
     ovrs = ((data or {}).get("config", {}) or {}).get("overrides") or []
     out.append(("config_overrides", len(ovrs),
-                [str(o.get("name", ""))[:60] for o in ovrs[:50]]))
+                [_nm(o.get("name", "")) for o in ovrs]))
 
     cusers = (data or {}).get("consoleUsers") or []
     if cusers:
         out.append(("console_users", len(cusers),
-                    [str(u.get("email") or u.get("fullName", ""))[:60]
-                     for u in cusers[:50]]))
+                    [_nm(u.get("email") or u.get("fullName", ""))
+                     for u in cusers]))
 
     # ── Detection & hunting ──
     star = (data or {}).get("star") or (data or {}).get("star_rules") or []
     out.append(("star_rules", len(star),
-                [str(r.get("name", ""))[:60] for r in star[:50]]))
+                [_nm(r.get("name", "")) for r in star]))
     ti = (data or {}).get("threatIntel") \
         or (data or {}).get("threat_intel") or []
     out.append(("threat_intel", len(ti),
-                [str(i.get("value") or i.get("name", ""))[:60]
-                 for i in ti[:50]]))
+                [_nm(i.get("value") or i.get("name", "")) for i in ti]))
 
     # ── Tags ──
     cfg = (data or {}).get("config", {}) or {}
@@ -1349,7 +1376,7 @@ def _summarize_node_payload(data: dict) -> list:
                         "tags_network_quarantine"),
                        (ep_tags, "tags_endpoint")):
         out.append((cat, len(items),
-                    [str(t.get("name", ""))[:60] for t in items[:50]]))
+                    [_nm(t.get("name", "")) for t in items]))
 
     # ── Collections (account / site level) ──
     def _name(x):
@@ -1367,7 +1394,7 @@ def _summarize_node_payload(data: dict) -> list:
                      ("scripts", "scripts")):
         items = (data or {}).get(key) or []
         out.append((cat, len(items),
-                    [str(_name(i))[:60] for i in items[:50]]))
+                    [_nm(_name(i)) for i in items]))
 
     # ── Config singletons (presence; value-level diff is out of scope) ──
     fw_cfg = ((data or {}).get("firewall", {}) or {}).get("config")
@@ -2748,7 +2775,21 @@ class BackupPage(ctk.CTkFrame):
 
         # ── RBAC roles ──
         if "roles" in elements and scope_type == "account":
-            _fetch("roles", "roles", api.get_roles)
+            roles = _fetch("roles", "roles", api.get_roles,
+                           params={"accountIds": scope_id})
+            for r in (roles or []):
+                if not isinstance(r, dict) or r.get("predefined"):
+                    continue
+                rid = r.get("id")
+                if not rid:
+                    continue
+                try:
+                    full = api.get_role(rid, params={"accountIds": scope_id})
+                    if isinstance(full, dict):
+                        r.update(full)
+                except Exception as e:
+                    cli_log(f"Role definition fetch failed for "
+                            f"{r.get('name', rid)}: {e}", "warning")
 
         # ── Service users ──
         if "service_users" in elements and scope_type == "account":
@@ -6000,6 +6041,37 @@ class RestorePage(ctk.CTkFrame):
                     f"({len(scripts)}): {names}{more}")
                 results.append(("scripts", f"{len(scripts)} listed"))
 
+            roles = data.get("roles") or []
+            if "roles" in elements and roles and ntype == "account":
+                r_acct = dest_id or ""
+                try:
+                    existing_roles = {
+                        (r.get("name") or "").strip().lower()
+                        for r in (api.get_roles(
+                            params={"accountIds": r_acct}) or [])}
+                except Exception:
+                    existing_roles = set()
+                creatable_roles = []
+                skipped_predef = 0
+                for r in roles:
+                    if not isinstance(r, dict):
+                        continue
+                    if r.get("predefined"):
+                        skipped_predef += 1
+                        continue
+                    nm = (r.get("name") or "").strip().lower()
+                    if not nm or nm in existing_roles:
+                        continue
+                    creatable_roles.append(r)
+                if skipped_predef:
+                    self._operation_log.append(
+                        f"  ℹ Skipped {skipped_predef} predefined role(s) — "
+                        f"they exist on every console")
+                if creatable_roles:
+                    _r_bulk("roles", creatable_roles,
+                            lambda r: api.create_role(
+                                _build_role_payload(r, r_acct)))
+
             # ── Console (human) users ──
             # Only locally-created users can be provisioned via API. SSO/SCIM
             # users auto-provision on first login, so re-creating them here is
@@ -6023,7 +6095,9 @@ class RestorePage(ctk.CTkFrame):
                 try:
                     dest_roles = {
                         (r.get("name") or "").strip().lower(): r.get("id")
-                        for r in (api.get_roles() or [])}
+                        for r in ((api.get_roles() or [])
+                                  + (api.get_roles(
+                                      params={"accountIds": acct_id}) or []))}
                 except Exception:
                     dest_roles = {}
 
@@ -7370,7 +7444,7 @@ class RestorePage(ctk.CTkFrame):
             f'<div style="font-family:Consolas,monospace; font-size:11px; '
             f'color:#888; padding:1px 0;">{l}</div>'
             for l in log)
-        log_html = f"""<details style="margin-top:28px;">
+        log_html = f"""<details open style="margin-top:28px;">
           <summary style="color:#888; cursor:pointer; font-size:14px;
             margin-bottom:8px;">Full Operation Log ({len(log)} lines)</summary>
           <div style="background:#111; border-radius:8px; padding:16px;
@@ -7402,21 +7476,21 @@ class RestorePage(ctk.CTkFrame):
         path = filedialog.asksaveasfilename(
             title="Export Restore Report",
             initialfile=f"s1-restore-report-{ts}",
-            defaultextension=".html",
+            defaultextension=".json",
             filetypes=[
-                ("HTML Report", "*.html"),
                 ("JSON Data", "*.json"),
+                ("HTML Report", "*.html"),
             ])
         if not path:
             return
         ext = os.path.splitext(path)[1].lower()
-        if ext == ".json":
+        if ext == ".html":
+            with open(path, "w") as f:
+                f.write(html)
+        else:
             report = {"meta": meta, "nodes": nodes, "log": log}
             with open(path, "w") as f:
                 json.dump(report, f, indent=2, default=str)
-        else:
-            with open(path, "w") as f:
-                f.write(html)
         cli_log(f"Restore report exported → {os.path.basename(path)}",
                 "success")
         messagebox.showinfo("Report Exported",

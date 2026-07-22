@@ -14,6 +14,7 @@ from pages import (
     _scope,
     _clean_for_restore,
     _drop_forensics_triggering,
+    _build_role_payload,
     explain_error,
     _is_exists_error,
     _FW_RULE_FIELDS,
@@ -193,6 +194,48 @@ def test_drop_forensics_triggering_does_not_mutate_input():
     policy = {"forensicsAutoTriggering": {"windowsEnabled": True}}
     _drop_forensics_triggering(policy)
     assert "forensicsAutoTriggering" in policy
+
+
+def test_build_role_payload_keeps_name_desc_permissions():
+    role = {
+        "id": "src-role-id",
+        "name": "IR Analyst",
+        "description": "Incident response",
+        "permissions": [{"id": "threats.view", "isAllowed": True}],
+        "createdAt": "2024-01-01",
+        "usersInRole": 7,
+        "predefined": False,
+    }
+    out = _build_role_payload(role, "dest-acct-1")
+    assert out["name"] == "IR Analyst"
+    assert out["description"] == "Incident response"
+    assert out["permissions"] == [{"id": "threats.view", "isAllowed": True}]
+    for k in ("id", "createdAt", "usersInRole", "predefined"):
+        assert k not in out
+
+
+def test_build_role_payload_binds_destination_account():
+    out = _build_role_payload({"name": "X", "accountIds": ["SRC"]}, "DEST")
+    assert out["accountIds"] == ["DEST"]
+
+
+def test_build_role_payload_keeps_scope_type_string_drops_scope_object():
+    kept = _build_role_payload({"name": "X", "scope": "account"}, "D")
+    assert kept["scope"] == "account"
+    dropped = _build_role_payload(
+        {"name": "X", "scope": {"id": "src", "name": "Acct"}}, "D")
+    assert "scope" not in dropped
+
+
+def test_build_role_payload_no_account_leaves_accountids_absent():
+    out = _build_role_payload({"name": "X"}, "")
+    assert "accountIds" not in out
+
+
+def test_build_role_payload_does_not_mutate_input():
+    role = {"name": "X", "id": "keep", "accountIds": ["SRC"]}
+    _build_role_payload(role, "DEST")
+    assert role["id"] == "keep" and role["accountIds"] == ["SRC"]
 
 
 # ── explain_error ───────────────────────────────────────────────────────
