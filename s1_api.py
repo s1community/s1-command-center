@@ -5,6 +5,7 @@ import re
 import requests
 import time as _time
 import threading
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 from requests.adapters import HTTPAdapter
@@ -55,6 +56,7 @@ class S1API:
             "Authorization": _auth_header(self.api_token),
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
         })
         # Rate-limit telemetry. A big backup/restore that slows down is almost
         # always the API throttling us (HTTP 429); these counters let the UI
@@ -140,6 +142,11 @@ class S1API:
                                  resp.status_code, detail)
             except S1APIError:
                 raise
+            except (requests.exceptions.ContentDecodingError, zlib.error) as e:
+                last_exc = ("response decoding failed; console returned invalid "
+                            f"compressed data: {e}")
+                if attempt < retries - 1:
+                    continue
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError,
                     ConnectionResetError, ConnectionAbortedError) as e:
                 last_exc = e

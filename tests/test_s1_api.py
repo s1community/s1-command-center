@@ -80,6 +80,22 @@ def _client(responses):
     return api
 
 
+def test_client_requests_uncompressed_json():
+    api = S1API("https://example.sentinelone.net", "tok")
+    assert api.session.headers["Accept-Encoding"] == "identity"
+
+
+def test_content_decoding_error_is_wrapped_with_endpoint():
+    err = s1_api.requests.exceptions.ContentDecodingError(
+        "Error -3 while decompressing data: incorrect header check")
+    api = _client([err, err, err, err])
+    with pytest.raises(S1APIError) as exc:
+        api._request("GET", "/accounts")
+    assert "GET /accounts failed after 4 attempts" in str(exc.value)
+    assert "response decoding failed" in exc.value.detail
+    assert "incorrect header check" in exc.value.detail
+
+
 # ── _request happy path ─────────────────────────────────────────────────
 
 def test_request_returns_json_on_200():

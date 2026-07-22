@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.5 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.6 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,10 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.6 — 2026-07-22
+#### Bug Fixes
+- **API calls no longer fail with opaque decompression errors** — requests now prefer uncompressed JSON responses, and any bad compressed response is wrapped with the API endpoint and a clear decode-failure message.
 
 ### v2.1.5 — 2026-07-22
 #### Improvements

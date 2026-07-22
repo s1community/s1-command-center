@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.1.6 — 2026-07-22
+
+### Bug Fixes
+- **API calls no longer fail with opaque decompression errors** — requests now prefer uncompressed JSON responses, and any bad compressed response is wrapped with the API endpoint and a clear decode-failure message.
+
+### Tests
+- Added regression coverage for uncompressed API request headers and compressed-response decode failures. 123 tests total.
+
 ## v2.1.5 — 2026-07-22
 
 ### Improvements
