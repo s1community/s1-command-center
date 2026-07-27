@@ -209,11 +209,31 @@ def test_get_role_hits_definition_endpoint_with_scope():
 
 def test_create_role_posts_data_envelope():
     api = _client([FakeResp(201, {"data": {"id": "new"}})])
-    api.create_role({"name": "Custom", "permissions": []})
+    api.create_role({"name": "Custom", "pages": []})
     method, url, _params, body = api.session.calls[0]
     assert method == "POST"
     assert url.endswith("/rbac/role")
-    assert body == {"data": {"name": "Custom", "permissions": []}}
+    # No scope filter passed → bare data envelope.
+    assert body == {"data": {"name": "Custom", "pages": []}}
+
+
+def test_create_role_includes_scope_filter():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_role({"name": "Custom"}, {"accountIds": ["DEST"]})
+    _method, url, _params, body = api.session.calls[0]
+    assert url.endswith("/rbac/role")
+    # S1 requires a top-level `filter`; scope must not be inside `data`.
+    assert body == {"data": {"name": "Custom"},
+                    "filter": {"accountIds": ["DEST"]}}
+
+
+def test_get_role_template_hits_rbac_role_with_scope():
+    api = _client([FakeResp(200, {"data": {"pages": [{"id": "p"}]}})])
+    tmpl = api.get_role_template(params={"accountIds": "A1"})
+    assert tmpl == {"pages": [{"id": "p"}]}
+    _method, url, params, _json = api.session.calls[0]
+    assert url.endswith("/rbac/role")
+    assert params["accountIds"] == "A1"
 
 
 # ── throttle telemetry ───────────────────────────────────────────────────

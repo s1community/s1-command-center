@@ -501,11 +501,22 @@ class S1API:
 
     # ── RBAC roles ─────────────────────────────────────────────────────
 
-    def create_role(self, data: dict) -> dict:
-        return self._post("/rbac/role", body={"data": data})
+    def create_role(self, data: dict, scope_filter: Optional[dict] = None) -> dict:
+        # S1 `RbacCreateRoleSchema` requires a top-level `filter` that names the
+        # target scope (accountIds / siteIds / tenant); the scope must NOT be
+        # embedded in `data` (it rejects `scope`/`accountIds` there as "Unknown
+        # field"). Mirrors the {filter, data} envelope used by firewall/AD.
+        body: dict = {"data": data}
+        if scope_filter:
+            body["filter"] = scope_filter
+        return self._post("/rbac/role", body=body)
 
-    def get_role_template(self) -> dict:
-        return self.get_data("/rbac/role/template")
+    def get_role_template(self, params: Optional[dict] = None) -> dict:
+        # "Get template for new role" is GET /rbac/role (scoped by
+        # accountIds/siteIds/tenant), NOT /rbac/role/template. The returned
+        # object is the create-ready `data` skeleton for that scope, so it
+        # already carries the destination's licensed permission taxonomy.
+        return self.get_data("/rbac/role", params=params)
 
     # ── service users ──────────────────────────────────────────────────
 

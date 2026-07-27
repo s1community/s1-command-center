@@ -15,6 +15,8 @@ from pages import (
     _clean_for_restore,
     _drop_forensics_triggering,
     _build_role_payload,
+    _role_scope_filter,
+    _overlay_role_permissions,
     explain_error,
     _is_exists_error,
     _FW_RULE_FIELDS,
@@ -196,46 +198,109 @@ def test_drop_forensics_triggering_does_not_mutate_input():
     assert "forensicsAutoTriggering" in policy
 
 
-def test_build_role_payload_keeps_name_desc_permissions():
-    role = {
+def _dest_template():
+    """A destination create-ready role template (as GET /rbac/role returns).
+
+    Everything defaults to not-allowed; a create call fills these in. Note the
+    permission field is NOT `pages` (that name is only in the GET-role detail
+    and is rejected by the create schema)."""
+    return {
+        "name": None,
+        "description": None,
+        "roles": [
+            {"name": "Endpoints", "actions": [
+                {"name": "View", "isEnabled": False},
+                {"name": "Uninstall", "isEnabled": False},
+            ]},
+            {"name": "Policy", "actions": [
+                {"name": "View", "isEnabled": False},
+                {"name": "Edit", "isEnabled": False},
+            ]},
+        ],
+    }
+
+
+def _source_role():
+    """A source custom role as stored in a backup (GET /rbac/role/{id})."""
+    return {
         "id": "src-role-id",
-        "name": "IR Analyst",
-        "description": "Incident response",
-        "permissions": [{"id": "threats.view", "isAllowed": True}],
+        "name": "DJW-Viewer",
+        "description": "Read-only",
+        "scope": "account",
+        "predefinedRole": False,
+        "accountIds": ["SRC"],
         "createdAt": "2024-01-01",
         "usersInRole": 7,
-        "predefined": False,
+        "pages": [
+            {"name": "Endpoints", "actions": [
+                {"name": "View", "isEnabled": True},
+                {"name": "Uninstall", "isEnabled": False},
+            ]},
+            # A permission the destination doesn't expose — must be ignored.
+            {"name": "Ranger", "actions": [
+                {"name": "View", "isEnabled": True}]},
+        ],
     }
-    out = _build_role_payload(role, "dest-acct-1")
-    assert out["name"] == "IR Analyst"
-    assert out["description"] == "Incident response"
-    assert out["permissions"] == [{"id": "threats.view", "isAllowed": True}]
-    for k in ("id", "createdAt", "usersInRole", "predefined"):
+
+
+def test_build_role_payload_drops_read_only_and_scope_fields():
+    out = _build_role_payload(_source_role(), _dest_template())
+    # The exact fields S1 rejected in the bug report must be gone from `data`.
+    for k in ("id", "scope", "predefinedRole", "accountIds", "pages",
+              "createdAt", "usersInRole"):
         assert k not in out
 
 
-def test_build_role_payload_binds_destination_account():
-    out = _build_role_payload({"name": "X", "accountIds": ["SRC"]}, "DEST")
-    assert out["accountIds"] == ["DEST"]
+def test_build_role_payload_keeps_name_and_description():
+    out = _build_role_payload(_source_role(), _dest_template())
+    assert out["name"] == "DJW-Viewer"
+    assert out["description"] == "Read-only"
 
 
-def test_build_role_payload_keeps_scope_type_string_drops_scope_object():
-    kept = _build_role_payload({"name": "X", "scope": "account"}, "D")
-    assert kept["scope"] == "account"
-    dropped = _build_role_payload(
-        {"name": "X", "scope": {"id": "src", "name": "Acct"}}, "D")
-    assert "scope" not in dropped
+def test_build_role_payload_overlays_granted_permissions_onto_template():
+    out = _build_role_payload(_source_role(), _dest_template())
+    groups = {g["name"]: g for g in out["roles"]}
+    ep = {a["name"]: a["isEnabled"] for a in groups["Endpoints"]["actions"]}
+    assert ep == {"View": True, "Uninstall": False}
+    # Untouched destination group stays at its template default.
+    pol = {a["name"]: a["isEnabled"] for a in groups["Policy"]["actions"]}
+    assert pol == {"View": False, "Edit": False}
 
 
-def test_build_role_payload_no_account_leaves_accountids_absent():
-    out = _build_role_payload({"name": "X"}, "")
-    assert "accountIds" not in out
+def test_build_role_payload_ignores_permissions_absent_from_template():
+    out = _build_role_payload(_source_role(), _dest_template())
+    # "Ranger" is only in the source, never in the dest template → not added.
+    assert all(g["name"] != "Ranger" for g in out["roles"])
 
 
-def test_build_role_payload_does_not_mutate_input():
-    role = {"name": "X", "id": "keep", "accountIds": ["SRC"]}
-    _build_role_payload(role, "DEST")
-    assert role["id"] == "keep" and role["accountIds"] == ["SRC"]
+def test_build_role_payload_does_not_mutate_inputs():
+    role = _source_role()
+    tmpl = _dest_template()
+    _build_role_payload(role, tmpl)
+    assert role["accountIds"] == ["SRC"] and role["id"] == "src-role-id"
+    # Template default must be untouched (deepcopy was used).
+    assert tmpl["roles"][0]["actions"][0]["isEnabled"] is False
+
+
+def test_build_role_payload_fallback_without_template():
+    out = _build_role_payload(_source_role(), None)
+    assert out == {"name": "DJW-Viewer", "description": "Read-only"}
+
+
+def test_role_scope_filter_prefers_site_then_account():
+    assert _role_scope_filter("A1") == {"accountIds": ["A1"]}
+    assert _role_scope_filter("A1", "S1") == {"siteIds": ["S1"]}
+    assert _role_scope_filter("") == {}
+
+
+def test_overlay_handles_alternate_bool_key_name():
+    # GET role uses isEnabled; a template variant might use isAllowed.
+    tmpl = {"roles": [{"name": "Endpoints", "actions": [
+        {"name": "View", "isAllowed": False}]}]}
+    role = {"pages": [{"name": "Endpoints", "actions": [
+        {"name": "View", "isEnabled": True}]}]}
+    _overlay_role_permissions(tmpl, role)
+    assert tmpl["roles"][0]["actions"][0]["isAllowed"] is True
 
 
 # ── explain_error ───────────────────────────────────────────────────────

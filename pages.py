@@ -1,9 +1,11 @@
 """
 Backup, Restore, and Agent Migration pages.
 """
+import copy
 import customtkinter as ctk
 import json
 import os
+import unicodedata
 from collections import Counter
 from tkinter import filedialog, messagebox
 from datetime import datetime, timezone
@@ -561,27 +563,162 @@ def _clean_for_restore(obj: dict) -> dict:
     return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
 
 
-_ROLE_STRIP_FIELDS = {
+# Read-only / scope-binding fields that must never appear inside a role's
+# create `data`. The scope lives in the top-level `filter` instead, and S1
+# rejects every one of these in `data` with "Unknown field (code 4000010)".
+_ROLE_DATA_READONLY = {
     "id", "createdAt", "updatedAt", "createdBy", "created_by_id",
     "created_by_name", "creator", "creatorId",
     "updatedBy", "updatedById", "updater", "updaterId",
     "usersInRole", "usersInRoles", "users",
-    "predefined", "editable", "inherited", "inheritedFrom",
+    "predefined", "predefinedRole", "editable", "inherited", "inheritedFrom",
     "accountId", "accountName", "accountIds",
     "siteId", "siteName", "siteIds",
     "groupId", "groupName", "groupIds",
-    "scopeId", "scopeName",
+    "scope", "scopeId", "scopeName",
 }
 
+# Possible boolean keys on a single permission "action" across S1 schema
+# variants (the GET role uses one name, the create template may use another).
+_ACTION_BOOL_KEYS = ("isEnabled", "isAllowed", "enabled", "allowed", "value",
+                     "checked", "granted")
 
-def _build_role_payload(role_def: dict, dest_account_id: str = "") -> dict:
-    payload = {k: v for k, v in (role_def or {}).items()
-               if k not in _ROLE_STRIP_FIELDS}
-    if not isinstance(payload.get("scope"), str):
-        payload.pop("scope", None)
+
+def _role_scope_filter(dest_account_id: str = "", dest_site_id: str = "") -> dict:
+    """Top-level `filter` that binds a new role to the destination scope."""
+    if dest_site_id:
+        return {"siteIds": [dest_site_id]}
     if dest_account_id:
-        payload["accountIds"] = [dest_account_id]
-    return payload
+        return {"accountIds": [dest_account_id]}
+    return {}
+
+
+def _perm_ident(d: dict) -> str:
+    """Stable identifier for a permission group / action, matched across
+    consoles by name (falls back to id/key). Role IDs never match across
+    consoles but the permission taxonomy names do."""
+    if not isinstance(d, dict):
+        return ""
+    return str(d.get("name") or d.get("id") or d.get("key") or "").strip().lower()
+
+
+def _action_bool_key(d: dict):
+    """Return the boolean field name present on an action/group dict, if any."""
+    if not isinstance(d, dict):
+        return None
+    for k in _ACTION_BOOL_KEYS:
+        if k in d and isinstance(d[k], bool):
+            return k
+    return None
+
+
+def _child_action_list(group: dict):
+    """The nested list of action dicts inside a permission group."""
+    if not isinstance(group, dict):
+        return None
+    acts = group.get("actions")
+    if isinstance(acts, list) and all(isinstance(x, dict) for x in acts):
+        return acts
+    # Fall back to the first list-of-dicts value (schema-name agnostic).
+    for v in group.values():
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            return v
+    return None
+
+
+def _find_permission_list(data: dict):
+    """Find the top-level list of permission groups in a role/template dict."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("pages", "roles", "permissions", "features", "groups"):
+        v = data.get(k)
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            return v
+    for v in data.values():
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            return v
+    return None
+
+
+def _build_source_perm_lookup(pages) -> dict:
+    """{group_ident: {action_ident: bool, "__self__": bool}} from a source
+    role's permission grants."""
+    lookup: dict = {}
+    for g in pages or []:
+        if not isinstance(g, dict):
+            continue
+        gid = _perm_ident(g)
+        if not gid:
+            continue
+        amap: dict = {}
+        gkey = _action_bool_key(g)
+        if gkey is not None:
+            amap["__self__"] = bool(g.get(gkey))
+        for a in (_child_action_list(g) or []):
+            aid = _perm_ident(a)
+            akey = _action_bool_key(a)
+            if aid and akey is not None:
+                amap[aid] = bool(a.get(akey))
+        lookup[gid] = amap
+    return lookup
+
+
+def _overlay_role_permissions(template_data: dict, role_def: dict) -> None:
+    """Copy the source role's granted permissions onto the destination
+    template in place, matching groups/actions by name. Only permissions the
+    destination actually exposes (present in the template) are set, so a
+    license mismatch can never inject an unknown permission."""
+    src = role_def.get("pages")
+    if not isinstance(src, list):
+        return
+    tmpl_list = _find_permission_list(template_data)
+    if not tmpl_list:
+        return
+    lookup = _build_source_perm_lookup(src)
+    for g in tmpl_list:
+        amap = lookup.get(_perm_ident(g))
+        if not amap:
+            continue
+        gkey = _action_bool_key(g)
+        if gkey is not None and "__self__" in amap:
+            g[gkey] = amap["__self__"]
+        for a in (_child_action_list(g) or []):
+            akey = _action_bool_key(a)
+            if akey is None:
+                continue
+            av = amap.get(_perm_ident(a))
+            if av is not None:
+                a[akey] = av
+
+
+def _build_role_payload(role_def: dict, template=None) -> dict:
+    """Build the create `data` for a custom RBAC role.
+
+    Preferred path: start from the destination's own role template (the
+    create-ready skeleton returned by GET /rbac/role for the target scope),
+    stamp the source name/description, and overlay the source's granted
+    permissions. This is authoritative for the destination schema and its
+    licensed permission set, so it survives console-to-console differences.
+
+    Fallback (no template available): a minimal name/description payload.
+    """
+    role_def = role_def or {}
+    if isinstance(template, dict) and template:
+        data = copy.deepcopy(template)
+        for k in list(data.keys()):
+            if k in _ROLE_DATA_READONLY:
+                data.pop(k, None)
+        data["name"] = role_def.get("name")
+        desc = role_def.get("description")
+        if desc is not None:
+            data["description"] = desc
+        _overlay_role_permissions(data, role_def)
+        return data
+    data = {"name": role_def.get("name")}
+    desc = role_def.get("description")
+    if desc is not None:
+        data["description"] = desc
+    return data
 
 
 def _drop_forensics_triggering(policy: dict) -> dict:
@@ -2350,17 +2487,28 @@ class BackupPage(ctk.CTkFrame):
             raise S1APIError(f"Cannot reach console — connection refused. Check URL and token.")
 
         nodes = []
-        acct_f    = filters.get("account", "").lower()
-        site_f    = filters.get("site", "").lower()
-        group_f   = filters.get("group", "").lower()
+        acct_f    = filters.get("account", "")
+        site_f    = filters.get("site", "")
+        group_f   = filters.get("group", "")
         acct_id_f = getattr(self, "_acct_id", "").strip()
         pt = self.ptable
 
         def ui(fn):
             self.after(0, fn)
 
+        def _norm_name(value):
+            value = _strip_non_printable(str(value or ""))
+            value = unicodedata.normalize("NFKC", value)
+            return " ".join(value.casefold().split())
+
         def name_match(name, filt):
-            return not filt or filt in name.lower()
+            filt = _norm_name(filt)
+            return not filt or filt in _norm_name(name)
+
+        def _acct_selected(acct):
+            if acct_id_f and str(acct.get("id", "")) == acct_id_f:
+                return True
+            return name_match(acct.get("name", ""), acct_f)
 
         def _make_summary(results):
             """Build compact summary from _read_node results."""
@@ -2421,19 +2569,24 @@ class BackupPage(ctk.CTkFrame):
         if acct_id_f:
             id_match = [a for a in accounts if str(a.get("id", "")) == acct_id_f]
             if not id_match:
-                cli_log(f"⚠ Account ID {acct_id_f} not found in this console "
-                        f"— verify the source connection is correct!", "error")
+                cli_log(f"⚠ Backup account ID {acct_id_f} not found — "
+                        f"falling back to Account Name filter", "warning")
             else:
                 cli_log(f"  ✓ Backup: account ID {acct_id_f} → "
                         f"'{id_match[0].get('name')}' confirmed", "success")
+        matched_accounts = [a for a in accounts if _acct_selected(a)]
+        if acct_f and not matched_accounts:
+            names = ", ".join(str(a.get("name", "?")) for a in accounts[:10])
+            more = f" (+{len(accounts) - 10} more)" if len(accounts) > 10 else ""
+            cli_log(f"No source account matched '{filters.get('account', '')}' "
+                    f"on {api.base_url}. Visible API accounts: {names}{more}. "
+                    f"Check the selected SOURCE connection and token scope.",
+                    "warning")
         node_count = 0
         for acct in accounts:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if acct_id_f:
-                if str(aid) != acct_id_f:
-                    continue
-            elif not name_match(aname, acct_f):
+            if not _acct_selected(acct):
                 continue
             node_count += 1
             try:
@@ -2468,10 +2621,7 @@ class BackupPage(ctk.CTkFrame):
         for acct in accounts:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if acct_id_f:
-                if str(aid) != acct_id_f:
-                    continue
-            elif not name_match(aname, acct_f):
+            if not _acct_selected(acct):
                 continue
             nid = f"acct-{aid}"
             ui(lambda n=nid, p=f"{aname}/": pt.add_node(n, p, "account"))
@@ -2778,7 +2928,11 @@ class BackupPage(ctk.CTkFrame):
             roles = _fetch("roles", "roles", api.get_roles,
                            params={"accountIds": scope_id})
             for r in (roles or []):
-                if not isinstance(r, dict) or r.get("predefined"):
+                # Skip predefined roles — they exist on every console and can't
+                # be re-created. S1 flags them via `predefined` or the
+                # `predefinedRole` boolean depending on the endpoint.
+                if not isinstance(r, dict) or r.get("predefined") is True \
+                        or r.get("predefinedRole") is True:
                     continue
                 rid = r.get("id")
                 if not rid:
@@ -6056,7 +6210,9 @@ class RestorePage(ctk.CTkFrame):
                 for r in roles:
                     if not isinstance(r, dict):
                         continue
-                    if r.get("predefined"):
+                    # Predefined roles exist on every console; the list/detail
+                    # endpoints flag them via `predefined` OR `predefinedRole`.
+                    if r.get("predefined") is True or r.get("predefinedRole") is True:
                         skipped_predef += 1
                         continue
                     nm = (r.get("name") or "").strip().lower()
@@ -6068,9 +6224,23 @@ class RestorePage(ctk.CTkFrame):
                         f"  ℹ Skipped {skipped_predef} predefined role(s) — "
                         f"they exist on every console")
                 if creatable_roles:
+                    # Fetch the destination's create-ready role template once so
+                    # every new role starts from the dest schema + licensed
+                    # permission set (see _build_role_payload). Best-effort:
+                    # fall back to a name/description-only payload if it fails.
+                    scope_filter = _role_scope_filter(r_acct)
+                    try:
+                        role_template = api.get_role_template(
+                            params={"accountIds": r_acct})
+                    except Exception as e:
+                        role_template = None
+                        self._operation_log.append(
+                            f"  ⚠ Role template unavailable ({e}); creating "
+                            f"roles with name/description only")
                     _r_bulk("roles", creatable_roles,
                             lambda r: api.create_role(
-                                _build_role_payload(r, r_acct)))
+                                _build_role_payload(r, role_template),
+                                scope_filter))
 
             # ── Console (human) users ──
             # Only locally-created users can be provisioned via API. SSO/SCIM

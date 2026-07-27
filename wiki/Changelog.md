@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.1.7 — 2026-07-27
+
+### Bug Fixes
+- **Custom RBAC roles now restore correctly** — role creation was rejected by the console with "Unknown field" / "Missing required field" validation errors. Restore now sends the role scope as the required top-level `filter`, drops the read-only fields the API rejects (`scope`, `predefinedRole`, `accountIds`, `pages`), and rebuilds each role from the destination console's own role template so permissions carry over even across consoles with different licensed features.
+- **Backup account matching is more reliable** — Account Name filters now normalize invisible Unicode/control characters, copied rich-text spacing, and case before matching API account names. If a stale ticket account ID is present, backup falls back to the visible Account Name instead of returning 0 nodes.
+
+### Tests
+- Added regression coverage for the role create envelope (`filter` + cleaned `data`), the role-template endpoint, and the permission overlay onto the destination template.
+- Added regression coverage for account filters containing invisible characters and stale account-ID fallback.
+
 ## v2.1.6 — 2026-07-22
 
 ### Bug Fixes
