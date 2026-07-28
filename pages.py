@@ -1385,6 +1385,18 @@ def _rules_for_scope(rules: list, ntype: str) -> list:
             if str(r.get("scope", "")).lower() == ntype]
 
 
+def _star_rules_for_scope(rules: list, ntype: str) -> list:
+    """STAR variant of _rules_for_scope. Custom-detection rules carry the same
+    `scope` field ('account' / 'site' / 'group', and the tenant level reported
+    as 'global' or 'tenant'), and /cloud-detection/rules ALSO returns inherited
+    rules at every level — so an account rule is returned again under every
+    child site. Keep only the rules whose own scope matches this node so one
+    account rule isn't backed up (and later re-created) under every site."""
+    ok = {"global", "tenant"} if ntype == "global" else {ntype}
+    return [r for r in (rules or [])
+            if str(r.get("scope", "")).lower() in ok]
+
+
 def _scope(scope_type, scope_id):
     """Build scope filter dict. Uses arrays for IDs (required by POST body filters)."""
     if scope_type == "global":
@@ -2865,7 +2877,19 @@ class BackupPage(ctk.CTkFrame):
 
         # ── STAR ──
         if "star_rules" in elements and scope_type != "group":
-            _fetch("star", "star", api.get_star_rules, scope)
+            rules = _fetch("star", "star", api.get_star_rules, scope)
+            # /cloud-detection/rules returns INHERITED rules at every level, so
+            # an account rule is also returned under each child site. Keep only
+            # this node's own-scope rules (except at global, the capture-all
+            # scope) so a rule isn't stored — and later re-created — at every
+            # site. See _star_rules_for_scope.
+            if isinstance(rules, list) and scope_type != "global":
+                scoped = _star_rules_for_scope(rules, scope_type)
+                data["star"] = scoped
+                for _i, (_nm, _v) in enumerate(results):
+                    if _nm == "star":
+                        results[_i] = ("star", len(scoped))
+                        break
 
         # ── Threat Intel ──
         if "threat_intel" in elements and scope_type == "account":
@@ -5916,6 +5940,18 @@ class RestorePage(ctk.CTkFrame):
 
             # ── STAR ──
             star = data.get("star") or data.get("star_rules") or []
+            if "star_rules" in elements and star:
+                # Only restore rules that belong to THIS node's own scope. The
+                # /cloud-detection/rules API returns inherited rules at every
+                # level, so without this an account rule gets re-created at
+                # every child site (reported by DJ Wilhelm, 2026-07). Mirrors
+                # the firewall/device-control scope filters above, and also
+                # repairs OLD backups that captured the inherited rules.
+                _star_inherited = len(star)
+                star = _star_rules_for_scope(star, ntype)
+                if not star:
+                    log(f"  star: 0 rules at {ntype} scope "
+                        f"({_star_inherited} inherited rules skipped)")
             if "star_rules" in elements and star:
                 def _create_star(rule):
                     cleaned = _clean_for_restore(rule)

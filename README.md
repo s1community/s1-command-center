@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.8 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.9 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,17 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.9 — 2026-07-28
+#### Bug Fixes
+- **Custom detection (STAR) rules no longer duplicate across scopes** — an account-scoped rule was captured at the account *and* under every child site, then re-created at each one, so a single rule ended up repeated per site on the destination. The `/cloud-detection/rules` API returns inherited rules at every scope level; backup and restore now filter each rule to its own scope, matching the existing firewall / device-control behaviour. The restore-side filter also repairs backups taken with earlier builds, so no re-capture is needed.
+
+#### New
+- **Duplicate STAR rule cleanup script** — `scripts/cleanup_duplicate_star_rules.py` finds site-scoped rules that duplicate an account/global rule and bulk-deletes them through the Delete Rules API (the console UI can't filter or bulk-select by site scope). Dry-run by default; `--delete` to apply.
+
+### v2.1.8 — 2026-07-28
+#### Bug Fixes
+- **Backup name filters now prefer an exact match** — typing a specific **Site Name** like `Servers` no longer also backs up supersets such as `HighQ_Servers` or `TR-Servers`. When a name matches exactly it wins; if nothing matches exactly, partial (substring) matching still works as a fallback. The same exact-preferred rule applies to the **Account Name** and **Group Name** filters and the migration/preview tree.
 
 ### v2.1.7 — 2026-07-27
 #### Bug Fixes

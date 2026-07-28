@@ -21,6 +21,7 @@ from pages import (
     _is_exists_error,
     _FW_RULE_FIELDS,
     _rules_for_scope,
+    _star_rules_for_scope,
 )
 
 
@@ -120,6 +121,51 @@ def test_rules_for_scope_drops_missing_scope_and_handles_empty():
     assert _rules_for_scope([{"name": "x"}], "site") == []
     assert _rules_for_scope(None, "site") == []
     assert _rules_for_scope([], "account") == []
+
+
+# ── _star_rules_for_scope (custom detection rule leak guard) ────────────
+# /cloud-detection/rules returns inherited rules at every level, so an
+# account rule is also returned under each child site. Without scope
+# filtering the account rule is backed up (and re-created) under every site
+# (reported by DJ Wilhelm 2026-07). STAR rules carry a `scope` field too.
+
+def test_star_rules_for_scope_site_drops_inherited_account_rule():
+    # A site query returns the site's own rule AND the inherited account rule.
+    rules = [
+        {"name": "BruteForce", "scope": "account"},
+        {"name": "SiteOnly", "scope": "site"},
+    ]
+    assert [r["name"] for r in _star_rules_for_scope(rules, "site")] == \
+        ["SiteOnly"]
+
+
+def test_star_rules_for_scope_account_drops_descendant_site_rules():
+    # An account query returns account rules AND all descendant site rules.
+    rules = [
+        {"name": "AcctRule", "scope": "account"},
+        {"name": "SiteA", "scope": "site"},
+        {"name": "SiteB", "scope": "site"},
+    ]
+    assert [r["name"] for r in _star_rules_for_scope(rules, "account")] == \
+        ["AcctRule"]
+
+
+def test_star_rules_for_scope_global_accepts_tenant_alias():
+    # Some consoles report the tenant level as 'global', others as 'tenant'.
+    rules = [
+        {"name": "g1", "scope": "global"},
+        {"name": "g2", "scope": "tenant"},
+        {"name": "a1", "scope": "account"},
+    ]
+    assert sorted(r["name"] for r in _star_rules_for_scope(rules, "global")) \
+        == ["g1", "g2"]
+
+
+def test_star_rules_for_scope_case_insensitive_and_empty():
+    assert _star_rules_for_scope([{"name": "s", "scope": "SITE"}], "site") == \
+        [{"name": "s", "scope": "SITE"}]
+    assert _star_rules_for_scope(None, "site") == []
+    assert _star_rules_for_scope([{"name": "x"}], "account") == []
 
 
 # ── _scope ──────────────────────────────────────────────────────────────

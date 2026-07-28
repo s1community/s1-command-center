@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.1.9 — 2026-07-28
+
+### Bug Fixes
+- **Custom detection (STAR) rules no longer duplicate across scopes** — an account-scoped rule was captured at the account *and* under every child site, then re-created at each one, so a single rule ended up repeated per site on the destination console. `/cloud-detection/rules` returns inherited rules at every scope level; backup and restore now filter each rule to its own scope, matching the existing firewall / device-control behaviour. The restore-side filter also repairs backups taken with earlier builds, so no re-capture is needed.
+
+### New
+- **Duplicate STAR rule cleanup script** — `scripts/cleanup_duplicate_star_rules.py` finds site-scoped rules that duplicate an account/global rule (matched on account + name + description + query) and bulk-deletes them through the Delete Rules API, since the console UI can't filter or bulk-select by site scope. Dry-run by default; `--delete` to apply, `--yes` to skip the prompt.
+
+### Tests
+- Added regression coverage for STAR scope filtering: a site node drops the inherited account rule, an account node drops descendant site rules, and the tenant level accepts both `global` and `tenant`. 138 tests total.
+
 ## v2.1.8 — 2026-07-28
 
 ### Bug Fixes

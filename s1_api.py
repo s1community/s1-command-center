@@ -610,6 +610,13 @@ class S1API:
     def create_star_rule(self, scope: dict, data: dict) -> dict:
         return self._post("/cloud-detection/rules", body={"filter": scope, "data": data})
 
+    def delete_star_rules(self, ids: list[str]) -> dict:
+        """DELETE /cloud-detection/rules — bulk-delete STAR custom-detection
+        rules by ID. Body is {"filter": {"ids": [...]}, "data": {}}."""
+        return self._delete("/cloud-detection/rules",
+                            body={"filter": {"ids": [str(i) for i in ids]},
+                                  "data": {}})
+
     # ── create site / group ──────────────────────────────────────────────
 
     def create_site(self, account_id: str, data: dict) -> dict:
