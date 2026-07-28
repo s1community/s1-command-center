@@ -38,8 +38,10 @@ Examples
         --account-id 123456789 --delete --yes
 """
 import argparse
+import json
 import os
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -77,10 +79,12 @@ def _resolve_connection(args):
     return ctx.url.rstrip("/"), ctx.api_token, not ctx.ignore_ssl_errors
 
 
-def _sig(rule, name_only):
-    """Duplicate signature. accountId is always included so two different
-    accounts that happen to share a rule name are never conflated."""
-    aid = str(rule.get("accountId") or "")
+def _sig(rule, name_only, wildcard=False):
+    """Duplicate signature. accountId is normally included so two different
+    accounts that happen to share a rule name are never conflated. Tenant
+    (global) rules carry no accountId of their own, so they are indexed and
+    looked up under a wildcard account key instead."""
+    aid = "" if wildcard else str(rule.get("accountId") or "")
     if name_only:
         return (aid, rule.get("name"))
     return (aid, rule.get("name"), rule.get("description"), rule.get("s1ql"))
@@ -108,16 +112,23 @@ def gather_rules(api, account_id=None):
 
 
 def find_extras(rules, name_only=False):
-    """Site-scoped rules that duplicate an account/global rule (same account)."""
+    """Site-scoped rules that duplicate an account- or tenant-scoped rule.
+
+    Account parents are matched within the same accountId. Tenant/global
+    parents have no accountId, so they are matched against any account."""
     parents = {}
     for r in rules:
         sc = str(r.get("scope", "")).lower()
-        if sc in ("account", "global", "tenant"):
+        if sc == "account":
             parents.setdefault(_sig(r, name_only), r)
+        elif sc in ("global", "tenant"):
+            parents.setdefault(_sig(r, name_only, wildcard=True), r)
     extras = []
     for r in rules:
-        if str(r.get("scope", "")).lower() == "site" \
-                and _sig(r, name_only) in parents:
+        if str(r.get("scope", "")).lower() != "site":
+            continue
+        if _sig(r, name_only) in parents \
+                or _sig(r, name_only, wildcard=True) in parents:
             extras.append(r)
     return extras
 
@@ -141,6 +152,9 @@ def main():
     ap.add_argument("--match-name-only", action="store_true",
                     help="Treat a site rule as a duplicate on NAME alone "
                          "(default also requires matching description + query).")
+    ap.add_argument("--out", metavar="PATH",
+                    help="Write the matched rules to a JSON file (audit trail "
+                         "for change control). Written in dry-run too.")
     ap.add_argument("--delete", action="store_true",
                     help="Actually delete. Without this it is a dry run.")
     ap.add_argument("--yes", action="store_true",
@@ -168,6 +182,21 @@ def main():
     for r in extras:
         print(f"  [{r.get('id')}] {r.get('name')!r:40} "
               f"scope={r.get('scope')} site={r.get('scopeName') or r.get('siteName')}")
+
+    if args.out:
+        fields = ("id", "name", "description", "scope", "scopeName",
+                  "accountId", "accountName", "siteId", "siteName")
+        payload = {
+            "console": base_url,
+            "generated": datetime.now(timezone.utc).isoformat(),
+            "match": "name" if args.match_name_only
+                     else "name+description+query",
+            "total_rules_scanned": len(rules),
+            "candidates": [{k: r.get(k) for k in fields} for r in extras],
+        }
+        with open(args.out, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        print(f"\nWrote audit list ({len(extras)} rule(s)) to {args.out}")
 
     if not args.delete:
         print("\nDRY RUN — nothing deleted. Re-run with --delete to remove "
