@@ -3,6 +3,8 @@ Export utilities — generates beautiful HTML and Excel reports from table data.
 """
 import json
 import os
+import re
+from collections import Counter
 from datetime import datetime
 from tkinter import filedialog, messagebox
 from typing import Optional
@@ -411,6 +413,312 @@ def generate_excel(path: str, title: str, columns: list[str],
     ws.freeze_panes = "A5"
     ws.auto_filter.ref = f"A4:{ws.cell(row=4, column=len(columns)).column_letter}4"
     wb.save(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  STAR (custom detection) rules — detailed Excel workbook
+# ═══════════════════════════════════════════════════════════════════════
+
+_XL_FONT = "Segoe UI"
+# Excel rejects most C0 control characters and caps a cell at 32,767 chars.
+_XL_ILLEGAL_RE = re.compile(r"[\000-\010\013\014\016-\037]")
+_XL_MAX_CHARS = 32000
+
+# (header, rule key, column width, kind)
+STAR_COLUMNS = [
+    ("Rule Name",          "name",              38, "text"),
+    ("Description",        "description",       46, "wrap"),
+    ("Status",             "status",            12, "status"),
+    ("Severity",           "severity",          11, "severity"),
+    ("Scope",              "scope",             10, "scope"),
+    ("Scope Path",         "scopeName",         34, "text"),
+    ("Account",            "accountName",       22, "text"),
+    ("Site",               "siteName",          22, "text"),
+    ("Query Type",         "queryType",         13, "text"),
+    ("Query Language",     "queryLang",         14, "text"),
+    ("Detection Query",    "s1ql",              70, "wrap"),
+    ("Treat as Threat",    "treatAsThreat",     15, "text"),
+    ("Network Quarantine", "networkQuarantine", 18, "bool"),
+    ("Active Response",    "activeResponse",    24, "wrap"),
+    ("Expiration Mode",    "expirationMode",    15, "text"),
+    ("Expires",            "expiration",        17, "date"),
+    ("Expired",            "expired",           9,  "bool"),
+    ("Alerts Generated",   "generatedAlerts",   15, "num"),
+    ("Last Alert",         "lastAlertTime",     17, "date"),
+    ("Created",            "createdAt",         17, "date"),
+    ("Created By",         "creator",           20, "text"),
+    ("Last Updated",       "updatedAt",         17, "date"),
+    ("Updated By",         "updater",           20, "text"),
+    ("Rule ID",            "id",                22, "text"),
+]
+
+# value -> (fill, font colour)
+_STAR_SEVERITY_STYLE = {
+    "critical":      ("FFE0E0", "B02020"),
+    "high":          ("FFEBDC", "C2560A"),
+    "medium":        ("FFF6DC", "9C6F00"),
+    "low":           ("E6F0FB", "1B5FA8"),
+    "suspicious":    ("FFF6DC", "9C6F00"),
+    "info":          ("EFEFF4", "55556A"),
+    "informational": ("EFEFF4", "55556A"),
+}
+_STAR_STATUS_STYLE = {
+    "active":   ("E3F7EC", "1B7F4F"),
+    "draft":    ("EDEDF2", "555566"),
+    "disabled": ("FDEAE7", "B02020"),
+}
+_STAR_SCOPE_STYLE = {
+    "global":  ("EDE6F8", "5B34B0"),
+    "tenant":  ("EDE6F8", "5B34B0"),
+    "account": ("E2F0FD", "13599C"),
+    "site":    ("E6F5E9", "27702F"),
+    "group":   ("FFF0DC", "A85B00"),
+}
+
+_STAR_SCOPE_ORDER = {"global": 0, "tenant": 0, "account": 1, "site": 2,
+                     "group": 3}
+
+
+def _xl_safe(value):
+    """Strip characters Excel refuses and cap the cell length."""
+    if not isinstance(value, str):
+        return value
+    value = _XL_ILLEGAL_RE.sub("", value)
+    if len(value) > _XL_MAX_CHARS:
+        value = value[:_XL_MAX_CHARS] + "… (truncated)"
+    return value
+
+
+def _fmt_dt(val) -> str:
+    """'2024-01-31T09:15:00.000000Z' -> '2024-01-31 09:15'."""
+    if not val:
+        return ""
+    s = str(val)
+    try:
+        return datetime.fromisoformat(
+            s.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return s[:19].replace("T", " ")
+
+
+def _fmt_active_response(val) -> str:
+    """Render activeResponse — a plain on/off flag on some consoles, an object
+    of individual actions on others."""
+    if val is None or val == "":
+        return ""
+    if isinstance(val, bool):
+        return "Yes" if val else "No"
+    if isinstance(val, dict):
+        on = [k for k, v in val.items() if v is True]
+        if on:
+            return ", ".join(on)
+        kept = {k: v for k, v in val.items()
+                if v not in (None, False, "", [], {})}
+        return json.dumps(kept, default=str) if kept else "No"
+    return str(val)
+
+
+def _star_cell(rule: dict, key: str, kind: str):
+    val = rule.get(key)
+    if key == "activeResponse":
+        return _fmt_active_response(val)
+    if kind == "date":
+        return _fmt_dt(val)
+    if kind == "bool":
+        if val is None:
+            return ""
+        return "Yes" if val else "No"
+    if kind == "num":
+        return val if isinstance(val, (int, float)) else (val or 0)
+    if isinstance(val, (dict, list)):
+        return _xl_safe(json.dumps(val, default=str))
+    if val is None:
+        return ""
+    return _xl_safe(str(val))
+
+
+def _star_sort_key(r: dict):
+    return (
+        str(r.get("accountName") or "").lower(),
+        _STAR_SCOPE_ORDER.get(str(r.get("scope") or "").lower(), 9),
+        str(r.get("siteName") or "").lower(),
+        str(r.get("name") or "").lower(),
+    )
+
+
+def count_star_scope_duplicates(rules) -> int:
+    """How many SITE-scoped rules share a name with an account rule in the
+    same account. Surfaced on the summary sheet because that is the signature
+    of the pre-2.1.9 restore bug that copied account rules to every site."""
+    acct = {(str(r.get("accountId") or ""), r.get("name"))
+            for r in (rules or [])
+            if str(r.get("scope") or "").lower() == "account"}
+    return sum(1 for r in (rules or [])
+               if str(r.get("scope") or "").lower() == "site"
+               and (str(r.get("accountId") or ""), r.get("name")) in acct)
+
+
+def generate_star_rules_excel(path: str, rules: list,
+                              meta: Optional[dict] = None) -> int:
+    """Write a polished, filterable workbook of STAR custom detection rules.
+
+    'Summary'    — headline totals plus breakdowns by scope, status, severity
+                   and account.
+    'STAR Rules' — every rule with all customer-relevant fields, frozen
+                   header, auto-filter and colour-coded scope/status/severity
+                   so it is readable without any further formatting work.
+
+    Returns the number of rules written."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    meta = meta or {}
+    rules = sorted(rules or [], key=_star_sort_key)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    ink = "1A1A2E"
+    row_border = Border(bottom=Side(style="thin", color="E3E3EC"))
+    head_border = Border(bottom=Side(style="medium", color=ink))
+
+    wb = Workbook()
+
+    # ── Sheet 1: Summary ────────────────────────────────────────────────
+    s = wb.active
+    s.title = "Summary"
+    s.sheet_view.showGridLines = False
+    for col, width in (("A", 3), ("B", 38), ("C", 14), ("D", 12)):
+        s.column_dimensions[col].width = width
+
+    t = s.cell(row=2, column=2, value="STAR Custom Detection Rules")
+    t.font = Font(name=_XL_FONT, size=18, bold=True, color=ink)
+    sub = s.cell(row=3, column=2, value="S1 Command Center export")
+    sub.font = Font(name=_XL_FONT, size=10, color="8A8A9A")
+
+    r = 5
+    for label, value in (
+        ("Console", meta.get("console") or "—"),
+        ("Account filter", meta.get("account_filter") or "(all accounts)"),
+        ("Site filter", meta.get("site_filter") or "(all sites)"),
+        ("Generated", now),
+        ("Total rules", len(rules)),
+    ):
+        lc = s.cell(row=r, column=2, value=label)
+        lc.font = Font(name=_XL_FONT, size=10, color="8A8A9A")
+        vc = s.cell(row=r, column=3, value=value)
+        vc.font = Font(name=_XL_FONT, size=10, bold=True, color=ink)
+        r += 1
+
+    dupes = count_star_scope_duplicates(rules)
+    dl = s.cell(row=r, column=2,
+                value="Site rules duplicating an account rule")
+    dl.font = Font(name=_XL_FONT, size=10, color="8A8A9A")
+    dv = s.cell(row=r, column=3, value=dupes)
+    dv.font = Font(name=_XL_FONT, size=10, bold=True,
+                   color="B02020" if dupes else "1B7F4F")
+    r += 2
+
+    def _breakdown(row, heading, counter, style_map=None):
+        for col, text in ((2, heading), (3, "Count")):
+            h = s.cell(row=row, column=col, value=text)
+            h.font = Font(name=_XL_FONT, size=11, bold=True, color=ink)
+            h.border = head_border
+        row += 1
+        total = sum(counter.values()) or 1
+        for label, count in counter.most_common():
+            lc = s.cell(row=row, column=2, value=str(label or "—"))
+            lc.font = Font(name=_XL_FONT, size=10, color="333344")
+            lc.border = row_border
+            cc = s.cell(row=row, column=3, value=count)
+            cc.font = Font(name=_XL_FONT, size=10, bold=True, color="333344")
+            cc.border = row_border
+            pc = s.cell(row=row, column=4, value=count / total)
+            pc.number_format = "0.0%"
+            pc.font = Font(name=_XL_FONT, size=10, color="8A8A9A")
+            pc.border = row_border
+            sty = style_map.get(str(label or "").lower()) if style_map else None
+            if sty:
+                lc.fill = PatternFill("solid", start_color=sty[0],
+                                      end_color=sty[0])
+                lc.font = Font(name=_XL_FONT, size=10, bold=True,
+                               color=sty[1])
+            row += 1
+        return row + 1
+
+    r = _breakdown(r, "By scope",
+                   Counter(str(x.get("scope") or "—").lower() for x in rules),
+                   _STAR_SCOPE_STYLE)
+    r = _breakdown(r, "By status",
+                   Counter(str(x.get("status") or "—") for x in rules),
+                   _STAR_STATUS_STYLE)
+    r = _breakdown(r, "By severity",
+                   Counter(str(x.get("severity") or "—") for x in rules),
+                   _STAR_SEVERITY_STYLE)
+    r = _breakdown(r, "By account",
+                   Counter(str(x.get("accountName") or "—") for x in rules))
+
+    # ── Sheet 2: the rules ──────────────────────────────────────────────
+    ws = wb.create_sheet("STAR Rules")
+    ws.sheet_view.showGridLines = False
+    last_col = get_column_letter(len(STAR_COLUMNS))
+
+    ws.merge_cells(f"A1:{last_col}1")
+    tc = ws.cell(row=1, column=1, value="STAR Custom Detection Rules")
+    tc.font = Font(name=_XL_FONT, size=15, bold=True, color=ink)
+    tc.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 26
+
+    ws.merge_cells(f"A2:{last_col}2")
+    sc = ws.cell(row=2, column=1,
+                 value=f"{meta.get('console') or 'console'}  •  "
+                       f"{len(rules)} rule(s)  •  generated {now}")
+    sc.font = Font(name=_XL_FONT, size=9, color="8A8A9A")
+
+    header_fill = PatternFill("solid", start_color=ink, end_color=ink)
+    for j, (title, _key, width, _kind) in enumerate(STAR_COLUMNS, 1):
+        c = ws.cell(row=4, column=j, value=title)
+        c.font = Font(name=_XL_FONT, size=10, bold=True, color="FFFFFF")
+        c.fill = header_fill
+        c.alignment = Alignment(horizontal="left", vertical="center",
+                                wrap_text=True)
+        ws.column_dimensions[get_column_letter(j)].width = width
+    ws.row_dimensions[4].height = 26
+
+    alt = PatternFill("solid", start_color="F7F8FC", end_color="F7F8FC")
+    for i, rule in enumerate(rules):
+        row = i + 5
+        banded = (i % 2 == 1)
+        for j, (_title, key, _w, kind) in enumerate(STAR_COLUMNS, 1):
+            c = ws.cell(row=row, column=j, value=_star_cell(rule, key, kind))
+            c.font = Font(name=_XL_FONT, size=10, color="2C2C3A")
+            c.border = row_border
+            c.alignment = Alignment(horizontal="left", vertical="top",
+                                    wrap_text=(kind == "wrap"))
+            if banded:
+                c.fill = alt
+            if kind == "num":
+                c.alignment = Alignment(horizontal="right", vertical="top")
+            sty = None
+            if kind == "severity":
+                sty = _STAR_SEVERITY_STYLE.get(
+                    str(rule.get("severity") or "").lower())
+            elif kind == "status":
+                sty = _STAR_STATUS_STYLE.get(
+                    str(rule.get("status") or "").lower())
+            elif kind == "scope":
+                sty = _STAR_SCOPE_STYLE.get(
+                    str(rule.get("scope") or "").lower())
+            if sty:
+                c.fill = PatternFill("solid", start_color=sty[0],
+                                     end_color=sty[0])
+                c.font = Font(name=_XL_FONT, size=10, bold=True, color=sty[1])
+                c.alignment = Alignment(horizontal="center", vertical="top")
+
+    ws.freeze_panes = "B5"
+    ws.auto_filter.ref = f"A4:{last_col}{4 + len(rules)}"
+
+    wb.save(path)
+    return len(rules)
 
 
 # ═══════════════════════════════════════════════════════════════════════

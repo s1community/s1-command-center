@@ -1397,6 +1397,41 @@ def _star_rules_for_scope(rules: list, ntype: str) -> list:
             if str(r.get("scope", "")).lower() in ok]
 
 
+def _collect_star_rules(api, acct_filter: str = "",
+                        site_filter: str = "") -> list:
+    """Fetch every STAR custom detection rule the token can see, for export.
+
+    Queries per account (an account query also returns that account's
+    descendant site rules), de-dupes by rule id, then applies the Account /
+    Site NAME filters using the same exact-preferred matching the backup page
+    uses. A Site filter keeps only the rules that live at that site, since
+    account/global rules carry no siteName."""
+    accounts = api.get_accounts() or []
+    if acct_filter:
+        accounts = _select_by_name(accounts, acct_filter,
+                                   lambda a: a.get("name", ""))
+        if not accounts:
+            return []
+
+    by_id = {}
+    for acct in accounts:
+        aid = acct.get("id")
+        if not aid:
+            continue
+        try:
+            for rule in api.get_star_rules({"accountIds": [aid]}):
+                by_id[str(rule.get("id"))] = rule
+        except S1APIError as exc:
+            cli_log(f"Could not read STAR rules for "
+                    f"{acct.get('name') or aid}: {exc}", "warning")
+
+    rules = list(by_id.values())
+    if site_filter:
+        rules = _select_by_name(rules, site_filter,
+                                lambda r: r.get("siteName") or "")
+    return rules
+
+
 def _scope(scope_type, scope_id):
     """Build scope filter dict. Uses arrays for IDs (required by POST body filters)."""
     if scope_type == "global":
@@ -2037,6 +2072,19 @@ class BackupPage(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="📜 History", height=38,
                       fg_color=BRAND, hover_color=BRAND_HOVER,
                       command=self._show_history).pack(side="left", padx=(0, 4))
+        self._star_btn = ctk.CTkButton(
+            btn_row, text="⭐ STAR → Excel", height=38, width=150,
+            fg_color=BRAND, hover_color=BRAND_HOVER,
+            command=self._export_star_rules)
+        self._star_btn.pack(side="left", padx=(0, 2))
+        _help_btn(btn_row,
+                  "Export every STAR custom detection rule from the selected "
+                  "console straight to a detailed Excel workbook — all fields, "
+                  "colour-coded by scope / status / severity, with a summary "
+                  "sheet and filters already switched on.\n\n"
+                  "Honours the Account Name / Site Name filters above. No "
+                  "backup needed — it reads the console live."
+                  ).pack(side="left", padx=(0, 4))
 
         # ── Scheduled (unattended) backups — fires while the app is open ──
         ctk.CTkLabel(btn_row, text="⏰", font=(UI_FONT, 14)).pack(
@@ -3009,6 +3057,66 @@ class BackupPage(ctk.CTkFrame):
             return
         rows = [{"log": line} for line in self._operation_log]
         export_report("Backup Log", ["log"], rows)
+
+    def _export_star_rules(self):
+        """Read STAR custom detection rules live from the selected console and
+        write a detailed, filterable Excel workbook. Independent of a backup —
+        it only needs a connection, and honours the Account/Site filters."""
+        api = self._get_backup_api()
+        if not api:
+            return
+
+        acct_f = self.acct_filter.get().strip()
+        site_f = self.site_filter.get().strip()
+        console = self._console_var.get()
+
+        path = filedialog.asksaveasfilename(
+            title="Export STAR Rules to Excel",
+            initialfile=f"s1-star-rules-{datetime.now():%Y%m%d-%H%M}",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx")])
+        if not path:
+            return
+
+        self._star_btn.configure(state="disabled", text="⏳ Exporting…")
+        cli_log("Collecting STAR custom detection rules…", "cmd")
+
+        def do():
+            rules = _collect_star_rules(api, acct_f, site_f)
+            if not rules:
+                return 0
+            from export_utils import generate_star_rules_excel
+            return generate_star_rules_excel(path, rules, meta={
+                "console": getattr(api, "base_url", console),
+                "account_filter": acct_f,
+                "site_filter": site_f,
+            })
+
+        def _reset():
+            self._star_btn.configure(state="normal", text="⭐ STAR → Excel")
+
+        def done(count):
+            _reset()
+            if not count:
+                cli_log("No STAR rules matched the current filters.",
+                        "warning")
+                messagebox.showinfo(
+                    "No STAR rules",
+                    "No custom detection rules matched the current "
+                    "Account/Site filters on this console.")
+                return
+            cli_log(f"Exported {count} STAR rule(s) → "
+                    f"{os.path.basename(path)}", "success")
+            messagebox.showinfo(
+                "STAR Rules Exported",
+                f"{count} custom detection rule(s) written to:\n{path}")
+
+        def fail(exc):
+            _reset()
+            cli_log(f"STAR export failed: {exc}", "error")
+            messagebox.showerror("Export Error", str(exc))
+
+        run_async(self, do, done, fail)
 
 
 # ═══════════════════════════════════════════════════════════════════════
