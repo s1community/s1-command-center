@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.7 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.8 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"

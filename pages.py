@@ -1263,6 +1263,35 @@ def _strip_non_printable(s):
     return _NON_PRINTABLE_RE.sub("", s)
 
 
+def _norm_name(value):
+    """Normalise a scope name for comparison: strip invisible marks, apply
+    NFKC, casefold and collapse whitespace so filters match regardless of
+    case, Unicode form, or stray zero-width characters."""
+    value = _strip_non_printable(str(value or ""))
+    value = unicodedata.normalize("NFKC", value)
+    return " ".join(value.casefold().split())
+
+
+def _select_by_name(items, filt, key=None):
+    """Filter `items` by a scope-name filter, preferring EXACT matches.
+
+    A blank filter returns everything. If one or more item names equal the
+    filter exactly (after normalisation) only those exact matches are
+    returned — so a specific name like "Servers" no longer also selects
+    supersets such as "HighQ_Servers" / "TR-Servers". When nothing matches
+    exactly, fall back to substring matching for convenience (e.g. "Serv")."""
+    nfilt = _norm_name(filt)
+    if not nfilt:
+        return list(items)
+    if key is None:
+        def key(it):
+            return it
+    exact = [it for it in items if _norm_name(key(it)) == nfilt]
+    if exact:
+        return exact
+    return [it for it in items if nfilt in _norm_name(key(it))]
+
+
 # Whitelists for specific element types that are strict about accepted fields
 _EXCL_FIELDS = {
     "type", "value", "osType", "description", "mode",
@@ -1802,12 +1831,9 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
     honouring the same name filters as backup/restore. Each entry carries
     the names of its ancestors so two consoles can be matched by NAME
     (IDs are tenant-specific and never line up across consoles)."""
-    acct_f = (filters.get("account") or "").lower()
-    site_f = (filters.get("site") or "").lower()
-    group_f = (filters.get("group") or "").lower()
-
-    def nm(name, f):
-        return (not f) or (f in (name or "").lower())
+    acct_f = filters.get("account") or ""
+    site_f = filters.get("site") or ""
+    group_f = filters.get("group") or ""
 
     out = []
     if levels.get("global"):
@@ -1818,11 +1844,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
     except Exception as e:
         accounts = []
         cli_log(f"Could not list accounts: {e}", "error")
-    for acct in accounts:
+    for acct in _select_by_name(accounts, acct_f,
+                                key=lambda a: a.get("name", "?")):
         aname = acct.get("name", "?")
         aid = acct.get("id", "")
-        if not nm(aname, acct_f):
-            continue
         if levels.get("accounts"):
             out.append({"type": "account", "path": f"{aname}/",
                         "name": aname, "id": aid,
@@ -1835,11 +1860,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
         except Exception as e:
             sites = []
             cli_log(f"Could not list sites under {aname}: {e}", "warning")
-        for site in sites:
+        for site in _select_by_name(sites, site_f,
+                                     key=lambda s: s.get("name", "?")):
             sname = site.get("name", "?")
             sid = site.get("id", "")
-            if not nm(sname, site_f):
-                continue
             if levels.get("sites"):
                 out.append({"type": "site", "path": f"{aname}/{sname}",
                             "name": sname, "id": sid,
@@ -1853,11 +1877,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
                 groups = []
                 cli_log(f"Could not list groups under {aname}/{sname}: {e}",
                         "warning")
-            for g in groups:
+            for g in _select_by_name(groups, group_f,
+                                      key=lambda x: x.get("name", "?")):
                 gname = g.get("name", "?")
                 gid = g.get("id", "")
-                if not nm(gname, group_f):
-                    continue
                 out.append({"type": "group",
                             "path": f"{aname}/{sname}/{gname}",
                             "name": gname, "id": gid,
@@ -2496,19 +2519,8 @@ class BackupPage(ctk.CTkFrame):
         def ui(fn):
             self.after(0, fn)
 
-        def _norm_name(value):
-            value = _strip_non_printable(str(value or ""))
-            value = unicodedata.normalize("NFKC", value)
-            return " ".join(value.casefold().split())
-
-        def name_match(name, filt):
-            filt = _norm_name(filt)
-            return not filt or filt in _norm_name(name)
-
         def _acct_selected(acct):
-            if acct_id_f and str(acct.get("id", "")) == acct_id_f:
-                return True
-            return name_match(acct.get("name", ""), acct_f)
+            return str(acct.get("id", "")) in _selected_acct_ids
 
         def _make_summary(results):
             """Build compact summary from _read_node results."""
@@ -2566,6 +2578,7 @@ class BackupPage(ctk.CTkFrame):
 
         # ── discover structure ──
         accounts = api.get_accounts()
+        id_match = []
         if acct_id_f:
             id_match = [a for a in accounts if str(a.get("id", "")) == acct_id_f]
             if not id_match:
@@ -2574,6 +2587,12 @@ class BackupPage(ctk.CTkFrame):
             else:
                 cli_log(f"  ✓ Backup: account ID {acct_id_f} → "
                         f"'{id_match[0].get('name')}' confirmed", "success")
+        if id_match:
+            _selected_acct_ids = {str(a.get("id", "")) for a in id_match}
+        else:
+            _selected_acct_ids = {
+                str(a.get("id", "")) for a in _select_by_name(
+                    accounts, acct_f, key=lambda a: a.get("name", ""))}
         matched_accounts = [a for a in accounts if _acct_selected(a)]
         if acct_f and not matched_accounts:
             names = ", ".join(str(a.get("name", "?")) for a in accounts[:10])
@@ -2599,11 +2618,10 @@ class BackupPage(ctk.CTkFrame):
                         "sortBy": "name", "sortOrder": "asc"})
             except Exception:
                 sites = []
-            for site in sites:
+            for site in _select_by_name(sites, site_f,
+                                         key=lambda s: s.get("name", "")):
                 sname = site.get("name", "?")
                 sid = site.get("id", "")
-                if not name_match(sname, site_f):
-                    continue
                 node_count += 1
                 try:
                     groups = api.get_groups(params={
@@ -2611,9 +2629,8 @@ class BackupPage(ctk.CTkFrame):
                         "sortOrder": "asc"})
                 except Exception:
                     groups = []
-                for grp in groups:
-                    if name_match(grp.get("name", "?"), group_f):
-                        node_count += 1
+                node_count += len(_select_by_name(
+                    groups, group_f, key=lambda g: g.get("name", "?")))
 
         # ── add all rows as pending first ──
         row_map = []  # (nid, type, path, obj, scope_id)
@@ -2638,11 +2655,10 @@ class BackupPage(ctk.CTkFrame):
             except Exception:
                 sites = []
 
-            for site in sites:
+            for site in _select_by_name(sites, site_f,
+                                         key=lambda s: s.get("name", "")):
                 sname = site.get("name", "?")
                 sid = site.get("id", "")
-                if not name_match(sname, site_f):
-                    continue
                 nid = f"site-{sid}"
                 sp = f"{aname}/{sname}"
                 ui(lambda n=nid, p=sp: pt.add_node(n, p, "site"))
@@ -2659,11 +2675,10 @@ class BackupPage(ctk.CTkFrame):
                 # map it to the destination filter by name. Some S1
                 # versions don't include `filterName` in /groups responses.
                 _src_filter_name_by_id: dict = {}
-                for grp in groups:
+                for grp in _select_by_name(groups, group_f,
+                                            key=lambda g: g.get("name", "?")):
                     gname = grp.get("name", "?")
                     gid = grp.get("id", "")
-                    if not name_match(gname, group_f):
-                        continue
                     fid = (grp.get("filterId")
                            or (grp.get("filter") or {}).get("id"))
                     if fid and not grp.get("filterName"):

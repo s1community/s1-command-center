@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.1.8 — 2026-07-28
+
+### Bug Fixes
+- **Backup name filters now prefer an exact match** — typing a specific **Site Name** like `Servers` no longer also backs up supersets such as `HighQ_Servers` or `TR-Servers`. When a name matches exactly it wins; if nothing matches exactly, partial (substring) matching still works as a fallback. The same exact-preferred rule applies to the **Account Name** and **Group Name** filters and the migration/preview tree.
+
+### Tests
+- Added regression coverage for exact-preferred site filtering (exact vs. substring fallback vs. blank) and the `_select_by_name` helper (case / whitespace / zero-width normalization).
+
 ## v2.1.7 — 2026-07-27
 
 ### Bug Fixes
