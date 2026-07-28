@@ -104,3 +104,44 @@ def test_tenant_alias_scope_is_recognised():
 def test_empty_and_no_duplicates():
     assert find_extras([]) == []
     assert find_extras([_rule("1", "A", "account")]) == []
+
+
+# ── site targeting / all-site-scoped mode (the TR-Servers cleanup) ──────
+
+filter_to_site = cleanup.filter_to_site
+find_site_scoped = cleanup.find_site_scoped
+
+
+def test_filter_to_site_matches_by_name_case_insensitively():
+    rules = [
+        _rule("1", "A", "site", site="TR-Servers"),
+        _rule("2", "B", "site", site="TR-Containers"),
+        _rule("3", "C", "global", account=None),
+    ]
+    assert _ids(filter_to_site(rules, site_name="tr-servers")) == ["1"]
+    # must not partial-match a similarly named site
+    assert _ids(filter_to_site(rules, site_name="TR-Containers")) == ["2"]
+
+
+def test_filter_to_site_matches_by_id():
+    rules = [
+        {"id": "1", "siteId": "S100", "siteName": "TR-Servers",
+         "scope": "site"},
+        {"id": "2", "siteId": "S200", "siteName": "Other", "scope": "site"},
+    ]
+    assert _ids(filter_to_site(rules, site_id="S100")) == ["1"]
+
+
+def test_all_site_scoped_selects_every_site_rule_even_without_a_parent():
+    # TR-Servers: 960 site-scoped copies of the tenant's GLOBAL rules. The
+    # global originals may not match by signature, so duplicate-matching is
+    # not enough -- this mode takes every site-scoped rule at the site.
+    rules = [
+        _rule("1", "G1", "site", site="TR-Servers"),
+        _rule("2", "G2", "site", site="TR-Servers"),
+        _rule("3", "G1", "global", account=None),
+    ]
+    targeted = filter_to_site(rules, site_name="TR-Servers")
+    assert _ids(find_site_scoped(targeted)) == ["1", "2"]
+    # the global original is never in the target set
+    assert all(r["scope"] == "site" for r in find_site_scoped(targeted))

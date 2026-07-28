@@ -150,6 +150,26 @@ def test_star_rules_for_scope_account_drops_descendant_site_rules():
         ["AcctRule"]
 
 
+def test_star_rules_for_scope_site_drops_inherited_global_rules():
+    # ThomsonReuters: the source site CONTAINERS had 482 rules that all live at
+    # GLOBAL scope. The API returns them when querying the site, and a pre-2.1.9
+    # restore re-created every one of them at SITE scope on the migrated site
+    # (TR-Servers). A site node must keep only its own rules.
+    rules = [
+        {"name": "G1", "scope": "global"},
+        {"name": "G2", "scope": "global"},
+        {"name": "T1", "scope": "tenant"},
+        {"name": "AcctRule", "scope": "account"},
+        {"name": "SiteOwn", "scope": "site"},
+    ]
+    assert [r["name"] for r in _star_rules_for_scope(rules, "site")] == \
+        ["SiteOwn"]
+    # and a site with no rules of its own migrates nothing, rather than
+    # inheriting the whole tenant's ruleset
+    global_only = [{"name": "G1", "scope": "global"}]
+    assert _star_rules_for_scope(global_only, "site") == []
+
+
 def test_star_rules_for_scope_global_accepts_tenant_alias():
     # Some consoles report the tenant level as 'global', others as 'tenant'.
     rules = [

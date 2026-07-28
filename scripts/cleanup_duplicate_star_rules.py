@@ -18,6 +18,18 @@ It is **DRY-RUN by default** — it prints what it *would* delete and changes
 nothing. Pass ``--delete`` (and confirm, or add ``--yes``) to actually remove
 them. The genuine account/global rule is always kept.
 
+Two selection modes
+-------------------
+``--mode duplicates`` (default)
+    Only site-scoped rules that duplicate an account/tenant rule.
+
+``--mode all-site-scoped``
+    EVERY site-scoped rule at one named site, whether or not a matching
+    parent rule still exists. This is the cleanup for a site that was
+    migrated by a pre-2.1.9 build and had the whole tenant's global ruleset
+    copied down into it. It requires ``--site-name`` or ``--site-id`` — it
+    will refuse to run tenant-wide.
+
 Connection
 ----------
 Reuses a saved S1 Command Center connection from
@@ -111,6 +123,28 @@ def gather_rules(api, account_id=None):
     return list(by_id.values())
 
 
+def _norm(value) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def filter_to_site(rules, site_name=None, site_id=None):
+    """Rules belonging to one site, matched on siteId or siteName."""
+    want = _norm(site_name)
+    out = []
+    for r in rules:
+        if site_id and str(r.get("siteId") or "") == str(site_id):
+            out.append(r)
+        elif want and _norm(r.get("siteName")) == want:
+            out.append(r)
+    return out
+
+
+def find_site_scoped(rules):
+    """Every rule that lives at SITE scope (used by --mode all-site-scoped)."""
+    return [r for r in (rules or [])
+            if str(r.get("scope", "")).lower() == "site"]
+
+
 def find_extras(rules, name_only=False):
     """Site-scoped rules that duplicate an account- or tenant-scoped rule.
 
@@ -149,6 +183,15 @@ def main():
     ap.add_argument("--account-id",
                     help="Limit to a single account ID (default: all accounts "
                          "the token can see).")
+    ap.add_argument("--site-name",
+                    help="Limit to the site with this name (e.g. TR-Servers).")
+    ap.add_argument("--site-id", help="Limit to this site ID.")
+    ap.add_argument("--mode", choices=["duplicates", "all-site-scoped"],
+                    default="duplicates",
+                    help="'duplicates' (default) removes only site copies of "
+                         "an account/tenant rule. 'all-site-scoped' removes "
+                         "EVERY site-scoped rule at the named site — requires "
+                         "--site-name/--site-id.")
     ap.add_argument("--match-name-only", action="store_true",
                     help="Treat a site rule as a duplicate on NAME alone "
                          "(default also requires matching description + query).")
@@ -161,6 +204,10 @@ def main():
                     help="Skip the confirmation prompt (with --delete).")
     args = ap.parse_args()
 
+    if args.mode == "all-site-scoped" and not (args.site_name or args.site_id):
+        ap.error("--mode all-site-scoped requires --site-name or --site-id; "
+                 "refusing to select every site-scoped rule in the tenant.")
+
     base_url, token, verify = _resolve_connection(args)
     api = S1API(base_url, token, verify_ssl=verify)
     try:
@@ -172,13 +219,28 @@ def main():
     rules = gather_rules(api, args.account_id)
     print(f"Fetched {len(rules)} STAR rule(s).")
 
-    extras = find_extras(rules, name_only=args.match_name_only)
+    targeted = None
+    if args.site_name or args.site_id:
+        targeted = filter_to_site(rules, args.site_name, args.site_id)
+        label = args.site_name or args.site_id
+        print(f"{len(targeted)} rule(s) belong to site {label!r}.")
+
+    if args.mode == "all-site-scoped":
+        extras = find_site_scoped(targeted or [])
+        what = f"site-scoped rule(s) at {args.site_name or args.site_id!r}"
+    else:
+        extras = find_extras(rules, name_only=args.match_name_only)
+        if targeted is not None:
+            keep = {str(r.get("id")) for r in targeted}
+            extras = [r for r in extras if str(r.get("id")) in keep]
+        what = ("duplicate site-scoped rule(s) "
+                "(an account/global rule of the same name exists)")
+
     if not extras:
-        print("No duplicate site-scoped rules found. Nothing to do.")
+        print("Nothing matched. Nothing to do.")
         return
 
-    print(f"\nFound {len(extras)} duplicate site-scoped rule(s) "
-          f"(an account/global rule of the same name exists):\n")
+    print(f"\nFound {len(extras)} {what}:\n")
     for r in extras:
         print(f"  [{r.get('id')}] {r.get('name')!r:40} "
               f"scope={r.get('scope')} site={r.get('scopeName') or r.get('siteName')}")
@@ -204,6 +266,10 @@ def main():
         return
 
     if not args.yes:
+        if args.mode == "all-site-scoped":
+            print("\n!! all-site-scoped mode: this removes EVERY site-scoped "
+                  "rule listed above, including any the site legitimately "
+                  "owns. Review the list (or --out file) first.")
         ans = input(f"\nDelete these {len(extras)} rule(s)? This cannot be "
                     f"undone. Type 'yes' to proceed: ").strip().lower()
         if ans != "yes":
