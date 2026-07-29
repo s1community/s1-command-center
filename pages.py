@@ -531,7 +531,12 @@ _STRIP_FIELDS = {
     "creator", "creatorId", "updater", "updaterId",
     "userId", "userName", "userFullName",
     # scope references (destination scope is passed separately)
-    "scope", "scopeName", "scopePath", "scopeId",
+    # `scopeLevel` is what /filters reports ('account' / 'site' / 'global').
+    # Saved filters are created with the destination scope in the request's
+    # `filter` envelope, so leaving the SOURCE scopeLevel in `data` contradicts
+    # it and S1 rejects the create — which silently left every migrated site
+    # with no filters, and therefore every dynamic group downgraded to static.
+    "scope", "scopeName", "scopePath", "scopeId", "scopeLevel",
     "accountId", "accountName", "siteId", "siteName",
     "groupId", "groupName",
     # read-only computed fields

@@ -220,6 +220,35 @@ def test_clean_keeps_payload_fields():
     assert _clean_for_restore(obj) == {"agentInterval": 5, "name": "X"}
 
 
+# ── saved filters: scopeLevel must be dropped on restore ────────────────
+
+def test_clean_drops_saved_filter_scope_level():
+    # ThomsonReuters / TR-Containers: GET /filters returns the filter's own
+    # scope as `scopeLevel`. Saved filters are created with the DESTINATION
+    # scope in the request's `filter` envelope, so sending the source
+    # scopeLevel in `data` contradicts it and S1 rejects the create. Every
+    # migrated site then had no filters, so each dynamic group was created
+    # STATIC and Group Ranking came up empty.
+    flt = {
+        "id": "1338570161695321319",
+        "name": "Agents older than 22.x.x",
+        "filterFields": {"agentVersions": ["21.7.4.1043"]},
+        "scopeLevel": "account",
+        "scopeId": "647137276083260819",
+        "siteId": None,
+        "createdAt": "2022-01-21T20:59:57.988928Z",
+    }
+    cleaned = _clean_for_restore(flt)
+    # the scope is carried by the request envelope, never by the payload
+    for stale in ("scopeLevel", "scopeId", "siteId", "id", "createdAt"):
+        assert stale not in cleaned, f"{stale} must not be sent on create"
+    # ...but the parts that define the filter must survive
+    assert cleaned == {
+        "name": "Agents older than 22.x.x",
+        "filterFields": {"agentVersions": ["21.7.4.1043"]},
+    }
+
+
 # ── STAR rule: activeResponse must be dropped on restore ────────────────
 # The /cloud-detection/rules GET returns `activeResponse` but the create
 # endpoint rejects it: "data: dict_values(['activeResponse']): Unknown
