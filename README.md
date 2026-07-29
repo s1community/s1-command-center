@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.9 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.1.10 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,14 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.1.10 — 2026-07-29
+#### Bug Fixes
+- **Saved filters now actually restore — and dynamic groups stay dynamic** — a migrated site could come out with none of its Deep Visibility filters, every dynamic group downgraded to **static**, and an empty **Group Ranking** page. All three were the same bug: `/filters` reports a filter's own scope as `scopeLevel`, and that source value was still being sent in the create payload even though the destination scope travels separately in the request's `filter` envelope. The console rejected every create, so no filters landed; group restore then couldn't resolve each dynamic group's filter by name and created it static, and S1 only ranks dynamic groups, so ranking came up empty. `scopeLevel` is now stripped alongside the other scope references. Re-running a restore repairs an affected site.
+
+#### New
+- **Export STAR rules to Excel** — a **⭐ STAR → Excel** button on the Backup page reads every custom detection rule live from the selected console (no backup required) and writes a two-sheet workbook: a *Summary* with totals and breakdowns by scope / status / severity / account, and a *STAR Rules* sheet with all 24 fields per rule, frozen header, auto-filter on, and colour-coded scope / status / severity. Honours the page's Account Name / Site Name filters.
+- **Targeted STAR rule cleanup** — the cleanup script gained `--site-name` / `--site-id` and `--mode all-site-scoped`, to strip every site-scoped rule from a site that a pre-2.1.9 build filled with copies of the tenant's global ruleset.
 
 ### v2.1.9 — 2026-07-28
 #### Bug Fixes

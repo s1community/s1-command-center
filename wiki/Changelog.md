@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.1.10 — 2026-07-29
+
+### Bug Fixes
+- **Saved filters now actually restore — and dynamic groups stay dynamic** — a migrated site could come out with none of its Deep Visibility filters, every dynamic group downgraded to **static**, and an empty **Group Ranking** page. All three were the same bug: `/filters` reports a filter's own scope as `scopeLevel`, and that source value was still being sent in the create payload even though the destination scope travels separately in the request's `filter` envelope. The console rejected every create, so no filters landed; group restore then couldn't resolve each dynamic group's filter by name and created it static, and S1 only ranks dynamic groups, so ranking came up empty. `scopeLevel` is now stripped alongside the other scope references. Re-running a restore repairs an affected site: the filters are created, each static group is upgraded back to dynamic, and the ranks are re-applied.
+
+### New
+- **Export STAR rules to Excel** — a **⭐ STAR → Excel** button on the Backup page reads every custom detection rule live from the selected console (no backup required) and writes a two-sheet workbook. *Summary* carries the console, filters, totals and breakdowns by scope / status / severity / account, plus a count of site rules that duplicate an account rule. *STAR Rules* lists all 24 customer-relevant fields per rule with a frozen header, auto-filter already switched on, and colour-coded scope, status and severity. Honours the page's Account Name / Site Name filters.
+- **Targeted STAR rule cleanup** — `scripts/cleanup_duplicate_star_rules.py` gained `--site-name` / `--site-id` to limit a run to one site, and `--mode all-site-scoped` to remove *every* site-scoped rule at that site, whether or not a matching parent rule still exists — the cleanup for a site that a pre-2.1.9 build filled with copies of the tenant's global ruleset. It refuses to run without a site target, warns before deleting, and `--out` writes an audit list (in dry-run too).
+
+### Tests
+- Added coverage for saved-filter payload cleaning, STAR scope filtering in the global→site direction, the new cleanup modes, and the Excel export (value formatting, sorting, workbook structure). 160 tests total.
+
 ## v2.1.9 — 2026-07-28
 
 ### Bug Fixes
