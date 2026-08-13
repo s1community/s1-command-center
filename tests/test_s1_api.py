@@ -236,6 +236,55 @@ def test_get_role_template_hits_rbac_role_with_scope():
     assert params["accountIds"] == "A1"
 
 
+# ── tags ────────────────────────────────────────────────────────────────
+# Endpoint ("unified") tags are a different API from the named /tags objects.
+# The old code called a non-existent /endpoint-tags route, so endpoint tags
+# were silently never backed up and never restored (Joshua Tooley, 2026-08).
+
+def test_get_tags_passes_type_and_scope():
+    api = _client([FakeResp(200, {"data": [{"id": "t1", "name": "Servers"}]})])
+    tags = api.get_tags("firewall", {"siteIds": ["S1"]})
+    assert tags == [{"id": "t1", "name": "Servers"}]
+    method, url, params, _body = api.session.calls[0]
+    assert method == "GET" and url.endswith("/tags")
+    assert params["type"] == "firewall" and params["siteIds"] == ["S1"]
+
+
+def test_create_tag_uses_filter_data_envelope():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_tag({"siteIds": ["S1"]}, {"name": "Servers", "type": "firewall"})
+    method, url, _params, body = api.session.calls[0]
+    assert method == "POST" and url.endswith("/tags")
+    assert body == {"filter": {"siteIds": ["S1"]},
+                    "data": {"name": "Servers", "type": "firewall"}}
+
+
+def test_get_endpoint_tags_hits_agents_tags():
+    api = _client([FakeResp(200, {"data": [{"id": "e1", "key": "Dept"}]})])
+    assert api.get_endpoint_tags({"siteIds": ["S1"]}) == \
+        [{"id": "e1", "key": "Dept"}]
+    method, url, params, _body = api.session.calls[0]
+    assert method == "GET" and url.endswith("/agents/tags")
+    assert params["siteIds"] == ["S1"]
+
+
+def test_create_endpoint_tag_posts_tag_manager_with_scope():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_endpoint_tag({"key": "Dept", "type": "endpoints"},
+                            {"siteIds": ["S1"]})
+    method, url, _params, body = api.session.calls[0]
+    assert method == "POST" and url.endswith("/tag-manager")
+    assert body == {"data": {"key": "Dept", "type": "endpoints"},
+                    "filter": {"siteIds": ["S1"]}}
+
+
+def test_create_endpoint_tag_without_scope_omits_filter():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_endpoint_tag({"key": "Dept", "type": "endpoints"})
+    _method, _url, _params, body = api.session.calls[0]
+    assert body == {"data": {"key": "Dept", "type": "endpoints"}}
+
+
 # ── throttle telemetry ───────────────────────────────────────────────────
 
 def test_throttle_counter_increments_on_429():

@@ -542,13 +542,20 @@ class S1API:
     def create_auto_upgrade_policy(self, data: dict) -> dict:
         return self._post("/agents-policy/auto-upgrade-policies", body={"data": data})
 
-    # ── endpoint tags (unified) ────────────────────────────────────────
+    # ── endpoint tags (unified / "Tag Manager") ────────────────────────
+    # These are key/value endpoint tags, NOT the named /tags objects used by
+    # firewall, network-quarantine and device-inventory. There is no
+    # /endpoint-tags route in the v2.1 API: listing goes through
+    # GET /agents/tags and creating through POST /tag-manager.
 
     def get_endpoint_tags(self, scope: dict) -> list[dict]:
-        return self.get_all("/endpoint-tags", params=scope)
+        return self.get_all("/agents/tags", params=scope)
 
-    def create_endpoint_tag(self, data: dict) -> dict:
-        return self._post("/endpoint-tags", body={"data": data})
+    def create_endpoint_tag(self, data: dict, scope: dict | None = None) -> dict:
+        body: dict = {"data": data}
+        if scope:
+            body["filter"] = scope
+        return self._post("/tag-manager", body=body)
 
     # ── NQ control: create/set ─────────────────────────────────────────
 

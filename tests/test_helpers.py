@@ -22,6 +22,9 @@ from pages import (
     _FW_RULE_FIELDS,
     _rules_for_scope,
     _star_rules_for_scope,
+    _tags_for_scope,
+    _tag_payload,
+    _endpoint_tag_payload,
 )
 
 
@@ -186,6 +189,82 @@ def test_star_rules_for_scope_case_insensitive_and_empty():
         [{"name": "s", "scope": "SITE"}]
     assert _star_rules_for_scope(None, "site") == []
     assert _star_rules_for_scope([{"name": "x"}], "account") == []
+
+
+# ── tags (Joshua Tooley 2026-08: tags backed up but never restored) ─────
+# GET /tags returns inherited tags at every level, and the create endpoint
+# rejects the read-only `kind` field, so the payload has to be rebuilt.
+
+def test_tags_for_scope_site_drops_inherited_parent_tags():
+    tags = [
+        {"name": "GlobalTag", "scope": "global"},
+        {"name": "AcctTag", "scope": "account"},
+        {"name": "SiteTag", "scope": "site"},
+    ]
+    assert [t["name"] for t in _tags_for_scope(tags, "site")] == ["SiteTag"]
+
+
+def test_tags_for_scope_global_accepts_tenant_alias():
+    tags = [{"name": "g", "scope": "global"}, {"name": "t", "scope": "tenant"},
+            {"name": "a", "scope": "account"}]
+    assert sorted(t["name"] for t in _tags_for_scope(tags, "global")) == \
+        ["g", "t"]
+
+
+def test_tags_for_scope_keeps_tags_without_a_scope_field():
+    # Older backups (and some consoles) omit `scope` — dropping those would
+    # silently migrate nothing, which is the bug this guards against.
+    tags = [{"name": "Legacy"}, {"name": "Acct", "scope": "account"}]
+    assert [t["name"] for t in _tags_for_scope(tags, "site")] == ["Legacy"]
+
+
+def test_tags_for_scope_empty_input():
+    assert _tags_for_scope(None, "site") == []
+    assert _tags_for_scope([], "account") == []
+
+
+def test_tag_payload_drops_readonly_fields_and_stamps_scope():
+    src = {
+        "id": "1234", "name": "Servers", "description": "web tier",
+        "type": "firewall", "kind": "user", "scope": "account",
+        "scopeId": "999", "affectedScopes": [{"id": "1"}],
+        "linkedRules": 4, "createdAt": "2026-01-01T00:00:00Z",
+        "creator": "someone",
+    }
+    out = _tag_payload(src, "firewall", "site")
+    assert out == {"name": "Servers", "description": "web tier",
+                   "type": "firewall", "scope": "site"}
+
+
+def test_tag_payload_forces_the_restored_tag_type():
+    out = _tag_payload({"name": "Laptops"}, "device-inventory", "account")
+    assert out["type"] == "device-inventory"
+    assert out["scope"] == "account"
+
+
+def test_tag_payload_global_scope_value():
+    assert _tag_payload({"name": "x"}, "firewall", "global")["scope"] == \
+        "global"
+
+
+def test_tag_payload_does_not_mutate_source():
+    src = {"name": "x", "kind": "user", "scope": "account"}
+    _tag_payload(src, "firewall", "site")
+    assert src == {"name": "x", "kind": "user", "scope": "account"}
+
+
+def test_endpoint_tag_payload_is_key_value_typed_endpoints():
+    src = {"id": "7", "key": "Department", "value": "Finance",
+           "description": "dept tag", "createdAt": "2026-01-01",
+           "scope": "site", "creator": "admin"}
+    assert _endpoint_tag_payload(src) == {
+        "key": "Department", "value": "Finance",
+        "description": "dept tag", "type": "endpoints"}
+
+
+def test_endpoint_tag_payload_value_is_optional():
+    assert _endpoint_tag_payload({"key": "OnlyKey"}) == {
+        "key": "OnlyKey", "type": "endpoints"}
 
 
 # ── _scope ──────────────────────────────────────────────────────────────

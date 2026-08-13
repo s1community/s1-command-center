@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.10 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.2.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -349,6 +349,17 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.2.0 — 2026-08-13
+#### Bug Fixes
+- **Endpoint tags are finally restored** — selecting **tags_endpoint** backed the tags up, counted them in preview/validation and listed them in the restore report, but the restore loop had no branch for them at all: nothing was created on the destination and no error was raised, so a "restore tags" run looked successful while the destination stayed empty. Device-inventory tags now restore through `/tags` and unified endpoint tags through the Tag Manager API.
+- **Endpoint tag backup hit a route that doesn't exist** — unified endpoint tags were read from `/endpoint-tags`, which isn't a SentinelOne API endpoint. The 404 was swallowed as "n/a", so those tags were never in the backup file in the first place. Listing now uses `/agents/tags` and creation `POST /tag-manager`.
+- **Firewall / network-quarantine tag creation no longer sends read-only fields** — the create payload carried `kind`, which the console rejects, and omitted the tag scope. Payloads are now rebuilt from the writable fields only, with the destination scope stamped in (and a retry without it for consoles that don't accept it).
+- **Inherited tags no longer duplicate down the tree** — `GET /tags` returns the tags a scope inherits from its parents, so restoring a site re-created the account and global tags at site level. Tags are now filtered to the scope that actually owns them, matching the existing firewall / device-control / STAR behaviour.
+- **A tag step that does nothing now says so** — every selected tag group reports a row (`0` included) instead of silently disappearing from the restore report.
+
+#### Tests
+- New restore-coverage guard: every element the backup captures must have a restore branch (or a documented exception), so "backed up but never restored" can't ship again. Plus coverage for tag scope filtering, tag/endpoint-tag payload building, and the corrected API routes. 180 tests total.
 
 ### v2.1.10 — 2026-07-29
 #### Bug Fixes

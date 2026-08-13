@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.2.0 — 2026-08-13
+
+### Bug Fixes
+- **Endpoint tags are finally restored** — selecting **tags_endpoint** backed the tags up, counted them in the preview and validation diffs and listed them as a restore element, but the restore loop had no branch for them at all. Nothing was created on the destination and no error was raised, so a targeted "restore tags" run reported success while the destination console stayed empty (reported by Joshua Tooley). Device-inventory (Ranger) tags now restore through `POST /tags`, and unified endpoint tags through the Tag Manager API.
+- **Endpoint tag backup called a route that doesn't exist** — unified endpoint tags were read from `/endpoint-tags`, which is not a SentinelOne v2.1 endpoint. The resulting 404 was swallowed and shown as "n/a", so those tags never made it into the backup file. Listing now uses `GET /agents/tags` and creation `POST /tag-manager` (type `endpoints`, key/value pairs).
+- **Tag creation no longer sends read-only fields** — firewall and network-quarantine tag payloads still carried `kind`, which the create endpoint rejects, and dropped the tag's scope. Payloads are now rebuilt from the writable fields only (`name`, `description`, `type`, `key`, `value`) with the destination scope stamped in, plus a retry without `scope` for consoles that don't accept it.
+- **Inherited tags no longer duplicate down the tree** — `GET /tags` returns the tags a scope inherits from its parents, so restoring a site re-created the account and global tags at site level. Tags are filtered to the scope that owns them, matching the firewall / device-control / STAR behaviour. Tags with no `scope` field (older backups) are still restored.
+- **A tag step that does nothing now says so** — each selected tag group always records a row in the restore report (`0` included) instead of vanishing from it, and the log explains when tags were skipped as inherited.
+
+### Tests
+- New `tests/test_restore_coverage.py` guard: every element in `BACKUP_ELEMENTS` must have a restore branch or a documented exception, so "captured by backup, silently skipped by restore" fails CI. Verified it flags `tags_endpoint` against the previous build.
+- Added coverage for tag scope filtering, the `/tags` and Tag Manager payload builders, and the corrected endpoint-tag API routes. 180 tests total.
+
 ## v2.1.10 — 2026-07-29
 
 ### Bug Fixes

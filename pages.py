@@ -1366,8 +1366,17 @@ _GROUP_CREATE_FIELDS = {
     "name", "description", "inherits", "rank", "policy",
 }
 
+# Named /tags objects (firewall, network-quarantine, device-inventory).
+# `kind`, `affectedScopes` and `linkedRules` are read-only on the source and
+# are rejected by the create endpoint, so they must never be sent.
 _TAG_FIELDS = {
-    "name", "description", "type", "kind", "key", "value",
+    "name", "description", "type", "key", "value", "scope",
+}
+
+# Unified endpoint tags (Tag Manager) are key/value pairs on a different
+# API — POST /tag-manager with type "endpoints"; `key` is mandatory.
+_ENDPOINT_TAG_FIELDS = {
+    "key", "value", "description",
 }
 
 
@@ -1400,6 +1409,46 @@ def _star_rules_for_scope(rules: list, ntype: str) -> list:
     ok = {"global", "tenant"} if ntype == "global" else {ntype}
     return [r for r in (rules or [])
             if str(r.get("scope", "")).lower() in ok]
+
+
+def _tags_for_scope(tags: list, ntype: str) -> list:
+    """Tag variant of _rules_for_scope. GET /tags also returns the tags this
+    scope INHERITS from its parents, so a site query returns the account and
+    global tags too. Restoring that raw list re-creates parent tags at every
+    child scope. Tags carry the same `scope` field as rules ('global' /
+    'account' / 'site' / 'group', with 'tenant' as a global alias).
+
+    Tags with no `scope` field at all are kept: older backups (and some
+    consoles) omit it, and dropping them would silently migrate nothing."""
+    ok = {"global", "tenant"} if ntype == "global" else {ntype}
+    out = []
+    for tag in tags or []:
+        sc = str(tag.get("scope", "")).strip().lower()
+        if not sc or sc in ok:
+            out.append(tag)
+    return out
+
+
+def _tag_payload(tag: dict, tag_type: str, ntype: str) -> dict:
+    """Create-ready POST /tags `data` block for one backed-up tag.
+
+    Keeps only the writable fields (`kind`/`linkedRules`/`affectedScopes` and
+    the id/timestamp block are read-only and rejected), forces the tag type of
+    the group being restored, and re-stamps the scope to the destination node
+    so an account tag isn't recreated claiming site scope."""
+    body = _whitelist(tag or {}, _TAG_FIELDS)
+    body["type"] = tag_type
+    body["scope"] = "global" if ntype == "global" else ntype
+    return body
+
+
+def _endpoint_tag_payload(tag: dict) -> dict:
+    """Create-ready POST /tag-manager `data` block for a unified endpoint tag.
+    These are key/value pairs — `key` is mandatory, `value`/`description` are
+    optional — and the type is always 'endpoints'."""
+    body = _whitelist(tag or {}, _ENDPOINT_TAG_FIELDS)
+    body["type"] = "endpoints"
+    return body
 
 
 def _collect_star_rules(api, acct_filter: str = "",
@@ -1589,12 +1638,20 @@ def _summarize_node_payload(data: dict) -> list:
     tags = cfg.get("tags", {}) or {}
     ep_tags = list(tags.get("deviceInventory") or []) \
         + list(cfg.get("endpointTags") or [])
+    def _tag_name(t):
+        # Named /tags objects carry `name`; unified endpoint tags (Tag
+        # Manager) are key/value pairs instead.
+        if t.get("name"):
+            return _nm(t["name"])
+        key = t.get("key") or ""
+        val = t.get("value") or ""
+        return _nm(f"{key}={val}" if val else key)
+
     for items, cat in ((tags.get("firewall") or [], "tags_firewall"),
                        (tags.get("networkQuarantine") or [],
                         "tags_network_quarantine"),
                        (ep_tags, "tags_endpoint")):
-        out.append((cat, len(items),
-                    [_nm(t.get("name", "")) for t in items]))
+        out.append((cat, len(items), [_tag_name(t) for t in items]))
 
     # ── Collections (account / site level) ──
     def _name(x):
@@ -1807,6 +1864,8 @@ _SKIP_LABELS = {
     "dc-rules": "DC rules",
     "tags-fw": "FW tags",
     "tags-nq": "NQ tags",
+    "tags-ep": "device tags",
+    "ep-tags": "endpoint tags",
     "star": "STAR rules",
     "dv-filters": "saved filters",
     "overrides": "overrides",
@@ -6041,15 +6100,64 @@ class RestorePage(ctk.CTkFrame):
                             pass
 
             # ── Tags ──
-            tags = data.get("config", {}).get("tags", {})
+            cfg = data.get("config", {}) or {}
+            tags = cfg.get("tags", {}) or {}
+
+            def _create_tag(tag, tag_type):
+                """POST /tags for one backed-up tag. `scope` is sent so the tag
+                lands at this node's level (matching the reference CLI); if a
+                console rejects it, retry without it — the {filter} envelope
+                already targets the scope."""
+                body = _tag_payload(tag, tag_type, ntype)
+                try:
+                    return api.create_tag(scope, body)
+                except Exception as exc:
+                    if _is_exists_error(exc) or "scope" not in body:
+                        raise
+                    if "scope" not in _err_detail(exc).lower():
+                        raise
+                    body.pop("scope", None)
+                    return api.create_tag(scope, body)
+
+            def _restore_tags(label, items, tag_type):
+                """Restore one tag group. GET /tags returns inherited tags at
+                every level, so keep only the ones this node owns. Always
+                records a row — a silent no-op is how endpoint tags went
+                missing without any error (Joshua Tooley, 2026-08)."""
+                items = items or []
+                own = _tags_for_scope(items, ntype)
+                if not own:
+                    if items:
+                        log(f"  {label}: 0 tags at {ntype} scope "
+                            f"({len(items)} inherited skipped)")
+                    results.append((label, "0"))
+                    return
+                _r_bulk(label, own, lambda t: _create_tag(t, tag_type))
+
             if "tags_firewall" in elements:
-                ft = tags.get("firewall") or data.get("tags_firewall") or []
-                if ft: _r_bulk("tags-fw", ft,
-                               lambda t: api.create_tag(scope, _whitelist(t, _TAG_FIELDS)))
+                _restore_tags("tags-fw",
+                              tags.get("firewall") or data.get("tags_firewall"),
+                              "firewall")
             if "tags_network_quarantine" in elements:
-                nt = tags.get("networkQuarantine") or data.get("tags_nq") or []
-                if nt: _r_bulk("tags-nq", nt,
-                               lambda t: api.create_tag(scope, _whitelist(t, _TAG_FIELDS)))
+                _restore_tags("tags-nq",
+                              tags.get("networkQuarantine")
+                              or data.get("tags_nq"),
+                              "network-quarantine")
+            if "tags_endpoint" in elements:
+                # Device-inventory (Ranger) tags are named /tags objects…
+                _restore_tags("tags-ep",
+                              tags.get("deviceInventory")
+                              or data.get("tags_endpoint"),
+                              "device-inventory")
+                # …while unified endpoint tags are key/value pairs created
+                # through the Tag Manager API.
+                ep_tags = cfg.get("endpointTags") or []
+                if ep_tags:
+                    _r_bulk("ep-tags", ep_tags,
+                            lambda t: api.create_endpoint_tag(
+                                _endpoint_tag_payload(t), scope))
+                else:
+                    results.append(("ep-tags", "0"))
 
             # ── STAR ──
             star = data.get("star") or data.get("star_rules") or []
