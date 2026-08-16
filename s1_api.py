@@ -641,8 +641,8 @@ class S1API:
                     "The console accepted the request with an empty response "
                     "and the tag could not be read back, so it is unsafe to "
                     "retry — that would risk creating it twice. Check the "
-                    "tag on the console, or run scripts/audit_tags.py "
-                    "--probe against it.")
+                    "tag on the console, or open Tags (Operations → "
+                    "Inventory) and run 'Diagnose endpoint tags'.")
         if last_exc is not None:
             raise last_exc
         raise S1APIError(
@@ -651,7 +651,8 @@ class S1API:
             "The console returned success for every supported request shape "
             "and the tag is not there afterwards. This is what a token "
             "without the 'Tag Management.create' permission looks like on "
-            "this route. Run scripts/audit_tags.py --probe to confirm.")
+            "this route. Open Tags (Operations → Inventory) and run "
+            "'Diagnose endpoint tags' to confirm.")
 
     # ── NQ control: create/set ─────────────────────────────────────────
 

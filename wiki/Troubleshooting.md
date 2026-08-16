@@ -56,6 +56,13 @@
 - The restore creates locations before rules, but permission issues can block this
 - Ensure the token has full `Firewall.create` permission
 
+### Tags Restored, But the Destination Console Shows None
+- Open **Tags** (Operations → Inventory), pick DESTINATION, and click **Run Audit** — it lists what the console genuinely holds, so you know whether the tags are missing or just somewhere you didn't look
+- Tags can land at the account while you're looking at the site: the audit shows the level that owns each tag, and **Show inherited tags** reveals tags coming from a parent
+- If the audit finds no endpoint tags at all, click **Diagnose endpoint tags** (writes throwaway tags and deletes them) — it distinguishes a request the console rejects from one it accepts and discards
+- "Accepts and discards everything" almost always means the API token is missing `Tag Management.create`, which is a **separate permission** from `Tags.create` (see [[API Token Permissions]])
+- Endpoint tags are key/value pairs from Tag Manager; firewall, network-quarantine and device-inventory tags are different objects with different permissions, so one type restoring fine says nothing about the others
+
 ## Purple AI Issues
 
 ### "Purple AI returned an error"

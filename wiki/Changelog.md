@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2.2 — 2026-08-16
+
+### New
+- **The tag audit is a page in the app, not a script** — v2.2.1 shipped the audit as `scripts/audit_tags.py`, which meant cloning the repo and running Python to answer "did my tags actually land?". That's not something a user of a packaged app should ever have to do, so the script is gone and the **Tags** page (Operations → Inventory) does the work:
+  - **Run Audit** (read-only) walks the tenant and every matching account and site, listing what the console genuinely holds from both tag APIs — `GET /tags` for firewall / network-quarantine / device-inventory, `GET /agents/tags` for unified endpoint tags. Each scope's own tags are separated from the ones it inherits, so a restored site's tags aren't confused with its parent's. Filter by console, tag type, account and site; **Export Report** writes the whole audit to HTML/Excel/JSON.
+  - **Diagnose endpoint tags** (writes, confirmation required) answers why a create silently fails: it sends each request envelope `POST /tag-manager` may accept, using a throwaway `s1cc-probe-…` key, re-reads to see which one the console really stored, and deletes them again. It reports the shape that works, or that the tag landed at the wrong scope, or that every shape was accepted and discarded — the signature of a token without `Tag Management.create`. Any tag it can't delete is named so it can be removed by hand.
+- **An audit with no endpoint tags says what to do next** — finding zero endpoint tags in the audited scope is the exact symptom behind the v2.2.1 fix, so the summary calls it out and points at the diagnosis instead of leaving an empty table to interpret.
+
+### Changed
+- **Failed tag creates point at the page, not a script** — the restore's error detail now reads "open Tags (Operations → Inventory) and run 'Diagnose endpoint tags'".
+- **The Tags page used to show firewall and network-quarantine tags only**, tenant-wide, with no notion of scope or inheritance. It now covers all four tag types across the scope tree.
+
+### Tests
+- 24 tests for the audit core (`tag_audit.py`) against a fake console: scope enumeration and filters, own-vs-inherited splitting including the fallback when the API ignores `scope=`, per-type error isolation, row flattening, and all four probe outcomes (stored / wrong scope / no-op / rejected) plus probe cleanup and undeletable leftovers. 212 tests total.
+
 ## v2.2.1 — 2026-08-16
 
 ### Bug Fixes
@@ -8,7 +23,7 @@
 - **Failed endpoint tags are named in the report** — a key/value tag has no `name`, so the failure list identified it by its value alone ("Finance"). It now reads `key=value`.
 
 ### New
-- **`scripts/audit_tags.py`** — read-only audit of every tag object a console holds, per scope, separating a scope's own tags from the ones it inherits (`GET /tags?scope=…` for firewall / network-quarantine / device-inventory, `GET /agents/tags` for unified endpoint tags). Answers "did the restore actually land?" without re-running one. `--probe` (opt-in, writes) sends each candidate `POST /tag-manager` body with a throwaway key, re-reads to see which one the console really stores, reports whether it landed at the requested scope, and deletes what it created.
+- **Tag audit tooling** — a read-only audit of every tag object a console holds, per scope, separating a scope's own tags from the ones it inherits, plus an opt-in write probe that finds which `POST /tag-manager` body the console really stores. Shipped here as a command-line script; moved into the **Tags** page in v2.2.2.
 
 ### Docs
 - **Endpoint tags need their own token permission** — `Tag Management.view` / `Tag Management.create` are separate from `Tags.view` / `Tags.create` and are now listed in the API token permissions page. A token with only `Tags.create` restores firewall tags and leaves the endpoint tag list empty.

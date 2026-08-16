@@ -350,13 +350,21 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v2.2.2 — 2026-08-16
+#### New
+- **Tag audit, built into the app** — the v2.2.1 audit was a command-line script, which meant cloning the repo to answer "did my tags actually land?". It's now the **Tags** page (Operations → Inventory). **Run Audit** is read-only and lists every tag the chosen console really holds, per scope, from both tag APIs, separating each scope's own tags from inherited ones — filterable by tag type, account and site, and exportable. **Diagnose endpoint tags** writes (with confirmation): it tries each request format `POST /tag-manager` may accept using throwaway `s1cc-probe-…` keys, re-reads to see which one actually stored, deletes them again, and reports either the format that works or that the console accepts and discards everything — what a token without `Tag Management.create` looks like.
+- **An empty endpoint tag list explains itself** — if the audit finds none, the summary says so and points at the diagnosis rather than leaving a blank table.
+
+#### Changed
+- Restore errors for failed tag creates now point at the Tags page instead of a script.
+
 ### v2.2.1 — 2026-08-16
 #### Bug Fixes
 - **A tag create the console throws away is no longer reported as success** — `POST /tag-manager` answers `200` to a body it doesn't store, so a restore could report ~150 endpoint tags created against a destination whose Tag Manager list stayed empty. Creation now has to see a created object in the response (an id, a non-empty list, or a positive `affected` count) before it counts as new; anything else is an error on the node, not a phantom "N new". The request is also retried in each envelope the route accepts — but only after reading the tag back and confirming it isn't there, so a console that stores the tag and answers with an empty body can't end up with duplicates.
 - **Failed endpoint tags are named properly** — key/value tags have no `name`, so the failure list showed only the value ("Finance"). It now reads `key=value`.
 
 #### New
-- **Tag audit script** — `scripts/audit_tags.py` lists every tag a console actually holds, per scope, separating a scope's own tags from inherited ones, so you can confirm a restore landed without re-running it. `--probe` (opt-in, writes) finds which `POST /tag-manager` body the console really stores and cleans up after itself.
+- **Tag audit tooling** — lists every tag a console actually holds, per scope, separating a scope's own tags from inherited ones, so you can confirm a restore landed without re-running it. An opt-in write probe finds which `POST /tag-manager` body the console really stores and cleans up after itself. Shipped here as a script; moved into the Tags page in v2.2.2.
 
 #### Docs
 - **Endpoint tags need `Tag Management.create`** — a separate permission from `Tags.create`, now listed in the API token permissions page.
