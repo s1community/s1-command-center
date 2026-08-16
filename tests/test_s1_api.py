@@ -285,6 +285,93 @@ def test_create_endpoint_tag_without_scope_omits_filter():
     assert body == {"data": {"key": "Dept", "type": "endpoints"}}
 
 
+# ── POST /tag-manager: a 2xx is not proof of a create ────────────────────
+# The beijerrefab restore (2026-08-13) reported ~150 endpoint tags created
+# with zero errors against a console that ended up with none: the route
+# answers 200 to a body it does not store.
+
+def _ep_tag(api):
+    return api.create_endpoint_tag({"key": "Dept", "type": "endpoints"},
+                                   {"siteIds": ["S1"]})
+
+
+_NOT_THERE = FakeResp(200, {"data": []})       # read-back: no such tag
+
+
+def _posts(api):
+    return [c for c in api.session.calls if c[0] == "POST"]
+
+
+def test_empty_2xx_is_not_counted_as_a_created_tag():
+    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE,
+                   FakeResp(200, {"data": {}}), _NOT_THERE,
+                   FakeResp(200, {"data": {}}), _NOT_THERE])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert "created nothing" in str(exc.value)
+    # every supported shape was tried, each one confirmed absent first
+    assert len(_posts(api)) == 3
+
+
+def test_affected_zero_is_not_counted_as_a_created_tag():
+    api = _client([FakeResp(200, {"data": {"affected": 0}}), _NOT_THERE] * 3)
+    with pytest.raises(S1APIError):
+        _ep_tag(api)
+
+
+def test_affected_count_counts_as_a_created_tag():
+    api = _client([FakeResp(200, {"data": {"affected": 1}})])
+    assert _ep_tag(api) == {"data": {"affected": 1}}
+    assert len(api.session.calls) == 1
+
+
+def test_create_endpoint_tag_falls_back_to_the_shape_that_stores():
+    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE,
+                   FakeResp(200, {"data": [{"id": "new"}]})])
+    assert _ep_tag(api) == {"data": [{"id": "new"}]}
+    _m, _u, _p, body = _posts(api)[1]
+    assert body == {"data": [{"key": "Dept", "type": "endpoints"}],
+                    "filter": {"siteIds": ["S1"]}}
+
+
+def test_a_create_the_console_stored_but_did_not_echo_is_accepted():
+    # If the tag IS there afterwards, the empty response was just terse —
+    # sending the next shape at it would create a second copy.
+    api = _client([FakeResp(200, {}),
+                   FakeResp(200, {"data": [{"id": "e1", "key": "Dept"}]})])
+    _ep_tag(api)
+    assert len(_posts(api)) == 1
+    _m, _u, params, _b = api.session.calls[1]
+    assert params["key__contains"] == "Dept"
+    assert params["siteIds"] == ["S1"]
+
+
+def test_unconfirmable_create_is_never_retried():
+    # Read-back failed, so whether the tag was stored is unknown. Retrying
+    # would risk duplicating it — raise instead.
+    api = _client([FakeResp(200, {}), FakeResp(400, {})])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert "could not confirm" in str(exc.value)
+    assert len(_posts(api)) == 1
+
+
+def test_create_endpoint_tag_tries_next_shape_when_one_is_rejected():
+    api = _client([FakeResp(400, {"errors": [{"detail": "unknown field"}]}),
+                   FakeResp(201, {"data": {"id": "new"}})])
+    assert _ep_tag(api) == {"data": {"id": "new"}}
+
+
+def test_create_endpoint_tag_surfaces_already_exists_immediately():
+    # 409 is a real answer about this tag — it must not be retried as a
+    # shape problem, so the restore can report it as "exists", not "new".
+    api = _client([FakeResp(409, {"errors": [{"detail": "Already Exists"}]})])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert exc.value.status_code == 409
+    assert len(api.session.calls) == 1
+
+
 # ── throttle telemetry ───────────────────────────────────────────────────
 
 def test_throttle_counter_increments_on_429():

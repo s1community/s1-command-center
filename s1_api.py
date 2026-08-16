@@ -551,11 +551,107 @@ class S1API:
     def get_endpoint_tags(self, scope: dict) -> list[dict]:
         return self.get_all("/agents/tags", params=scope)
 
+    @staticmethod
+    def _created_something(resp: dict) -> bool:
+        """Did a create response describe an object that now exists?
+
+        A 2xx is not proof on its own: ``POST /tag-manager`` answers 200 to a
+        body it does not understand and stores nothing, which is how a restore
+        can report "150 new" against a console that ends up with none. A
+        response counts as a real create when it carries an object, a
+        non-empty list, or a positive ``affected`` count.
+        """
+        data = (resp or {}).get("data")
+        if isinstance(data, dict) and "affected" in data:
+            try:
+                return int(data.get("affected") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        return bool(data)
+
+    def endpoint_tag_exists(self, data: dict,
+                            scope: dict | None = None) -> Optional[bool]:
+        """Is this endpoint tag on the console? ``None`` = couldn't tell.
+
+        Used to confirm a create whose response didn't echo the tag. The
+        answer has to be three-valued: treating "I couldn't check" as "not
+        created" is what would make a retry duplicate the tag.
+        """
+        key = data.get("key")
+        if not key:
+            return None
+        params = dict(scope or {})
+        params["key__contains"] = key
+        try:
+            found = self.get_all("/agents/tags", params=params)
+        except S1APIError:
+            return None
+        want = data.get("value")
+        for tag in found or []:
+            if tag.get("key") != key:
+                continue
+            if not want or str(tag.get("value") or "") == str(want):
+                return True
+        return False
+
     def create_endpoint_tag(self, data: dict, scope: dict | None = None) -> dict:
-        body: dict = {"data": data}
+        """Create one unified endpoint tag, or raise — never a silent no-op.
+
+        The tag itself is ``{"type": "endpoints", "key": …, "value": …}``;
+        only the envelope around it is uncertain, so the accepted shapes are
+        tried in turn. A shape is only abandoned once the console has been
+        asked whether the tag exists — re-POSTing on an unconfirmed create
+        would duplicate a tag the console did store but didn't echo. A
+        request that is accepted and demonstrably stores nothing raises
+        instead of counting as a success.
+        """
+        bodies: list[dict] = []
         if scope:
-            body["filter"] = scope
-        return self._post("/tag-manager", body=body)
+            bodies += [
+                {"data": data, "filter": scope},
+                {"data": [data], "filter": scope},
+                {"data": {"tags": [data]}, "filter": scope},
+            ]
+        else:
+            bodies.append({"data": data})
+
+        key = data.get("key") or data.get("name") or "?"
+        last_exc: Optional[S1APIError] = None
+        for body in bodies:
+            try:
+                resp = self._post("/tag-manager", body=body)
+            except S1APIError as e:
+                last_exc = e
+                # A rejected shape (400 "unknown field" / 404) means try the
+                # next one. Anything else — notably 409 "already exists" — is
+                # a real answer about this tag and must surface.
+                if e.status_code in (400, 404):
+                    continue
+                raise
+            if self._created_something(resp):
+                return resp
+            # 2xx with nothing in it. Ask the console before sending another
+            # shape at it.
+            exists = self.endpoint_tag_exists(data, scope)
+            if exists is True:
+                return resp
+            if exists is None:
+                raise S1APIError(
+                    f"could not confirm endpoint tag '{key}' was created", 0,
+                    "The console accepted the request with an empty response "
+                    "and the tag could not be read back, so it is unsafe to "
+                    "retry — that would risk creating it twice. Check the "
+                    "tag on the console, or run scripts/audit_tags.py "
+                    "--probe against it.")
+        if last_exc is not None:
+            raise last_exc
+        raise S1APIError(
+            f"POST /tag-manager accepted endpoint tag '{key}' but created "
+            f"nothing", 0,
+            "The console returned success for every supported request shape "
+            "and the tag is not there afterwards. This is what a token "
+            "without the 'Tag Management.create' permission looks like on "
+            "this route. Run scripts/audit_tags.py --probe to confirm.")
 
     # ── NQ control: create/set ─────────────────────────────────────────
 

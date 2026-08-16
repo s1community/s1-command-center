@@ -1543,6 +1543,11 @@ def _err_detail(exc) -> str:
 
 def _item_id(item, label="") -> str:
     """Extract a human-readable identifier from a restore item."""
+    # Unified endpoint tags are key/value pairs with no name; reporting only
+    # the value ("Finance") doesn't say which tag failed.
+    if item.get("key") and not item.get("name"):
+        val = item.get("value")
+        return (f"{item['key']}={val}" if val else str(item["key"]))[:80]
     for key in ("name", "ruleName", "value", "s1ql",
                 "email", "fullName", "description", "type"):
         v = item.get(key)

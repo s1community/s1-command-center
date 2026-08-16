@@ -350,6 +350,17 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v2.2.1 — 2026-08-16
+#### Bug Fixes
+- **A tag create the console throws away is no longer reported as success** — `POST /tag-manager` answers `200` to a body it doesn't store, so a restore could report ~150 endpoint tags created against a destination whose Tag Manager list stayed empty. Creation now has to see a created object in the response (an id, a non-empty list, or a positive `affected` count) before it counts as new; anything else is an error on the node, not a phantom "N new". The request is also retried in each envelope the route accepts — but only after reading the tag back and confirming it isn't there, so a console that stores the tag and answers with an empty body can't end up with duplicates.
+- **Failed endpoint tags are named properly** — key/value tags have no `name`, so the failure list showed only the value ("Finance"). It now reads `key=value`.
+
+#### New
+- **Tag audit script** — `scripts/audit_tags.py` lists every tag a console actually holds, per scope, separating a scope's own tags from inherited ones, so you can confirm a restore landed without re-running it. `--probe` (opt-in, writes) finds which `POST /tag-manager` body the console really stores and cleans up after itself.
+
+#### Docs
+- **Endpoint tags need `Tag Management.create`** — a separate permission from `Tags.create`, now listed in the API token permissions page.
+
 ### v2.2.0 — 2026-08-13
 #### Bug Fixes
 - **Endpoint tags are finally restored** — selecting **tags_endpoint** backed the tags up, counted them in preview/validation and listed them in the restore report, but the restore loop had no branch for them at all: nothing was created on the destination and no error was raised, so a "restore tags" run looked successful while the destination stayed empty. Device-inventory tags now restore through `/tags` and unified endpoint tags through the Tag Manager API.

@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.2.1 — 2026-08-16
+
+### Bug Fixes
+- **A tag create that the console discards is no longer reported as success** — the v2.2.0 restore of the beijerrefab tenant reported ~150 endpoint tags created with zero errors against a destination whose Tag Manager list stayed empty (reported by Joshua Tooley). `POST /tag-manager` answers `200` to a request body it doesn't store, and the restore trusted the status code. Endpoint tag creation now has to see a created object (an id, a non-empty list, or a positive `affected` count) in the response before it counts as new: a console that accepts and discards the request produces a visible error on the node instead of a phantom "N new".
+- **Endpoint tag creation tries the shapes the route accepts — without ever duplicating a tag** — the scoped request is sent as `data` object, `data` array and `data.tags` array in turn, so a tenant that wants a different envelope migrates instead of silently doing nothing. A shape is only abandoned after the tag has been read back and confirmed absent (`GET /agents/tags?key__contains=…`): re-POSTing on an unconfirmed create is what would put three copies of every tag on a console that stores the tag but answers with an empty body. If the read-back itself fails, the create is reported as unconfirmed rather than retried. An `already exists` answer still surfaces immediately and is reported as "exists", never retried as a shape problem.
+- **Failed endpoint tags are named in the report** — a key/value tag has no `name`, so the failure list identified it by its value alone ("Finance"). It now reads `key=value`.
+
+### New
+- **`scripts/audit_tags.py`** — read-only audit of every tag object a console holds, per scope, separating a scope's own tags from the ones it inherits (`GET /tags?scope=…` for firewall / network-quarantine / device-inventory, `GET /agents/tags` for unified endpoint tags). Answers "did the restore actually land?" without re-running one. `--probe` (opt-in, writes) sends each candidate `POST /tag-manager` body with a throwaway key, re-reads to see which one the console really stores, reports whether it landed at the requested scope, and deletes what it created.
+
+### Docs
+- **Endpoint tags need their own token permission** — `Tag Management.view` / `Tag Management.create` are separate from `Tags.view` / `Tags.create` and are now listed in the API token permissions page. A token with only `Tags.create` restores firewall tags and leaves the endpoint tag list empty.
+
+### Tests
+- Regression coverage for the silent-success case: an empty `2xx`, `affected: 0`, shape fallback, the `409` passthrough, a create the console stored but didn't echo (must not re-POST), and a failed read-back (must not re-POST). 188 tests total.
+
 ## v2.2.0 — 2026-08-13
 
 ### Bug Fixes
