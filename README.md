@@ -350,6 +350,10 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v2.2.3 — 2026-08-19
+#### Bug Fixes
+- **Result tables drew their first row over the column headers** — a batched load numbered the first row one place too high, so it shared a grid row with the header. Affected every operations page; most visible on the Tags audit, where "own" appeared printed over "owned".
+
 ### v2.2.2 — 2026-08-16
 #### New
 - **Tag audit, built into the app** — the v2.2.1 audit was a command-line script, which meant cloning the repo to answer "did my tags actually land?". It's now the **Tags** page (Operations → Inventory). **Run Audit** is read-only and lists every tag the chosen console really holds, per scope, from both tag APIs, separating each scope's own tags from inherited ones — filterable by tag type, account and site, and exportable. **Diagnose endpoint tags** writes (with confirmation): it tries each request format `POST /tag-manager` may accept using throwaway `s1cc-probe-…` keys, re-reads to see which one actually stored, deletes them again, and reports either the format that works or that the console accepts and discards everything — what a token without `Tag Management.create` looks like.

@@ -67,7 +67,10 @@ class ResultTable(ctk.CTkScrollableFrame):
     def _load_next_batch(self):
         for _ in range(min(self._batch_size, len(self._pending_items))):
             item = self._pending_items.pop(0)
-            self.add_row(item, len(self._rows))
+            # No explicit index: add_row numbers rows 1-based after appending,
+            # so the header at grid row 0 stays visible. Passing the count
+            # from before the append put the first row on top of it.
+            self.add_row(item)
         if self._pending_items:
             self.after(1, self._load_next_batch)
 

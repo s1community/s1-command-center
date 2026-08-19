@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.2.3 — 2026-08-19
+
+### Bug Fixes
+- **Result tables no longer print their first row on top of the column headers** — every operations page renders through the same table, and a batched load numbered its first row from the count taken *before* that row was added, so it landed on the header's grid row. Tk draws both, so the header and the first result sat on top of each other — visible on the Tags audit as "own" printed over "owned", and present on every page that loads results this way. Rows now start below the header where they belong.
+
+### Tests
+- Five tests pin table row placement: headers keep grid row 0, the first result starts at row 1, a reload doesn't shift anything, and no two widgets share a row across batch boundaries. They skip cleanly where there's no display. 217 tests total.
+
 ## v2.2.2 — 2026-08-16
 
 ### New
