@@ -86,7 +86,7 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Threat Intel** — IOC management
 - **Ranger & Rogues** — Network discovery
 - **Remote Scripts** — Script library management
-- **Tags** — Tag management
+- **Tags** — Audit what tags a console actually holds, scope by scope, own vs inherited — plus a write probe that diagnoses why endpoint tag creation silently fails
 - **Raw API** — Direct API access for any endpoint
 
 ## Installation
@@ -208,7 +208,7 @@ Navigate to **Restore to Dest**:
 | Network Quarantine | ✅ | ✅ | Config and rules |
 | Tags (Firewall) | ✅ | ✅ | Firewall classification tags |
 | Tags (NQ) | ✅ | ✅ | Network quarantine tags |
-| Tags (Endpoint) | ✅ | ✅ | Device inventory tags |
+| Tags (Endpoint) | ✅ | ✅ | Two different objects: device inventory (Ranger) tags via `/tags`, and unified endpoint tags via the Tag Manager API — the latter needs its own token permission |
 | STAR Rules | ✅ | ✅ | Custom detection rules, auto-fixes expired dates |
 | Saved Filters | ✅ | ✅ | Deep Visibility saved queries |
 | Threat Intel | ✅ | ✅ | IOCs (batched, up to 5000) |
@@ -288,6 +288,10 @@ s1-command-center/
 ├── s1_api.py         # SentinelOne REST API client
 ├── config.py         # Configuration/context manager (saved connections)
 ├── export_utils.py   # HTML & Excel report generation
+├── migtools.py       # Pure migration logic (preflight, reconciliation, diffs)
+├── tag_audit.py      # Tag audit & endpoint-tag write probe (Tags page core)
+├── theme.py          # Colour palette, fonts, widget theming
+├── tests/            # pytest suite (no console required — fakes throughout)
 ├── requirements.txt  # Python dependencies
 └── s1cc.ico          # Application icon
 ```
@@ -325,8 +329,11 @@ The API token needs these minimum permissions for full backup/restore:
 | `DeviceControl.view`, `DeviceControl.edit` | Backup/restore device control |
 | `STAR.view`, `STAR.create` | Backup/restore custom rules |
 | `Settings.view`, `Settings.edit` | Backup/restore settings |
-| `Tags.view`, `Tags.create` | Backup/restore tags |
+| `Tags.view`, `Tags.create` | Backup/restore firewall / network-quarantine / device-inventory tags |
+| `Tag Management.view`, `Tag Management.create` | Backup/restore unified endpoint tags (Tag Manager) |
 | `ThreatIntelligence.view`, `ThreatIntelligence.create` | Backup/restore IOCs |
+
+> **Endpoint tags need their own permission.** `Tags.create` does *not* cover the Tag Manager route. A token with only `Tags.create` restores firewall tags and leaves the destination's endpoint tag list empty. If tags go missing after a restore, the **Tags** page audits what the console really holds and diagnoses which half is failing.
 
 > **Recommendation:** Use a Service User with **Admin** role for full access.
 
