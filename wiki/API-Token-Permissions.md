@@ -24,7 +24,8 @@
 | `DeviceControl.view` | Reading device control |
 | `STAR.view` | Reading custom detection rules |
 | `Settings.view` | Reading settings |
-| `Tags.view` | Reading tags |
+| `Tags.view` | Reading firewall / network-quarantine / device-inventory tags |
+| `Tag Management.view` | Reading unified endpoint tags (`GET /agents/tags`) |
 | `ThreatIntelligence.view` | Reading IOCs |
 
 ### Restore (Write)
@@ -40,8 +41,14 @@
 | `DeviceControl.edit` | Writing device control |
 | `STAR.create` | Creating custom rules |
 | `Settings.edit` | Writing settings |
-| `Tags.create` | Creating tags |
+| `Tags.create` | Creating firewall / network-quarantine / device-inventory tags |
+| `Tag Management.create` | Creating unified endpoint tags (`POST /tag-manager`) |
 | `ThreatIntelligence.create` | Creating IOCs |
+
+> **Endpoint tags need their own permission.** `Tags.create` does *not* cover
+> the Tag Manager route that unified endpoint tags are created through. A
+> token with only `Tags.create` can restore firewall tags and still leave the
+> destination's endpoint tag list empty.
 
 ### Operations Pages
 

@@ -13,10 +13,18 @@ from pages import (
     _whitelist,
     _scope,
     _clean_for_restore,
+    _drop_forensics_triggering,
+    _build_role_payload,
+    _role_scope_filter,
+    _overlay_role_permissions,
     explain_error,
     _is_exists_error,
     _FW_RULE_FIELDS,
     _rules_for_scope,
+    _star_rules_for_scope,
+    _tags_for_scope,
+    _tag_payload,
+    _endpoint_tag_payload,
 )
 
 
@@ -118,6 +126,147 @@ def test_rules_for_scope_drops_missing_scope_and_handles_empty():
     assert _rules_for_scope([], "account") == []
 
 
+# ── _star_rules_for_scope (custom detection rule leak guard) ────────────
+# /cloud-detection/rules returns inherited rules at every level, so an
+# account rule is also returned under each child site. Without scope
+# filtering the account rule is backed up (and re-created) under every site
+# (reported by DJ Wilhelm 2026-07). STAR rules carry a `scope` field too.
+
+def test_star_rules_for_scope_site_drops_inherited_account_rule():
+    # A site query returns the site's own rule AND the inherited account rule.
+    rules = [
+        {"name": "BruteForce", "scope": "account"},
+        {"name": "SiteOnly", "scope": "site"},
+    ]
+    assert [r["name"] for r in _star_rules_for_scope(rules, "site")] == \
+        ["SiteOnly"]
+
+
+def test_star_rules_for_scope_account_drops_descendant_site_rules():
+    # An account query returns account rules AND all descendant site rules.
+    rules = [
+        {"name": "AcctRule", "scope": "account"},
+        {"name": "SiteA", "scope": "site"},
+        {"name": "SiteB", "scope": "site"},
+    ]
+    assert [r["name"] for r in _star_rules_for_scope(rules, "account")] == \
+        ["AcctRule"]
+
+
+def test_star_rules_for_scope_site_drops_inherited_global_rules():
+    # ThomsonReuters: the source site CONTAINERS had 482 rules that all live at
+    # GLOBAL scope. The API returns them when querying the site, and a pre-2.1.9
+    # restore re-created every one of them at SITE scope on the migrated site
+    # (TR-Servers). A site node must keep only its own rules.
+    rules = [
+        {"name": "G1", "scope": "global"},
+        {"name": "G2", "scope": "global"},
+        {"name": "T1", "scope": "tenant"},
+        {"name": "AcctRule", "scope": "account"},
+        {"name": "SiteOwn", "scope": "site"},
+    ]
+    assert [r["name"] for r in _star_rules_for_scope(rules, "site")] == \
+        ["SiteOwn"]
+    # and a site with no rules of its own migrates nothing, rather than
+    # inheriting the whole tenant's ruleset
+    global_only = [{"name": "G1", "scope": "global"}]
+    assert _star_rules_for_scope(global_only, "site") == []
+
+
+def test_star_rules_for_scope_global_accepts_tenant_alias():
+    # Some consoles report the tenant level as 'global', others as 'tenant'.
+    rules = [
+        {"name": "g1", "scope": "global"},
+        {"name": "g2", "scope": "tenant"},
+        {"name": "a1", "scope": "account"},
+    ]
+    assert sorted(r["name"] for r in _star_rules_for_scope(rules, "global")) \
+        == ["g1", "g2"]
+
+
+def test_star_rules_for_scope_case_insensitive_and_empty():
+    assert _star_rules_for_scope([{"name": "s", "scope": "SITE"}], "site") == \
+        [{"name": "s", "scope": "SITE"}]
+    assert _star_rules_for_scope(None, "site") == []
+    assert _star_rules_for_scope([{"name": "x"}], "account") == []
+
+
+# ── tags (Joshua Tooley 2026-08: tags backed up but never restored) ─────
+# GET /tags returns inherited tags at every level, and the create endpoint
+# rejects the read-only `kind` field, so the payload has to be rebuilt.
+
+def test_tags_for_scope_site_drops_inherited_parent_tags():
+    tags = [
+        {"name": "GlobalTag", "scope": "global"},
+        {"name": "AcctTag", "scope": "account"},
+        {"name": "SiteTag", "scope": "site"},
+    ]
+    assert [t["name"] for t in _tags_for_scope(tags, "site")] == ["SiteTag"]
+
+
+def test_tags_for_scope_global_accepts_tenant_alias():
+    tags = [{"name": "g", "scope": "global"}, {"name": "t", "scope": "tenant"},
+            {"name": "a", "scope": "account"}]
+    assert sorted(t["name"] for t in _tags_for_scope(tags, "global")) == \
+        ["g", "t"]
+
+
+def test_tags_for_scope_keeps_tags_without_a_scope_field():
+    # Older backups (and some consoles) omit `scope` — dropping those would
+    # silently migrate nothing, which is the bug this guards against.
+    tags = [{"name": "Legacy"}, {"name": "Acct", "scope": "account"}]
+    assert [t["name"] for t in _tags_for_scope(tags, "site")] == ["Legacy"]
+
+
+def test_tags_for_scope_empty_input():
+    assert _tags_for_scope(None, "site") == []
+    assert _tags_for_scope([], "account") == []
+
+
+def test_tag_payload_drops_readonly_fields_and_stamps_scope():
+    src = {
+        "id": "1234", "name": "Servers", "description": "web tier",
+        "type": "firewall", "kind": "user", "scope": "account",
+        "scopeId": "999", "affectedScopes": [{"id": "1"}],
+        "linkedRules": 4, "createdAt": "2026-01-01T00:00:00Z",
+        "creator": "someone",
+    }
+    out = _tag_payload(src, "firewall", "site")
+    assert out == {"name": "Servers", "description": "web tier",
+                   "type": "firewall", "scope": "site"}
+
+
+def test_tag_payload_forces_the_restored_tag_type():
+    out = _tag_payload({"name": "Laptops"}, "device-inventory", "account")
+    assert out["type"] == "device-inventory"
+    assert out["scope"] == "account"
+
+
+def test_tag_payload_global_scope_value():
+    assert _tag_payload({"name": "x"}, "firewall", "global")["scope"] == \
+        "global"
+
+
+def test_tag_payload_does_not_mutate_source():
+    src = {"name": "x", "kind": "user", "scope": "account"}
+    _tag_payload(src, "firewall", "site")
+    assert src == {"name": "x", "kind": "user", "scope": "account"}
+
+
+def test_endpoint_tag_payload_is_key_value_typed_endpoints():
+    src = {"id": "7", "key": "Department", "value": "Finance",
+           "description": "dept tag", "createdAt": "2026-01-01",
+           "scope": "site", "creator": "admin"}
+    assert _endpoint_tag_payload(src) == {
+        "key": "Department", "value": "Finance",
+        "description": "dept tag", "type": "endpoints"}
+
+
+def test_endpoint_tag_payload_value_is_optional():
+    assert _endpoint_tag_payload({"key": "OnlyKey"}) == {
+        "key": "OnlyKey", "type": "endpoints"}
+
+
 # ── _scope ──────────────────────────────────────────────────────────────
 
 def test_scope_global():
@@ -148,6 +297,184 @@ def test_clean_strips_source_identifiers():
 def test_clean_keeps_payload_fields():
     obj = {"agentInterval": 5, "name": "X"}
     assert _clean_for_restore(obj) == {"agentInterval": 5, "name": "X"}
+
+
+# ── saved filters: scopeLevel must be dropped on restore ────────────────
+
+def test_clean_drops_saved_filter_scope_level():
+    # ThomsonReuters / TR-Containers: GET /filters returns the filter's own
+    # scope as `scopeLevel`. Saved filters are created with the DESTINATION
+    # scope in the request's `filter` envelope, so sending the source
+    # scopeLevel in `data` contradicts it and S1 rejects the create. Every
+    # migrated site then had no filters, so each dynamic group was created
+    # STATIC and Group Ranking came up empty.
+    flt = {
+        "id": "1338570161695321319",
+        "name": "Agents older than 22.x.x",
+        "filterFields": {"agentVersions": ["21.7.4.1043"]},
+        "scopeLevel": "account",
+        "scopeId": "647137276083260819",
+        "siteId": None,
+        "createdAt": "2022-01-21T20:59:57.988928Z",
+    }
+    cleaned = _clean_for_restore(flt)
+    # the scope is carried by the request envelope, never by the payload
+    for stale in ("scopeLevel", "scopeId", "siteId", "id", "createdAt"):
+        assert stale not in cleaned, f"{stale} must not be sent on create"
+    # ...but the parts that define the filter must survive
+    assert cleaned == {
+        "name": "Agents older than 22.x.x",
+        "filterFields": {"agentVersions": ["21.7.4.1043"]},
+    }
+
+
+# ── STAR rule: activeResponse must be dropped on restore ────────────────
+# The /cloud-detection/rules GET returns `activeResponse` but the create
+# endpoint rejects it: "data: dict_values(['activeResponse']): Unknown
+# field (code 4000010)". _clean_for_restore (used by the STAR create path)
+# must strip it.
+
+def test_clean_drops_star_active_response():
+    rule = {"name": "hunt", "s1ql": "x", "activeResponse": True}
+    cleaned = _clean_for_restore(rule)
+    assert "activeResponse" not in cleaned
+    assert cleaned["name"] == "hunt"
+    assert cleaned["s1ql"] == "x"
+
+
+# ── policy: forensicsAutoTriggering must be droppable on restore ─────────
+# The forensics auto-trigger block references RemoteOps forensic-script
+# profiles by ID; those profiles don't exist on the destination, so S1
+# rejects the policy with "Bad auto-triggering policy information provided
+# (code 4000010)". _drop_forensics_triggering removes the block for retry.
+
+def test_drop_forensics_triggering_removes_block():
+    policy = {
+        "agentUiOn": True,
+        "forensicsAutoTriggering": {
+            "windowsEnabled": True,
+            "windowsProfileId": "src-only-id",
+        },
+    }
+    stripped = _drop_forensics_triggering(policy)
+    assert "forensicsAutoTriggering" not in stripped
+    assert stripped["agentUiOn"] is True
+
+
+def test_drop_forensics_triggering_is_noop_when_absent():
+    policy = {"agentUiOn": True, "mitigationMode": "protect"}
+    assert _drop_forensics_triggering(policy) == policy
+
+
+def test_drop_forensics_triggering_does_not_mutate_input():
+    policy = {"forensicsAutoTriggering": {"windowsEnabled": True}}
+    _drop_forensics_triggering(policy)
+    assert "forensicsAutoTriggering" in policy
+
+
+def _dest_template():
+    """A destination create-ready role template (as GET /rbac/role returns).
+
+    Everything defaults to not-allowed; a create call fills these in. Note the
+    permission field is NOT `pages` (that name is only in the GET-role detail
+    and is rejected by the create schema)."""
+    return {
+        "name": None,
+        "description": None,
+        "roles": [
+            {"name": "Endpoints", "actions": [
+                {"name": "View", "isEnabled": False},
+                {"name": "Uninstall", "isEnabled": False},
+            ]},
+            {"name": "Policy", "actions": [
+                {"name": "View", "isEnabled": False},
+                {"name": "Edit", "isEnabled": False},
+            ]},
+        ],
+    }
+
+
+def _source_role():
+    """A source custom role as stored in a backup (GET /rbac/role/{id})."""
+    return {
+        "id": "src-role-id",
+        "name": "DJW-Viewer",
+        "description": "Read-only",
+        "scope": "account",
+        "predefinedRole": False,
+        "accountIds": ["SRC"],
+        "createdAt": "2024-01-01",
+        "usersInRole": 7,
+        "pages": [
+            {"name": "Endpoints", "actions": [
+                {"name": "View", "isEnabled": True},
+                {"name": "Uninstall", "isEnabled": False},
+            ]},
+            # A permission the destination doesn't expose — must be ignored.
+            {"name": "Ranger", "actions": [
+                {"name": "View", "isEnabled": True}]},
+        ],
+    }
+
+
+def test_build_role_payload_drops_read_only_and_scope_fields():
+    out = _build_role_payload(_source_role(), _dest_template())
+    # The exact fields S1 rejected in the bug report must be gone from `data`.
+    for k in ("id", "scope", "predefinedRole", "accountIds", "pages",
+              "createdAt", "usersInRole"):
+        assert k not in out
+
+
+def test_build_role_payload_keeps_name_and_description():
+    out = _build_role_payload(_source_role(), _dest_template())
+    assert out["name"] == "DJW-Viewer"
+    assert out["description"] == "Read-only"
+
+
+def test_build_role_payload_overlays_granted_permissions_onto_template():
+    out = _build_role_payload(_source_role(), _dest_template())
+    groups = {g["name"]: g for g in out["roles"]}
+    ep = {a["name"]: a["isEnabled"] for a in groups["Endpoints"]["actions"]}
+    assert ep == {"View": True, "Uninstall": False}
+    # Untouched destination group stays at its template default.
+    pol = {a["name"]: a["isEnabled"] for a in groups["Policy"]["actions"]}
+    assert pol == {"View": False, "Edit": False}
+
+
+def test_build_role_payload_ignores_permissions_absent_from_template():
+    out = _build_role_payload(_source_role(), _dest_template())
+    # "Ranger" is only in the source, never in the dest template → not added.
+    assert all(g["name"] != "Ranger" for g in out["roles"])
+
+
+def test_build_role_payload_does_not_mutate_inputs():
+    role = _source_role()
+    tmpl = _dest_template()
+    _build_role_payload(role, tmpl)
+    assert role["accountIds"] == ["SRC"] and role["id"] == "src-role-id"
+    # Template default must be untouched (deepcopy was used).
+    assert tmpl["roles"][0]["actions"][0]["isEnabled"] is False
+
+
+def test_build_role_payload_fallback_without_template():
+    out = _build_role_payload(_source_role(), None)
+    assert out == {"name": "DJW-Viewer", "description": "Read-only"}
+
+
+def test_role_scope_filter_prefers_site_then_account():
+    assert _role_scope_filter("A1") == {"accountIds": ["A1"]}
+    assert _role_scope_filter("A1", "S1") == {"siteIds": ["S1"]}
+    assert _role_scope_filter("") == {}
+
+
+def test_overlay_handles_alternate_bool_key_name():
+    # GET role uses isEnabled; a template variant might use isAllowed.
+    tmpl = {"roles": [{"name": "Endpoints", "actions": [
+        {"name": "View", "isAllowed": False}]}]}
+    role = {"pages": [{"name": "Endpoints", "actions": [
+        {"name": "View", "isEnabled": True}]}]}
+    _overlay_role_permissions(tmpl, role)
+    assert tmpl["roles"][0]["actions"][0]["isAllowed"] is True
 
 
 # ── explain_error ───────────────────────────────────────────────────────

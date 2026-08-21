@@ -16,6 +16,7 @@ from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
                  TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
+import tag_audit
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -66,7 +67,10 @@ class ResultTable(ctk.CTkScrollableFrame):
     def _load_next_batch(self):
         for _ in range(min(self._batch_size, len(self._pending_items))):
             item = self._pending_items.pop(0)
-            self.add_row(item, len(self._rows))
+            # No explicit index: add_row numbers rows 1-based after appending,
+            # so the header at grid row 0 stays visible. Passing the count
+            # from before the append put the first row on top of it.
+            self.add_row(item)
         if self._pending_items:
             self.after(1, self._load_next_batch)
 
@@ -920,12 +924,38 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
                      font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
-                     text="View exclusions and blocklist entries from the SOURCE console.",
+                     text="View exclusions and blocklist entries from the "
+                          "SOURCE console. Leave Account/Site blank for the "
+                          "global (tenant) scope, or name a scope to see its "
+                          "own entries.",
                      font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
-        btn = ctk.CTkFrame(self, fg_color="transparent")
-        btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        controls = ctk.CTkFrame(self, fg_color="transparent")
+        controls.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+
+        scope_row = ctk.CTkFrame(controls, fg_color="transparent")
+        scope_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(scope_row, text="Account:", font=(UI_FONT, 13)).pack(
+            side="left", padx=(0, 4))
+        self.acct_entry = ctk.CTkEntry(scope_row, width=180, height=34,
+                                       placeholder_text="(blank = tenant)")
+        self.acct_entry.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(scope_row, text="Site:", font=(UI_FONT, 13)).pack(
+            side="left", padx=(0, 4))
+        self.site_entry = ctk.CTkEntry(scope_row, width=180, height=34,
+                                       placeholder_text="(blank = all)")
+        self.site_entry.pack(side="left", padx=(0, 6))
+        _help_btn(scope_row,
+                  "Scope the query. Blank Account + Site = global (tenant) "
+                  "scope. Name an Account to see that account's exclusions; "
+                  "add a Site to narrow further. This is why 'Load' can come "
+                  "back empty: account/site-scoped exclusions aren't returned "
+                  "by the tenant-scope query."
+                  ).pack(side="left", padx=(0, 6))
+
+        btn = ctk.CTkFrame(controls, fg_color="transparent")
+        btn.pack(fill="x")
 
         ctk.CTkLabel(btn, text="Type:", font=(UI_FONT, 13)).pack(
             side="left", padx=(0, 4))
@@ -961,6 +991,44 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
                                  height=300)
         self.table.grid(row=3, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
+    def _resolve_scope(self, api):
+        acct_name = self.acct_entry.get().strip()
+        site_name = self.site_entry.get().strip()
+        acct_id = ""
+        if acct_name:
+            for a in (api.get_accounts() or []):
+                if (a.get("name") or "").strip().lower() == acct_name.lower():
+                    acct_id = str(a.get("id", ""))
+                    break
+            if not acct_id:
+                raise ValueError(f"Account '{acct_name}' not found on this "
+                                 f"console.")
+        if site_name:
+            sp = {"name": site_name}
+            if acct_id:
+                sp["accountIds"] = acct_id
+            sites = api.get_sites(params=sp) or []
+            match = next(
+                (s for s in sites
+                 if (s.get("name") or "").strip().lower() == site_name.lower()),
+                None)
+            if not match:
+                raise ValueError(f"Site '{site_name}' not found"
+                                 + (f" in account '{acct_name}'." if acct_name
+                                    else "."))
+            return {"siteIds": str(match.get("id", ""))}
+        if acct_id:
+            return {"accountIds": acct_id}
+        return {"tenant": "true"}
+
+    @staticmethod
+    def _scope_label(scope: dict) -> str:
+        if "siteIds" in scope:
+            return "site scope"
+        if "accountIds" in scope:
+            return "account scope"
+        return "tenant scope"
+
     def _load_excl(self):
         api = _pick_api(self.app)
         if not api:
@@ -968,16 +1036,20 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
         et = self.type_var.get()
 
         def do():
-            return api.get_exclusions({"tenant": "true"}, et)
+            scope = self._resolve_scope(api)
+            return scope, api.get_exclusions(scope, et)
 
-        def done(items):
-            self.info_lbl.configure(text=f"{len(items)} {et} exclusions")
-            cli_log(f"Retrieved {len(items)} '{et}' exclusions", "success")
+        def done(result):
+            scope, items = result
+            lbl = self._scope_label(scope)
+            self.info_lbl.configure(text=f"{len(items)} {et} exclusions ({lbl})")
+            cli_log(f"Retrieved {len(items)} '{et}' exclusions ({lbl})",
+                    "success")
             self.table.columns = ["type", "value", "osType",
                                   "description", "id"]
             self.table.load(items)
 
-        run_async(self, do, done)
+        run_async(self, do, done, self._load_fail)
 
     def _load_unified(self):
         api = _pick_api(self.app)
@@ -985,17 +1057,21 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
             return
 
         def do():
-            return api.get_unified_exclusions({"tenant": "true"})
+            scope = self._resolve_scope(api)
+            return scope, api.get_unified_exclusions(scope)
 
-        def done(items):
+        def done(result):
+            scope, items = result
+            lbl = self._scope_label(scope)
             self.info_lbl.configure(
-                text=f"{len(items)} unified exclusions")
-            cli_log(f"Retrieved {len(items)} unified exclusions", "success")
+                text=f"{len(items)} unified exclusions ({lbl})")
+            cli_log(f"Retrieved {len(items)} unified exclusions ({lbl})",
+                    "success")
             self.table.columns = ["exclusionName", "type", "value",
                                   "osType", "modeType", "id"]
             self.table.load(items)
 
-        run_async(self, do, done)
+        run_async(self, do, done, self._load_fail)
 
     def _load_block(self):
         api = _pick_api(self.app)
@@ -1003,16 +1079,25 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
             return
 
         def do():
-            return api.get_blocklist({"tenant": "true"})
+            scope = self._resolve_scope(api)
+            return scope, api.get_blocklist(scope)
 
-        def done(items):
-            self.info_lbl.configure(text=f"{len(items)} blocklist entries")
-            cli_log(f"Retrieved {len(items)} blocklist entries", "success")
+        def done(result):
+            scope, items = result
+            lbl = self._scope_label(scope)
+            self.info_lbl.configure(
+                text=f"{len(items)} blocklist entries ({lbl})")
+            cli_log(f"Retrieved {len(items)} blocklist entries ({lbl})",
+                    "success")
             self.table.columns = ["value", "source", "osType",
                                   "description", "id"]
             self.table.load(items)
 
-        run_async(self, do, done)
+        run_async(self, do, done, self._load_fail)
+
+    def _load_fail(self, e):
+        self.info_lbl.configure(text=str(e)[:80])
+        cli_log(f"Load failed: {e}", "error")
 
     def _export(self):
         stats = [{"label": "Total Items", "value": len(self.table._rows)}]
@@ -1548,75 +1633,356 @@ class RemoteScriptsPage(ctk.CTkFrame):
 # ═══════════════════════════════════════════════════════════════════════
 
 class TagsPage(ctk.CTkFrame):
+    """Ground truth for "the restore said it created tags, but are they
+    there?" — reads every tag object a console actually holds, per scope,
+    across both tag APIs, and can prove whether endpoint tag creation works
+    on this console at all."""
+
+    TYPE_CHOICES = ["all", "firewall", "network-quarantine",
+                    "device-inventory", "endpoint"]
+    MAX_TABLE_ROWS = 500
+
     def __init__(self, master, app, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.app = app
+        self._rows: list[dict] = []
+        self._busy = False
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(5, weight=1)
 
         ctk.CTkLabel(self, text="Tags",
                      font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
-        ctk.CTkLabel(self,
-                     text="View firewall and network quarantine tags.",
-                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
+        ctk.CTkLabel(
+            self,
+            text="Audit every tag a console actually holds — firewall, "
+                 "network quarantine, device inventory (Ranger) and unified "
+                 "endpoint tags — scope by scope, separating a scope's own "
+                 "tags from the ones it inherits.",
+            font=(UI_FONT, 13), text_color=TEXT_MUTED, justify="left",
+            wraplength=900).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
+        # ── Filters ──
+        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
+        card.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        card.grid_columnconfigure(1, weight=1)
+        card.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(card, text="Console:", font=(UI_FONT, 13)).grid(
+            row=0, column=0, padx=(14, 6), pady=(12, 6), sticky="w")
+        self.role_var = ctk.StringVar(value="DESTINATION")
+        ctk.CTkOptionMenu(card, values=["SOURCE", "DESTINATION"],
+                          variable=self.role_var, width=160, height=32).grid(
+            row=0, column=1, padx=(0, 12), pady=(12, 6), sticky="w")
+
+        ctk.CTkLabel(card, text="Tag type:", font=(UI_FONT, 13)).grid(
+            row=0, column=2, padx=(6, 6), pady=(12, 6), sticky="w")
+        self.type_var = ctk.StringVar(value="all")
+        ctk.CTkOptionMenu(card, values=self.TYPE_CHOICES,
+                          variable=self.type_var, width=180, height=32).grid(
+            row=0, column=3, padx=(0, 14), pady=(12, 6), sticky="w")
+
+        ctk.CTkLabel(card, text="Account:", font=(UI_FONT, 13)).grid(
+            row=1, column=0, padx=(14, 6), pady=6, sticky="w")
+        self.acct_filter = ctk.CTkEntry(card, placeholder_text="(blank = all)",
+                                        height=32)
+        self.acct_filter.grid(row=1, column=1, padx=(0, 12), pady=6,
+                              sticky="ew")
+        ctk.CTkLabel(card, text="Site:", font=(UI_FONT, 13)).grid(
+            row=1, column=2, padx=(6, 6), pady=6, sticky="w")
+        self.site_filter = ctk.CTkEntry(card, placeholder_text="(blank = all)",
+                                        height=32)
+        self.site_filter.grid(row=1, column=3, padx=(0, 14), pady=6,
+                              sticky="ew")
+
+        opts = ctk.CTkFrame(card, fg_color="transparent")
+        opts.grid(row=2, column=0, columnspan=4, sticky="w", padx=14,
+                  pady=(2, 12))
+        self.groups_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="Include group scopes",
+                        variable=self.groups_var, font=(UI_FONT, 12)).pack(
+            side="left", padx=(0, 6))
+        _help_btn(opts,
+                  "Groups inherit their site's tags, so this is off by "
+                  "default — on a large tenant it adds a request per group "
+                  "and makes the audit much slower.").pack(
+            side="left", padx=(0, 16))
+        self.inherited_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="Show inherited tags",
+                        variable=self.inherited_var, font=(UI_FONT, 12)).pack(
+            side="left", padx=(0, 6))
+        _help_btn(opts,
+                  "The tags API returns everything visible at a scope, "
+                  "including tags that belong to a parent account or to the "
+                  "tenant. By default only the tags each scope actually owns "
+                  "are listed, so a restored site's tags aren't confused "
+                  "with inherited ones.").pack(side="left")
+
+        # ── Actions ──
         btn = ctk.CTkFrame(self, fg_color="transparent")
-        btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
-        ctk.CTkLabel(btn, text="Type:", font=(UI_FONT, 13)).pack(
-            side="left", padx=(0, 4))
-        self.tag_type = ctk.CTkOptionMenu(btn,
-                                          values=["firewall", "network-quarantine"],
-                                          width=180, height=34)
-        self.tag_type.pack(side="left", padx=(0, 6))
-        ctk.CTkButton(btn, text="Load Tags", height=34,
-                      fg_color=GREEN, hover_color=GREEN_HOVER,
-                      command=self._load).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btn, text="Export Report", height=34,
-                      fg_color=BRAND,
-                      command=self._export).pack(side="left", padx=(0, 4))
+        btn.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
+        self._run_btn = ctk.CTkButton(btn, text="▶ Run Audit", height=34,
+                                      fg_color=GREEN, hover_color=GREEN_HOVER,
+                                      font=(UI_FONT, 13, "bold"),
+                                      command=self._run_audit)
+        self._run_btn.pack(side="left", padx=(0, 4))
         _help_btn(btn,
-                  "Load tags by type: Firewall or Network Quarantine. "
-                  "Requires a license that includes these features."
-                  ).pack(side="left", padx=(0, 6))
+                  "Read-only. Lists every tag object the selected console "
+                  "holds at each scope, from both tag APIs: GET /tags for "
+                  "firewall / network-quarantine / device-inventory, and "
+                  "GET /agents/tags for unified endpoint tags."
+                  ).pack(side="left", padx=(0, 10))
+        self._export_btn = ctk.CTkButton(btn, text="Export Report", height=34,
+                                         fg_color=BRAND,
+                                         command=self._export)
+        self._export_btn.pack(side="left", padx=(0, 10))
+        self._probe_btn = ctk.CTkButton(
+            btn, text="🩺 Diagnose endpoint tags", height=34,
+            fg_color=WARN, hover_color=WARN_HOVER,
+            font=(UI_FONT, 13, "bold"), command=self._diagnose)
+        self._probe_btn.pack(side="left", padx=(0, 4))
+        _help_btn(btn,
+                  "Use when a restore reported endpoint tags as created but "
+                  "the console shows none.\n\n"
+                  "WRITES: creates a handful of throwaway tags "
+                  "(key 's1cc-probe-…'), one per request format the API may "
+                  "accept, re-reads each to see which one the console really "
+                  "stores, then deletes them again. It reports either the "
+                  "format that works, or that the console accepts and "
+                  "discards every one — which is what a token without the "
+                  "'Tag Management.create' permission looks like."
+                  ).pack(side="left", padx=(0, 10))
         self.info_lbl = ctk.CTkLabel(btn, text="", font=(UI_FONT, 12),
                                      text_color=TEXT_MUTED)
         self.info_lbl.pack(side="left", padx=8)
 
-        self.table = ResultTable(self,
-                                 ["name", "type", "scope", "id"],
-                                 height=300)
-        self.table.grid(row=3, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        self._summary = ctk.CTkLabel(
+            self,
+            text="Pick a console and run an audit. Nothing is written unless "
+                 "you use Diagnose endpoint tags.",
+            font=(UI_FONT, 12), text_color=TEXT_MUTED, anchor="w",
+            justify="left", wraplength=900)
+        self._summary.grid(row=4, column=0, sticky="ew", padx=20, pady=(4, 2))
 
-    def _load(self):
-        api = _pick_api(self.app)
-        if not api:
+        self.table = ResultTable(
+            self, ["scope", "level", "type", "tag", "owned", "id"],
+            height=300)
+        self.table.grid(row=5, column=0, sticky="nsew", padx=20, pady=(4, 12))
+
+    # ── helpers ────────────────────────────────────────────────────────
+    def _api(self):
+        role = "source" if self.role_var.get() == "SOURCE" else "destination"
+        return _pick_api(self.app, role)
+
+    def _ui(self, fn):
+        """Run `fn` on the Tk thread — worker threads must not touch widgets."""
+        self.after(0, fn)
+
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        for b in (self._run_btn, self._export_btn, self._probe_btn):
+            b.configure(state=state)
+
+    # ── audit ──────────────────────────────────────────────────────────
+    def _run_audit(self):
+        api = self._api()
+        if not api or self._busy:
             return
-        tt = self.tag_type.get()
+        acct = self.acct_filter.get().strip()
+        site = self.site_filter.get().strip()
+        groups = bool(self.groups_var.get())
+        inherited = bool(self.inherited_var.get())
+        ttype = self.type_var.get()
+        console = self.role_var.get()
+
+        self._set_busy(True)
+        self.info_lbl.configure(text="Auditing…", text_color=TEXT_MUTED)
+        cli_log(f"Tag audit started on {console} "
+                f"(account={acct or 'all'}, site={site or 'all'})", "info")
 
         def do():
-            return api.get_tags(tt, {"tenant": "true"})
+            scopes = tag_audit.enumerate_scopes(api, acct, site, groups)
+            self._ui(lambda: self.info_lbl.configure(
+                text=f"0/{len(scopes)} scopes…"))
+            rows: list[dict] = []
+            errors: dict = {}
+            routes: list[str] = []
+            ep_total = 0
+            for i, (ntype, node_id, path) in enumerate(scopes, 1):
+                found = tag_audit.read_scope(api, ntype, node_id)
+                rows += tag_audit.scope_rows(ntype, path, found, inherited,
+                                             ttype)
+                ep_total += len(found["endpoint"])
+                if found["endpoint_route"] not in routes:
+                    routes.append(found["endpoint_route"])
+                for what, err in found["errors"].items():
+                    errors.setdefault(what, err)
+                self._ui(lambda n=i, t=len(scopes): self.info_lbl.configure(
+                    text=f"{n}/{t} scopes…"))
+            return {"rows": rows, "errors": errors, "scopes": len(scopes),
+                    "endpoint_total": ep_total, "type": ttype,
+                    "endpoint_routes": [r for r in routes if r]}
 
-        def done(tags):
-            self.info_lbl.configure(text=f"{len(tags)} tags")
-            self.table.load(tags)
-            cli_log(f"Retrieved {len(tags)} tags ({tt})", "success")
+        run_async(self, do, self._audit_done, self._audit_failed)
 
-        def fail(e):
-            code = getattr(e, "status_code", 0)
-            if code == 403:
-                self.info_lbl.configure(text="No permission (403)")
-                cli_log(f"Tags endpoint returned 403 — your token or console "
-                        f"license may not include Firewall/NQ tags", "warning")
+    def _audit_done(self, res):
+        self._set_busy(False)
+        rows = res["rows"]
+        self._rows = rows
+        owned = [r for r in rows if r["owned"] == "own"]
+        self.table.load(rows[:self.MAX_TABLE_ROWS])
+        extra = (f" (showing first {self.MAX_TABLE_ROWS})"
+                 if len(rows) > self.MAX_TABLE_ROWS else "")
+        self.info_lbl.configure(text=f"{len(rows)} rows{extra}",
+                                text_color=TEXT_MUTED)
+
+        by_type: dict = {}
+        for r in owned:
+            by_type[r["type"]] = by_type.get(r["type"], 0) + 1
+        parts = [f"{v} {k}" for k, v in sorted(by_type.items())] or ["none"]
+        text = (f"{len(owned)} tags owned across {res['scopes']} scope(s): "
+                f"{', '.join(parts)}.")
+        colour, level = TEXT_MUTED, "success"
+
+        # The case this page exists for: the restore said it created endpoint
+        # tags and the console holds none.
+        if res["type"] in ("all", "endpoint") and not res["endpoint_total"]:
+            routes = ", ".join(res["endpoint_routes"]) or "no route answered"
+            text += (f"  No unified endpoint tags were found in this scope "
+                     f"({routes}). If a restore reported creating them, run "
+                     f"Diagnose endpoint tags: it distinguishes a write the "
+                     f"console discarded from one it stored somewhere this "
+                     f"tool doesn't read.")
+            colour, level = WARN, "warning"
+        if res["errors"]:
+            text += "  Errors: " + "; ".join(
+                f"{k}: {v}" for k, v in res["errors"].items())
+            colour, level = ACCENT, "warning"
+        self._summary.configure(text=text, text_color=colour)
+        cli_log(f"Tag audit finished — {text}", level)
+
+    def _audit_failed(self, exc):
+        self._set_busy(False)
+        self.info_lbl.configure(text=f"Failed: {str(exc)[:60]}",
+                                text_color=ACCENT)
+        code = getattr(exc, "status_code", 0)
+        if code == 403:
+            self._summary.configure(
+                text="403 from the console — this token cannot read tags. "
+                     "Endpoint tags need 'Tag Management.view'; the other "
+                     "types need 'Tags.view'.", text_color=ACCENT)
+        else:
+            self._summary.configure(text=f"Audit failed: {exc}",
+                                    text_color=ACCENT)
+
+    # ── endpoint-tag write probe ───────────────────────────────────────
+    def _diagnose(self):
+        api = self._api()
+        if not api or self._busy:
+            return
+        acct = self.acct_filter.get().strip()
+        site = self.site_filter.get().strip()
+
+        def resolve_scope():
+            scopes = tag_audit.enumerate_scopes(api, acct, site, False)
+            # The tenant scope can't show whether a scope filter is honoured,
+            # so probe the most specific real scope the filters select.
+            return next((s for s in reversed(scopes) if s[0] != "global"),
+                        scopes[0])
+
+        try:
+            ntype, node_id, path = resolve_scope()
+        except Exception as exc:
+            cli_log(f"Could not resolve a scope to diagnose: {exc}", "error")
+            return
+
+        if not messagebox.askyesno(
+                "Diagnose endpoint tags",
+                f"This writes to the {self.role_var.get()} console.\n\n"
+                f"Scope: {path}\n\n"
+                f"{len(tag_audit.PROBE_SHAPES)} throwaway tags will be "
+                f"created (key 's1cc-probe-…'), checked, and then deleted "
+                f"again. Any that can't be deleted are named in the output "
+                f"so you can remove them by hand.\n\nContinue?"):
+            return
+
+        self._set_busy(True)
+        self.info_lbl.configure(text="Diagnosing…", text_color=WARN)
+        stamp = datetime.now().strftime("%H%M%S")
+        cli_log(f"Endpoint tag diagnosis on {self.role_var.get()} "
+                f"at {ntype} '{path}':", "info")
+
+        def do():
+            return tag_audit.probe_endpoint_tag_shapes(
+                api, ntype, node_id, stamp,
+                log=lambda m: self._ui(lambda: cli_log(m, "info")))
+
+        def done(res):
+            self._set_busy(False)
+            if res["winner"] and not res["wrong_scope"]:
+                msg = (f"This console stores endpoint tags sent as: "
+                       f"{res['winner']}, readable via {res['found_via']}. "
+                       f"Creation works here — a restore that reports errors "
+                       f"is hitting something else.")
+                colour, level = GREEN, "success"
+            elif res["winner"]:
+                msg = (f"The console stored the tag ({res['winner']}) but "
+                       f"ignored the scope filter, so tags land somewhere "
+                       f"other than {path} — only {res['found_via']} sees "
+                       f"it.")
+                colour, level = WARN, "warning"
+            elif res["unreadable"]:
+                msg = (f"{tag_audit.CLAIMED_BUT_UNREADABLE}  Search for: "
+                       f"{', '.join(res['probe_keys'])}.")
+                colour, level = WARN, "warning"
             else:
-                self.info_lbl.configure(text=f"Error: {e}")
+                msg = tag_audit.NO_SHAPE_WORKED
+                colour, level = ACCENT, "error"
+            if res["leftovers"]:
+                msg += (f"  Could not delete probe tag(s): "
+                        f"{', '.join(res['leftovers'])} — remove them by "
+                        f"hand (key starts with 's1cc-probe-{stamp}').")
+                colour = ACCENT
+            self.info_lbl.configure(text="Diagnosis complete",
+                                    text_color=colour)
+            self._summary.configure(text=msg, text_color=colour)
+            cli_log(msg, level)
+            if messagebox.askyesno(
+                    "Endpoint tag diagnosis",
+                    f"{msg}\n\nSave the full diagnosis — what the console "
+                    f"answered for each request format — as a report?"):
+                export_report(
+                    "Endpoint Tag Diagnosis",
+                    ["shape", "outcome", "found_via", "response", "detail"],
+                    res["results"],
+                    stats=[{"label": "Console", "value": self.role_var.get()},
+                           {"label": "Scope", "value": path},
+                           {"label": "Verdict", "value": msg}],
+                    subtitle=f"Probe keys: {', '.join(res['probe_keys'])}")
+
+        def fail(exc):
+            self._set_busy(False)
+            self.info_lbl.configure(text=f"Failed: {str(exc)[:60]}",
+                                    text_color=ACCENT)
+            cli_log(f"Endpoint tag diagnosis failed: {exc}", "error")
 
         run_async(self, do, done, fail)
 
     def _export(self):
-        stats = [{"label": "Total Tags", "value": len(self.table._rows)}]
-        export_report("Tags", self.table.columns, self.table._rows, stats=stats)
+        if not self._rows:
+            cli_log("Run an audit first — there is nothing to export.",
+                    "warning")
+            return
+        owned = sum(1 for r in self._rows if r["owned"] == "own")
+        stats = [
+            {"label": "Console", "value": self.role_var.get()},
+            {"label": "Tags owned", "value": owned},
+            {"label": "Rows", "value": len(self._rows)},
+        ]
+        export_report("Tag Audit", self.table.columns, self._rows,
+                      stats=stats)
 
     def on_show(self):
         pass

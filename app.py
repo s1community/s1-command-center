@@ -75,10 +75,6 @@ class _ToolTip:
         y = self.widget.winfo_rooty() - 4
         self._tip = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
-        try:
-            tw.wm_attributes("-topmost", True)
-        except tk.TclError:
-            pass
         tw.wm_geometry(f"+{x}+{y}")
         border = tk.Frame(tw, background=theme.tkcolor(BORDER))
         border.pack()
@@ -856,6 +852,24 @@ class SettingsPage(ctk.CTkFrame):
 
     def _on_keyring(self, var):
         on = bool(var.get())
+        # macOS keychain on an UNSIGNED build re-prompts for permission on
+        # every launch and after every update (the "Always Allow" ACL is tied
+        # to the app's code signature, which changes each build). Warn before
+        # enabling so the prompt isn't a nasty surprise; revert the switch if
+        # the operator backs out. Other platforms don't have this problem.
+        if on:
+            import sys
+            if sys.platform == "darwin" and not messagebox.askyesno(
+                    "Store tokens in macOS Keychain?",
+                    "On unsigned builds, macOS will ask for keychain "
+                    "permission every time the app launches (and again after "
+                    "every update).\n\n"
+                    "Tokens are otherwise kept in an owner-only (0600) file "
+                    "with no prompts. Keep this OFF unless you specifically "
+                    "want Keychain storage.\n\n"
+                    "Enable Keychain storage anyway?"):
+                var.set(False)   # revert the toggle — user declined
+                return
         self.app.settings.set("enable_keyring", on)
         if on:
             os.environ["S1CC_ENABLE_KEYRING"] = "1"

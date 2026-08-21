@@ -56,6 +56,14 @@
 - The restore creates locations before rules, but permission issues can block this
 - Ensure the token has full `Firewall.create` permission
 
+### Tags Restored, But the Destination Console Shows None
+- Open **Tags** (Operations → Inventory), pick DESTINATION, and click **Run Audit** — it lists what the console genuinely holds, so you know whether the tags are missing or just somewhere you didn't look
+- Tags can land at the account while you're looking at the site: the audit shows the level that owns each tag, and **Show inherited tags** reveals tags coming from a parent
+- If the audit finds no endpoint tags at all, click **Diagnose endpoint tags** (writes throwaway tags and deletes them) — it distinguishes a request the console rejects, from one it accepts and discards, from one it stores where this tool isn't looking
+- **If the diagnosis says the console claimed a create nothing can read**, search the console's own tag list for `s1cc-probe-`. Finding them means the write works and the listing route is wrong — those probe tags must then be deleted by hand, since cleanup can only remove what it can find
+- **If nothing was stored and nothing was claimed**, check that the token has `Tag Management.create` — a **separate permission** from `Tags.create` (see [[API Token Permissions]]). Note that a global-admin service user with Unified Tags granted has still shown this symptom, so a granted permission doesn't close the question; save the diagnosis report and compare what the console answered for each request format
+- Endpoint tags are key/value pairs from Tag Manager; firewall, network-quarantine and device-inventory tags are different objects with different permissions, so one type restoring fine says nothing about the others
+
 ## Purple AI Issues
 
 ### "Purple AI returned an error"

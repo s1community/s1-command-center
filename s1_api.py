@@ -5,6 +5,7 @@ import re
 import requests
 import time as _time
 import threading
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 from requests.adapters import HTTPAdapter
@@ -23,6 +24,24 @@ class S1APIError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(self.message)
+
+
+def created_something(resp: dict) -> bool:
+    """Did a create response describe an object that now exists?
+
+    A 2xx is not proof on its own: ``POST /tag-manager`` answers 200 to a
+    body it does not understand and stores nothing, which is how a restore
+    can report "150 new" against a console that ends up with none. A
+    response counts as a real create when it carries an object, a non-empty
+    list, or a positive ``affected`` count.
+    """
+    data = (resp or {}).get("data")
+    if isinstance(data, dict) and "affected" in data:
+        try:
+            return int(data.get("affected") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+    return bool(data)
 
 
 class S1API:
@@ -55,6 +74,7 @@ class S1API:
             "Authorization": _auth_header(self.api_token),
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
         })
         # Rate-limit telemetry. A big backup/restore that slows down is almost
         # always the API throttling us (HTTP 429); these counters let the UI
@@ -140,6 +160,11 @@ class S1API:
                                  resp.status_code, detail)
             except S1APIError:
                 raise
+            except (requests.exceptions.ContentDecodingError, zlib.error) as e:
+                last_exc = ("response decoding failed; console returned invalid "
+                            f"compressed data: {e}")
+                if attempt < retries - 1:
+                    continue
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError,
                     ConnectionResetError, ConnectionAbortedError) as e:
                 last_exc = e
@@ -494,11 +519,22 @@ class S1API:
 
     # ── RBAC roles ─────────────────────────────────────────────────────
 
-    def create_role(self, data: dict) -> dict:
-        return self._post("/rbac/role", body={"data": data})
+    def create_role(self, data: dict, scope_filter: Optional[dict] = None) -> dict:
+        # S1 `RbacCreateRoleSchema` requires a top-level `filter` that names the
+        # target scope (accountIds / siteIds / tenant); the scope must NOT be
+        # embedded in `data` (it rejects `scope`/`accountIds` there as "Unknown
+        # field"). Mirrors the {filter, data} envelope used by firewall/AD.
+        body: dict = {"data": data}
+        if scope_filter:
+            body["filter"] = scope_filter
+        return self._post("/rbac/role", body=body)
 
-    def get_role_template(self) -> dict:
-        return self.get_data("/rbac/role/template")
+    def get_role_template(self, params: Optional[dict] = None) -> dict:
+        # "Get template for new role" is GET /rbac/role (scoped by
+        # accountIds/siteIds/tenant), NOT /rbac/role/template. The returned
+        # object is the create-ready `data` skeleton for that scope, so it
+        # already carries the destination's licensed permission taxonomy.
+        return self.get_data("/rbac/role", params=params)
 
     # ── service users ──────────────────────────────────────────────────
 
@@ -524,13 +560,104 @@ class S1API:
     def create_auto_upgrade_policy(self, data: dict) -> dict:
         return self._post("/agents-policy/auto-upgrade-policies", body={"data": data})
 
-    # ── endpoint tags (unified) ────────────────────────────────────────
+    # ── endpoint tags (unified / "Tag Manager") ────────────────────────
+    # These are key/value endpoint tags, NOT the named /tags objects used by
+    # firewall, network-quarantine and device-inventory. There is no
+    # /endpoint-tags route in the v2.1 API: listing goes through
+    # GET /agents/tags and creating through POST /tag-manager.
 
     def get_endpoint_tags(self, scope: dict) -> list[dict]:
-        return self.get_all("/endpoint-tags", params=scope)
+        return self.get_all("/agents/tags", params=scope)
 
-    def create_endpoint_tag(self, data: dict) -> dict:
-        return self._post("/endpoint-tags", body={"data": data})
+    @staticmethod
+    def _created_something(resp: dict) -> bool:
+        """Did a create response describe an object that now exists?"""
+        return created_something(resp)
+
+    def endpoint_tag_exists(self, data: dict,
+                            scope: dict | None = None) -> Optional[bool]:
+        """Is this endpoint tag on the console? ``None`` = couldn't tell.
+
+        Used to confirm a create whose response didn't echo the tag. The
+        answer has to be three-valued: treating "I couldn't check" as "not
+        created" is what would make a retry duplicate the tag.
+        """
+        key = data.get("key")
+        if not key:
+            return None
+        params = dict(scope or {})
+        params["key__contains"] = key
+        try:
+            found = self.get_all("/agents/tags", params=params)
+        except S1APIError:
+            return None
+        want = data.get("value")
+        for tag in found or []:
+            if tag.get("key") != key:
+                continue
+            if not want or str(tag.get("value") or "") == str(want):
+                return True
+        return False
+
+    def create_endpoint_tag(self, data: dict, scope: dict | None = None) -> dict:
+        """Create one unified endpoint tag, or raise — never a silent no-op.
+
+        The tag itself is ``{"type": "endpoints", "key": …, "value": …}``;
+        only the envelope around it is uncertain, so the accepted shapes are
+        tried in turn. A shape is only abandoned once the console has been
+        asked whether the tag exists — re-POSTing on an unconfirmed create
+        would duplicate a tag the console did store but didn't echo. A
+        request that is accepted and demonstrably stores nothing raises
+        instead of counting as a success.
+        """
+        bodies: list[dict] = []
+        if scope:
+            bodies += [
+                {"data": data, "filter": scope},
+                {"data": [data], "filter": scope},
+                {"data": {"tags": [data]}, "filter": scope},
+            ]
+        else:
+            bodies.append({"data": data})
+
+        key = data.get("key") or data.get("name") or "?"
+        last_exc: Optional[S1APIError] = None
+        for body in bodies:
+            try:
+                resp = self._post("/tag-manager", body=body)
+            except S1APIError as e:
+                last_exc = e
+                # A rejected shape (400 "unknown field" / 404) means try the
+                # next one. Anything else — notably 409 "already exists" — is
+                # a real answer about this tag and must surface.
+                if e.status_code in (400, 404):
+                    continue
+                raise
+            if self._created_something(resp):
+                return resp
+            # 2xx with nothing in it. Ask the console before sending another
+            # shape at it.
+            exists = self.endpoint_tag_exists(data, scope)
+            if exists is True:
+                return resp
+            if exists is None:
+                raise S1APIError(
+                    f"could not confirm endpoint tag '{key}' was created", 0,
+                    "The console accepted the request with an empty response "
+                    "and the tag could not be read back, so it is unsafe to "
+                    "retry — that would risk creating it twice. Check the "
+                    "tag on the console, or open Tags (Operations → "
+                    "Inventory) and run 'Diagnose endpoint tags'.")
+        if last_exc is not None:
+            raise last_exc
+        raise S1APIError(
+            f"POST /tag-manager accepted endpoint tag '{key}' but created "
+            f"nothing", 0,
+            "The console returned success for every supported request shape "
+            "and the tag is not there afterwards. This is what a token "
+            "without the 'Tag Management.create' permission looks like on "
+            "this route. Open Tags (Operations → Inventory) and run "
+            "'Diagnose endpoint tags' to confirm.")
 
     # ── NQ control: create/set ─────────────────────────────────────────
 
@@ -591,6 +718,13 @@ class S1API:
 
     def create_star_rule(self, scope: dict, data: dict) -> dict:
         return self._post("/cloud-detection/rules", body={"filter": scope, "data": data})
+
+    def delete_star_rules(self, ids: list[str]) -> dict:
+        """DELETE /cloud-detection/rules — bulk-delete STAR custom-detection
+        rules by ID. Body is {"filter": {"ids": [...]}, "data": {}}."""
+        return self._delete("/cloud-detection/rules",
+                            body={"filter": {"ids": [str(i) for i in ids]},
+                                  "data": {}})
 
     # ── create site / group ──────────────────────────────────────────────
 
@@ -788,8 +922,11 @@ class S1API:
     def enroll_2fa(self, user_ids: list[str]) -> dict:
         return self._post("/users/enroll-2fa", body={"data": {"ids": user_ids}})
 
-    def get_roles(self) -> list[dict]:
-        return self.get_all("/rbac/roles")
+    def get_roles(self, params: Optional[dict] = None, **kw) -> list[dict]:
+        return self.get_all("/rbac/roles", params=params, **kw)
+
+    def get_role(self, role_id: str, params: Optional[dict] = None) -> dict:
+        return self.get_data(f"/rbac/role/{role_id}", params=params)
 
     def get_token_details(self, token: str) -> dict:
         return self._post("/users/api-token-details", body={

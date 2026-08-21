@@ -20,7 +20,7 @@ Beyond backup/restore, S1 Command Center includes 16 operations pages for day-to
 | **Threat Intel** | IOC indicator management |
 | **Ranger & Rogues** | Network discovery and rogue device detection |
 | **Remote Scripts** | Script library and bulk task management |
-| **Tags** | Tag management across all tag types |
+| **Tags** | Audit every tag a console actually holds, and diagnose endpoint tag creation |
 | **Raw API** | Direct GET/POST/PUT/DELETE to any S1 endpoint |
 
 ## Common Features
@@ -45,6 +45,34 @@ All operations pages share:
 - **Load Threats** — Fetch recent threats (up to 200)
 - **Timeline** — View attack timeline for a specific threat ID
 - **Notes** — View analyst notes on a threat
+
+## Tags Page
+
+Answers "the restore said it created tags — are they really there?", which a restore report cannot: the report only knows what the API accepted.
+
+**Run Audit** (read-only) walks the tenant and every account/site matching the filters and lists what the console holds, from both APIs that back the word "tag":
+
+- `GET /tags` — named tags for **firewall**, **network-quarantine** and **device-inventory** (Ranger)
+- `GET /agents/tags`, falling back to `GET /tag-manager` — unified **endpoint tags** (Tag Manager), key/value pairs. Both are tried because a console that doesn't serve the first must not be reported as holding no tags; the summary names the route that answered.
+
+Because `GET /tags` returns everything *visible* at a scope, including tags inherited from a parent account or the tenant, each scope's own tags are listed separately from inherited ones — tick **Show inherited tags** to see both. **Include group scopes** is off by default: groups inherit their site's tags and it costs a request per group.
+
+| Column | Meaning |
+|--------|---------|
+| `scope` | Account, or account/site, that was queried |
+| `level` | `global` (tenant), `account`, `site` or `group` |
+| `type` | `firewall`, `network-quarantine`, `device-inventory` or `endpoint` |
+| `tag` | Tag name, or `key=value` for endpoint tags |
+| `owned` | `own` = belongs to this scope; `inherited` = comes from a parent |
+
+**Diagnose endpoint tags** — *this one writes* — is for when a restore reports endpoint tags as created and the console shows none. `POST /tag-manager` answers `200` to a request body it doesn't store, so the only way to know is to write and read back. It creates a throwaway tag per candidate request format (key `s1cc-probe-…`), looks for it on every known listing route, and deletes what it finds. The console's own response body is recorded for each format, because that is what separates the last two outcomes:
+
+- **a format that works** — creation is fine on this console; the report names the format and the route that could read it back
+- **stored, but not at the requested scope** — the scope filter was ignored; look tenant-wide
+- **the console claims a create that nothing can read** — the write probably worked and the tool is listing the wrong route. Search the console's own tag list for `s1cc-probe-…`: if the keys are there, this is a read problem, not a write problem — and those tags need deleting by hand, because the cleanup can only delete what it can find
+- **nothing was stored and nothing was claimed** — the console accepted and discarded every shape. Check the token's `Tag Management` create permission and whether the route is enabled for the tenant
+
+At the end you're offered a report containing each format, its outcome and the console's raw response — that file is what to send when asking someone else to look.
 
 ## Raw API Page
 

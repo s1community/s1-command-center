@@ -1,9 +1,11 @@
 """
 Backup, Restore, and Agent Migration pages.
 """
+import copy
 import customtkinter as ctk
 import json
 import os
+import unicodedata
 from collections import Counter
 from tkinter import filedialog, messagebox
 from datetime import datetime, timezone
@@ -12,7 +14,7 @@ from typing import Optional
 import theme
 from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  ACCENT_HOVER, WARN, WARN_HOVER, INFO, cli_log,
-                 _ConsoleProxy, _help_btn, UI_FONT, MONO_FONT, BRAND,
+                 _ConsoleProxy, _help_btn, _ToolTip, UI_FONT, MONO_FONT, BRAND,
                  BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
                  TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
@@ -155,12 +157,12 @@ def _build_elements_section(parent, row, title="Elements"):
             tip = ctk.CTkLabel(f, text="ⓘ", font=(UI_FONT, 10),
                                text_color=TEXT_FAINT, cursor="hand2", width=16)
             tip.pack(side="left", padx=(2, 0))
-            tip.bind("<Enter>", lambda e, t=help_text, w=tip:
-                     w.configure(text_color=INFO))
+            tt = _ToolTip(tip, f"{el}: {help_text}", wraplength=300)
+            tip.bind("<Enter>", lambda e, w=tip:
+                     w.configure(text_color=INFO), add="+")
             tip.bind("<Leave>", lambda e, w=tip:
-                     w.configure(text_color=TEXT_FAINT))
-            tip.bind("<Button-1>", lambda e, t=help_text, n=el:
-                     cli_log(f"ⓘ {n}: {t}", "info"))
+                     w.configure(text_color=TEXT_FAINT), add="+")
+            tip.bind("<Button-1>", lambda e, t=tt: t._toggle(), add="+")
         elem_vars[el] = var
 
     # select all / deselect all
@@ -529,7 +531,12 @@ _STRIP_FIELDS = {
     "creator", "creatorId", "updater", "updaterId",
     "userId", "userName", "userFullName",
     # scope references (destination scope is passed separately)
-    "scope", "scopeName", "scopePath", "scopeId",
+    # `scopeLevel` is what /filters reports ('account' / 'site' / 'global').
+    # Saved filters are created with the destination scope in the request's
+    # `filter` envelope, so leaving the SOURCE scopeLevel in `data` contradicts
+    # it and S1 rejects the create — which silently left every migrated site
+    # with no filters, and therefore every dynamic group downgraded to static.
+    "scope", "scopeName", "scopePath", "scopeId", "scopeLevel",
     "accountId", "accountName", "siteId", "siteName",
     "groupId", "groupName",
     # read-only computed fields
@@ -537,6 +544,11 @@ _STRIP_FIELDS = {
     "generatedAlerts", "lastAlertTime", "reachedLimit",
     "statusReason", "expired", "source",
     "reportingAgents", "activeFirewallRules",
+    # STAR-rule read-only flag: the GET returns `activeResponse` (whether
+    # the rule has an auto-response / RemoteOps action) but the create
+    # endpoint rejects it with "data: dict_values(['activeResponse']):
+    # Unknown field (code 4000010)".
+    "activeResponse",
     # site/group read-only
     "activeLicenses", "activeAgents", "totalAgents",
     "registrationToken", "healthStatus", "numberOfSites",
@@ -554,6 +566,179 @@ _STRIP_FIELDS = {
 def _clean_for_restore(obj: dict) -> dict:
     """Remove source-specific fields before pushing to destination."""
     return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
+
+
+# Read-only / scope-binding fields that must never appear inside a role's
+# create `data`. The scope lives in the top-level `filter` instead, and S1
+# rejects every one of these in `data` with "Unknown field (code 4000010)".
+_ROLE_DATA_READONLY = {
+    "id", "createdAt", "updatedAt", "createdBy", "created_by_id",
+    "created_by_name", "creator", "creatorId",
+    "updatedBy", "updatedById", "updater", "updaterId",
+    "usersInRole", "usersInRoles", "users",
+    "predefined", "predefinedRole", "editable", "inherited", "inheritedFrom",
+    "accountId", "accountName", "accountIds",
+    "siteId", "siteName", "siteIds",
+    "groupId", "groupName", "groupIds",
+    "scope", "scopeId", "scopeName",
+}
+
+# Possible boolean keys on a single permission "action" across S1 schema
+# variants (the GET role uses one name, the create template may use another).
+_ACTION_BOOL_KEYS = ("isEnabled", "isAllowed", "enabled", "allowed", "value",
+                     "checked", "granted")
+
+
+def _role_scope_filter(dest_account_id: str = "", dest_site_id: str = "") -> dict:
+    """Top-level `filter` that binds a new role to the destination scope."""
+    if dest_site_id:
+        return {"siteIds": [dest_site_id]}
+    if dest_account_id:
+        return {"accountIds": [dest_account_id]}
+    return {}
+
+
+def _perm_ident(d: dict) -> str:
+    """Stable identifier for a permission group / action, matched across
+    consoles by name (falls back to id/key). Role IDs never match across
+    consoles but the permission taxonomy names do."""
+    if not isinstance(d, dict):
+        return ""
+    return str(d.get("name") or d.get("id") or d.get("key") or "").strip().lower()
+
+
+def _action_bool_key(d: dict):
+    """Return the boolean field name present on an action/group dict, if any."""
+    if not isinstance(d, dict):
+        return None
+    for k in _ACTION_BOOL_KEYS:
+        if k in d and isinstance(d[k], bool):
+            return k
+    return None
+
+
+def _child_action_list(group: dict):
+    """The nested list of action dicts inside a permission group."""
+    if not isinstance(group, dict):
+        return None
+    acts = group.get("actions")
+    if isinstance(acts, list) and all(isinstance(x, dict) for x in acts):
+        return acts
+    # Fall back to the first list-of-dicts value (schema-name agnostic).
+    for v in group.values():
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            return v
+    return None
+
+
+def _find_permission_list(data: dict):
+    """Find the top-level list of permission groups in a role/template dict."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("pages", "roles", "permissions", "features", "groups"):
+        v = data.get(k)
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            return v
+    for v in data.values():
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            return v
+    return None
+
+
+def _build_source_perm_lookup(pages) -> dict:
+    """{group_ident: {action_ident: bool, "__self__": bool}} from a source
+    role's permission grants."""
+    lookup: dict = {}
+    for g in pages or []:
+        if not isinstance(g, dict):
+            continue
+        gid = _perm_ident(g)
+        if not gid:
+            continue
+        amap: dict = {}
+        gkey = _action_bool_key(g)
+        if gkey is not None:
+            amap["__self__"] = bool(g.get(gkey))
+        for a in (_child_action_list(g) or []):
+            aid = _perm_ident(a)
+            akey = _action_bool_key(a)
+            if aid and akey is not None:
+                amap[aid] = bool(a.get(akey))
+        lookup[gid] = amap
+    return lookup
+
+
+def _overlay_role_permissions(template_data: dict, role_def: dict) -> None:
+    """Copy the source role's granted permissions onto the destination
+    template in place, matching groups/actions by name. Only permissions the
+    destination actually exposes (present in the template) are set, so a
+    license mismatch can never inject an unknown permission."""
+    src = role_def.get("pages")
+    if not isinstance(src, list):
+        return
+    tmpl_list = _find_permission_list(template_data)
+    if not tmpl_list:
+        return
+    lookup = _build_source_perm_lookup(src)
+    for g in tmpl_list:
+        amap = lookup.get(_perm_ident(g))
+        if not amap:
+            continue
+        gkey = _action_bool_key(g)
+        if gkey is not None and "__self__" in amap:
+            g[gkey] = amap["__self__"]
+        for a in (_child_action_list(g) or []):
+            akey = _action_bool_key(a)
+            if akey is None:
+                continue
+            av = amap.get(_perm_ident(a))
+            if av is not None:
+                a[akey] = av
+
+
+def _build_role_payload(role_def: dict, template=None) -> dict:
+    """Build the create `data` for a custom RBAC role.
+
+    Preferred path: start from the destination's own role template (the
+    create-ready skeleton returned by GET /rbac/role for the target scope),
+    stamp the source name/description, and overlay the source's granted
+    permissions. This is authoritative for the destination schema and its
+    licensed permission set, so it survives console-to-console differences.
+
+    Fallback (no template available): a minimal name/description payload.
+    """
+    role_def = role_def or {}
+    if isinstance(template, dict) and template:
+        data = copy.deepcopy(template)
+        for k in list(data.keys()):
+            if k in _ROLE_DATA_READONLY:
+                data.pop(k, None)
+        data["name"] = role_def.get("name")
+        desc = role_def.get("description")
+        if desc is not None:
+            data["description"] = desc
+        _overlay_role_permissions(data, role_def)
+        return data
+    data = {"name": role_def.get("name")}
+    desc = role_def.get("description")
+    if desc is not None:
+        data["description"] = desc
+    return data
+
+
+def _drop_forensics_triggering(policy: dict) -> dict:
+    """Return a copy of a policy without its `forensicsAutoTriggering` block.
+
+    That block enables the agent to auto-run a RemoteOps forensic-collection
+    script on detection, and it references the script *profiles* by ID
+    (`windowsProfileId` / `macosProfileId` / `linuxProfileId`). Those
+    profiles live on the SOURCE console and don't exist on the destination,
+    so pushing the source policy verbatim is rejected with "Bad
+    auto-triggering policy information provided (code 4000010)". Dropping the
+    block lets the destination keep its own default (auto-triggering
+    disabled); the operator can re-point it once the profiles are recreated.
+    """
+    return {k: v for k, v in policy.items() if k != "forensicsAutoTriggering"}
 
 
 def _scope_inherits_config(node: dict, cfg) -> bool:
@@ -1083,6 +1268,35 @@ def _strip_non_printable(s):
     return _NON_PRINTABLE_RE.sub("", s)
 
 
+def _norm_name(value):
+    """Normalise a scope name for comparison: strip invisible marks, apply
+    NFKC, casefold and collapse whitespace so filters match regardless of
+    case, Unicode form, or stray zero-width characters."""
+    value = _strip_non_printable(str(value or ""))
+    value = unicodedata.normalize("NFKC", value)
+    return " ".join(value.casefold().split())
+
+
+def _select_by_name(items, filt, key=None):
+    """Filter `items` by a scope-name filter, preferring EXACT matches.
+
+    A blank filter returns everything. If one or more item names equal the
+    filter exactly (after normalisation) only those exact matches are
+    returned — so a specific name like "Servers" no longer also selects
+    supersets such as "HighQ_Servers" / "TR-Servers". When nothing matches
+    exactly, fall back to substring matching for convenience (e.g. "Serv")."""
+    nfilt = _norm_name(filt)
+    if not nfilt:
+        return list(items)
+    if key is None:
+        def key(it):
+            return it
+    exact = [it for it in items if _norm_name(key(it)) == nfilt]
+    if exact:
+        return exact
+    return [it for it in items if nfilt in _norm_name(key(it))]
+
+
 # Whitelists for specific element types that are strict about accepted fields
 _EXCL_FIELDS = {
     "type", "value", "osType", "description", "mode",
@@ -1152,8 +1366,17 @@ _GROUP_CREATE_FIELDS = {
     "name", "description", "inherits", "rank", "policy",
 }
 
+# Named /tags objects (firewall, network-quarantine, device-inventory).
+# `kind`, `affectedScopes` and `linkedRules` are read-only on the source and
+# are rejected by the create endpoint, so they must never be sent.
 _TAG_FIELDS = {
-    "name", "description", "type", "kind", "key", "value",
+    "name", "description", "type", "key", "value", "scope",
+}
+
+# Unified endpoint tags (Tag Manager) are key/value pairs on a different
+# API — POST /tag-manager with type "endpoints"; `key` is mandatory.
+_ENDPOINT_TAG_FIELDS = {
+    "key", "value", "description",
 }
 
 
@@ -1174,6 +1397,93 @@ def _rules_for_scope(rules: list, ntype: str) -> list:
     1:1 with the node type."""
     return [r for r in (rules or [])
             if str(r.get("scope", "")).lower() == ntype]
+
+
+def _star_rules_for_scope(rules: list, ntype: str) -> list:
+    """STAR variant of _rules_for_scope. Custom-detection rules carry the same
+    `scope` field ('account' / 'site' / 'group', and the tenant level reported
+    as 'global' or 'tenant'), and /cloud-detection/rules ALSO returns inherited
+    rules at every level — so an account rule is returned again under every
+    child site. Keep only the rules whose own scope matches this node so one
+    account rule isn't backed up (and later re-created) under every site."""
+    ok = {"global", "tenant"} if ntype == "global" else {ntype}
+    return [r for r in (rules or [])
+            if str(r.get("scope", "")).lower() in ok]
+
+
+def _tags_for_scope(tags: list, ntype: str) -> list:
+    """Tag variant of _rules_for_scope. GET /tags also returns the tags this
+    scope INHERITS from its parents, so a site query returns the account and
+    global tags too. Restoring that raw list re-creates parent tags at every
+    child scope. Tags carry the same `scope` field as rules ('global' /
+    'account' / 'site' / 'group', with 'tenant' as a global alias).
+
+    Tags with no `scope` field at all are kept: older backups (and some
+    consoles) omit it, and dropping them would silently migrate nothing."""
+    ok = {"global", "tenant"} if ntype == "global" else {ntype}
+    out = []
+    for tag in tags or []:
+        sc = str(tag.get("scope", "")).strip().lower()
+        if not sc or sc in ok:
+            out.append(tag)
+    return out
+
+
+def _tag_payload(tag: dict, tag_type: str, ntype: str) -> dict:
+    """Create-ready POST /tags `data` block for one backed-up tag.
+
+    Keeps only the writable fields (`kind`/`linkedRules`/`affectedScopes` and
+    the id/timestamp block are read-only and rejected), forces the tag type of
+    the group being restored, and re-stamps the scope to the destination node
+    so an account tag isn't recreated claiming site scope."""
+    body = _whitelist(tag or {}, _TAG_FIELDS)
+    body["type"] = tag_type
+    body["scope"] = "global" if ntype == "global" else ntype
+    return body
+
+
+def _endpoint_tag_payload(tag: dict) -> dict:
+    """Create-ready POST /tag-manager `data` block for a unified endpoint tag.
+    These are key/value pairs — `key` is mandatory, `value`/`description` are
+    optional — and the type is always 'endpoints'."""
+    body = _whitelist(tag or {}, _ENDPOINT_TAG_FIELDS)
+    body["type"] = "endpoints"
+    return body
+
+
+def _collect_star_rules(api, acct_filter: str = "",
+                        site_filter: str = "") -> list:
+    """Fetch every STAR custom detection rule the token can see, for export.
+
+    Queries per account (an account query also returns that account's
+    descendant site rules), de-dupes by rule id, then applies the Account /
+    Site NAME filters using the same exact-preferred matching the backup page
+    uses. A Site filter keeps only the rules that live at that site, since
+    account/global rules carry no siteName."""
+    accounts = api.get_accounts() or []
+    if acct_filter:
+        accounts = _select_by_name(accounts, acct_filter,
+                                   lambda a: a.get("name", ""))
+        if not accounts:
+            return []
+
+    by_id = {}
+    for acct in accounts:
+        aid = acct.get("id")
+        if not aid:
+            continue
+        try:
+            for rule in api.get_star_rules({"accountIds": [aid]}):
+                by_id[str(rule.get("id"))] = rule
+        except S1APIError as exc:
+            cli_log(f"Could not read STAR rules for "
+                    f"{acct.get('name') or aid}: {exc}", "warning")
+
+    rules = list(by_id.values())
+    if site_filter:
+        rules = _select_by_name(rules, site_filter,
+                                lambda r: r.get("siteName") or "")
+    return rules
 
 
 def _scope(scope_type, scope_id):
@@ -1233,6 +1543,11 @@ def _err_detail(exc) -> str:
 
 def _item_id(item, label="") -> str:
     """Extract a human-readable identifier from a restore item."""
+    # Unified endpoint tags are key/value pairs with no name; reporting only
+    # the value ("Finance") doesn't say which tag failed.
+    if item.get("key") and not item.get("name"):
+        val = item.get("value")
+        return (f"{item['key']}={val}" if val else str(item["key"]))[:80]
     for key in ("name", "ruleName", "value", "s1ql",
                 "email", "fullName", "description", "type"):
         v = item.get(key)
@@ -1246,9 +1561,14 @@ def _item_id(item, label="") -> str:
 # is produced from a backup node's `data` dict AND from a live destination
 # query, so the two columns line up element-by-element.
 
+_CMP_NAME_MAXLEN = 256
+
 # (category, count, top_names[])  — ordering matters: it's the row order
 # the panel renders in.
 def _summarize_node_payload(data: dict) -> list:
+    def _nm(v):
+        return str(v)[:_CMP_NAME_MAXLEN]
+
     out = []
     pol = (data or {}).get("policy") or {}
     if pol:
@@ -1262,74 +1582,81 @@ def _summarize_node_payload(data: dict) -> list:
         for etype in EXCL_TYPES:
             items = excls.get(etype) or []
             out.append((f"excl/{etype}", len(items),
-                        [str(i.get("value", ""))[:60] for i in items[:50]]))
+                        [_nm(i.get("value", "")) for i in items]))
 
     u_excls = (data or {}).get("unified_exclusions") or []
     if u_excls:
         out.append(("unified_exclusions", len(u_excls),
-                    [str(i.get("exclusionName") or i.get("value", ""))[:60]
-                     for i in u_excls[:50]]))
+                    [_nm(i.get("exclusionName") or i.get("value", ""))
+                     for i in u_excls]))
 
     bl = (data or {}).get("restrictions") \
         or (data or {}).get("blocklist") or []
     out.append(("blocklist", len(bl),
-                [str(b.get("value", ""))[:60] for b in bl[:50]]))
+                [_nm(b.get("value", "")) for b in bl]))
 
     fw = (data or {}).get("firewall", {}) or {}
     fw_rules = fw.get("rules") or []
     out.append(("fw-rules", len(fw_rules),
-                [str(r.get("name", ""))[:60] for r in fw_rules[:50]]))
+                [_nm(r.get("name", "")) for r in fw_rules]))
     fw_locs = fw.get("locations") or []
     out.append(("fw-locations", len(fw_locs),
-                [str(l.get("name", ""))[:60] for l in fw_locs[:50]]))
+                [_nm(l.get("name", "")) for l in fw_locs]))
 
     dc = (data or {}).get("deviceControl", {}) or {}
     dc_rules = dc.get("rules") or []
     out.append(("dc-rules", len(dc_rules),
-                [str(r.get("ruleName") or r.get("name", ""))[:60]
-                 for r in dc_rules[:50]]))
+                [_nm(r.get("ruleName") or r.get("name", ""))
+                 for r in dc_rules]))
 
     nq = (data or {}).get("networkQuarantine", {}) or {}
     nq_rules = nq.get("rules") or []
     out.append(("nq-rules", len(nq_rules),
-                [str(r.get("name", ""))[:60] for r in nq_rules[:50]]))
+                [_nm(r.get("name", "")) for r in nq_rules]))
 
     dv = (data or {}).get("deepVisibility", {}) or {}
     flt = dv.get("filters") or (data or {}).get("saved_filters") or []
     out.append(("saved_filters", len(flt),
-                [str(f.get("name", ""))[:60] for f in flt[:50]]))
+                [_nm(f.get("name", "")) for f in flt]))
 
     ovrs = ((data or {}).get("config", {}) or {}).get("overrides") or []
     out.append(("config_overrides", len(ovrs),
-                [str(o.get("name", ""))[:60] for o in ovrs[:50]]))
+                [_nm(o.get("name", "")) for o in ovrs]))
 
     cusers = (data or {}).get("consoleUsers") or []
     if cusers:
         out.append(("console_users", len(cusers),
-                    [str(u.get("email") or u.get("fullName", ""))[:60]
-                     for u in cusers[:50]]))
+                    [_nm(u.get("email") or u.get("fullName", ""))
+                     for u in cusers]))
 
     # ── Detection & hunting ──
     star = (data or {}).get("star") or (data or {}).get("star_rules") or []
     out.append(("star_rules", len(star),
-                [str(r.get("name", ""))[:60] for r in star[:50]]))
+                [_nm(r.get("name", "")) for r in star]))
     ti = (data or {}).get("threatIntel") \
         or (data or {}).get("threat_intel") or []
     out.append(("threat_intel", len(ti),
-                [str(i.get("value") or i.get("name", ""))[:60]
-                 for i in ti[:50]]))
+                [_nm(i.get("value") or i.get("name", "")) for i in ti]))
 
     # ── Tags ──
     cfg = (data or {}).get("config", {}) or {}
     tags = cfg.get("tags", {}) or {}
     ep_tags = list(tags.get("deviceInventory") or []) \
         + list(cfg.get("endpointTags") or [])
+    def _tag_name(t):
+        # Named /tags objects carry `name`; unified endpoint tags (Tag
+        # Manager) are key/value pairs instead.
+        if t.get("name"):
+            return _nm(t["name"])
+        key = t.get("key") or ""
+        val = t.get("value") or ""
+        return _nm(f"{key}={val}" if val else key)
+
     for items, cat in ((tags.get("firewall") or [], "tags_firewall"),
                        (tags.get("networkQuarantine") or [],
                         "tags_network_quarantine"),
                        (ep_tags, "tags_endpoint")):
-        out.append((cat, len(items),
-                    [str(t.get("name", ""))[:60] for t in items[:50]]))
+        out.append((cat, len(items), [_tag_name(t) for t in items]))
 
     # ── Collections (account / site level) ──
     def _name(x):
@@ -1347,7 +1674,7 @@ def _summarize_node_payload(data: dict) -> list:
                      ("scripts", "scripts")):
         items = (data or {}).get(key) or []
         out.append((cat, len(items),
-                    [str(_name(i))[:60] for i in items[:50]]))
+                    [_nm(_name(i)) for i in items]))
 
     # ── Config singletons (presence; value-level diff is out of scope) ──
     fw_cfg = ((data or {}).get("firewall", {}) or {}).get("config")
@@ -1523,6 +1850,53 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str,
 # Reused by ValidationPage to enumerate the scope tree on BOTH consoles
 # and explain, in plain English, every difference found between them.
 
+# Human-readable names for the "⏭ Skip <element>" button. During a restore
+# the button renames itself to name the step currently running, so the operator
+# always knows exactly what a Skip click will jump past. Keys are the internal
+# restore step labels; unknown labels fall back to the raw label.
+_SKIP_DEFAULT = "⏭  Skip Element"
+_SKIP_LABELS = {
+    "snapshot": "snapshot",
+    "policy": "policy",
+    "excl": "exclusions",
+    "unified-excl": "unified excl",
+    "blocklist": "blocklist",
+    "fw-cfg": "FW config",
+    "fw-rules": "FW rules",
+    "nq-cfg": "NQ config",
+    "nq-rules": "NQ rules",
+    "dc-cfg": "DC config",
+    "dc-rules": "DC rules",
+    "tags-fw": "FW tags",
+    "tags-nq": "NQ tags",
+    "tags-ep": "device tags",
+    "ep-tags": "endpoint tags",
+    "star": "STAR rules",
+    "dv-filters": "saved filters",
+    "overrides": "overrides",
+    "threat-intel": "threat intel",
+    "log-rules": "log rules",
+    "upgrade-pol": "upgrade pols",
+    "locations": "locations",
+    "webhooks": "webhooks",
+    "sched-rep": "reports",
+    "recipients": "recipients",
+    "set-noti": "notifications",
+    "set-sysl": "syslog",
+    "set-acti": "AD settings",
+    "set-smtp": "SMTP",
+    "set-sso": "SSO",
+}
+
+
+def _skip_button_text(label: str) -> str:
+    """Return the Skip-button caption for the restore step `label`
+    (e.g. 'fw-rules' → '⏭  Skip FW rules'). Empty label → the idle default."""
+    if not label:
+        return _SKIP_DEFAULT
+    return f"⏭  Skip {_SKIP_LABELS.get(label, label)}"
+
+
 # Friendly labels for the categories produced by _summarize_node_payload.
 _CAT_LABELS = {
     "policy": "Policy",
@@ -1573,12 +1947,9 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
     honouring the same name filters as backup/restore. Each entry carries
     the names of its ancestors so two consoles can be matched by NAME
     (IDs are tenant-specific and never line up across consoles)."""
-    acct_f = (filters.get("account") or "").lower()
-    site_f = (filters.get("site") or "").lower()
-    group_f = (filters.get("group") or "").lower()
-
-    def nm(name, f):
-        return (not f) or (f in (name or "").lower())
+    acct_f = filters.get("account") or ""
+    site_f = filters.get("site") or ""
+    group_f = filters.get("group") or ""
 
     out = []
     if levels.get("global"):
@@ -1589,11 +1960,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
     except Exception as e:
         accounts = []
         cli_log(f"Could not list accounts: {e}", "error")
-    for acct in accounts:
+    for acct in _select_by_name(accounts, acct_f,
+                                key=lambda a: a.get("name", "?")):
         aname = acct.get("name", "?")
         aid = acct.get("id", "")
-        if not nm(aname, acct_f):
-            continue
         if levels.get("accounts"):
             out.append({"type": "account", "path": f"{aname}/",
                         "name": aname, "id": aid,
@@ -1606,11 +1976,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
         except Exception as e:
             sites = []
             cli_log(f"Could not list sites under {aname}: {e}", "warning")
-        for site in sites:
+        for site in _select_by_name(sites, site_f,
+                                     key=lambda s: s.get("name", "?")):
             sname = site.get("name", "?")
             sid = site.get("id", "")
-            if not nm(sname, site_f):
-                continue
             if levels.get("sites"):
                 out.append({"type": "site", "path": f"{aname}/{sname}",
                             "name": sname, "id": sid,
@@ -1624,11 +1993,10 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
                 groups = []
                 cli_log(f"Could not list groups under {aname}/{sname}: {e}",
                         "warning")
-            for g in groups:
+            for g in _select_by_name(groups, group_f,
+                                      key=lambda x: x.get("name", "?")):
                 gname = g.get("name", "?")
                 gid = g.get("id", "")
-                if not nm(gname, group_f):
-                    continue
                 out.append({"type": "group",
                             "path": f"{aname}/{sname}/{gname}",
                             "name": gname, "id": gid,
@@ -1773,6 +2141,19 @@ class BackupPage(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="📜 History", height=38,
                       fg_color=BRAND, hover_color=BRAND_HOVER,
                       command=self._show_history).pack(side="left", padx=(0, 4))
+        self._star_btn = ctk.CTkButton(
+            btn_row, text="⭐ STAR → Excel", height=38, width=150,
+            fg_color=BRAND, hover_color=BRAND_HOVER,
+            command=self._export_star_rules)
+        self._star_btn.pack(side="left", padx=(0, 2))
+        _help_btn(btn_row,
+                  "Export every STAR custom detection rule from the selected "
+                  "console straight to a detailed Excel workbook — all fields, "
+                  "colour-coded by scope / status / severity, with a summary "
+                  "sheet and filters already switched on.\n\n"
+                  "Honours the Account Name / Site Name filters above. No "
+                  "backup needed — it reads the console live."
+                  ).pack(side="left", padx=(0, 4))
 
         # ── Scheduled (unattended) backups — fires while the app is open ──
         ctk.CTkLabel(btn_row, text="⏰", font=(UI_FONT, 14)).pack(
@@ -2258,17 +2639,17 @@ class BackupPage(ctk.CTkFrame):
             raise S1APIError(f"Cannot reach console — connection refused. Check URL and token.")
 
         nodes = []
-        acct_f    = filters.get("account", "").lower()
-        site_f    = filters.get("site", "").lower()
-        group_f   = filters.get("group", "").lower()
+        acct_f    = filters.get("account", "")
+        site_f    = filters.get("site", "")
+        group_f   = filters.get("group", "")
         acct_id_f = getattr(self, "_acct_id", "").strip()
         pt = self.ptable
 
         def ui(fn):
             self.after(0, fn)
 
-        def name_match(name, filt):
-            return not filt or filt in name.lower()
+        def _acct_selected(acct):
+            return str(acct.get("id", "")) in _selected_acct_ids
 
         def _make_summary(results):
             """Build compact summary from _read_node results."""
@@ -2326,22 +2707,34 @@ class BackupPage(ctk.CTkFrame):
 
         # ── discover structure ──
         accounts = api.get_accounts()
+        id_match = []
         if acct_id_f:
             id_match = [a for a in accounts if str(a.get("id", "")) == acct_id_f]
             if not id_match:
-                cli_log(f"⚠ Account ID {acct_id_f} not found in this console "
-                        f"— verify the source connection is correct!", "error")
+                cli_log(f"⚠ Backup account ID {acct_id_f} not found — "
+                        f"falling back to Account Name filter", "warning")
             else:
                 cli_log(f"  ✓ Backup: account ID {acct_id_f} → "
                         f"'{id_match[0].get('name')}' confirmed", "success")
+        if id_match:
+            _selected_acct_ids = {str(a.get("id", "")) for a in id_match}
+        else:
+            _selected_acct_ids = {
+                str(a.get("id", "")) for a in _select_by_name(
+                    accounts, acct_f, key=lambda a: a.get("name", ""))}
+        matched_accounts = [a for a in accounts if _acct_selected(a)]
+        if acct_f and not matched_accounts:
+            names = ", ".join(str(a.get("name", "?")) for a in accounts[:10])
+            more = f" (+{len(accounts) - 10} more)" if len(accounts) > 10 else ""
+            cli_log(f"No source account matched '{filters.get('account', '')}' "
+                    f"on {api.base_url}. Visible API accounts: {names}{more}. "
+                    f"Check the selected SOURCE connection and token scope.",
+                    "warning")
         node_count = 0
         for acct in accounts:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if acct_id_f:
-                if str(aid) != acct_id_f:
-                    continue
-            elif not name_match(aname, acct_f):
+            if not _acct_selected(acct):
                 continue
             node_count += 1
             try:
@@ -2354,11 +2747,10 @@ class BackupPage(ctk.CTkFrame):
                         "sortBy": "name", "sortOrder": "asc"})
             except Exception:
                 sites = []
-            for site in sites:
+            for site in _select_by_name(sites, site_f,
+                                         key=lambda s: s.get("name", "")):
                 sname = site.get("name", "?")
                 sid = site.get("id", "")
-                if not name_match(sname, site_f):
-                    continue
                 node_count += 1
                 try:
                     groups = api.get_groups(params={
@@ -2366,9 +2758,8 @@ class BackupPage(ctk.CTkFrame):
                         "sortOrder": "asc"})
                 except Exception:
                     groups = []
-                for grp in groups:
-                    if name_match(grp.get("name", "?"), group_f):
-                        node_count += 1
+                node_count += len(_select_by_name(
+                    groups, group_f, key=lambda g: g.get("name", "?")))
 
         # ── add all rows as pending first ──
         row_map = []  # (nid, type, path, obj, scope_id)
@@ -2376,10 +2767,7 @@ class BackupPage(ctk.CTkFrame):
         for acct in accounts:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if acct_id_f:
-                if str(aid) != acct_id_f:
-                    continue
-            elif not name_match(aname, acct_f):
+            if not _acct_selected(acct):
                 continue
             nid = f"acct-{aid}"
             ui(lambda n=nid, p=f"{aname}/": pt.add_node(n, p, "account"))
@@ -2396,11 +2784,10 @@ class BackupPage(ctk.CTkFrame):
             except Exception:
                 sites = []
 
-            for site in sites:
+            for site in _select_by_name(sites, site_f,
+                                         key=lambda s: s.get("name", "")):
                 sname = site.get("name", "?")
                 sid = site.get("id", "")
-                if not name_match(sname, site_f):
-                    continue
                 nid = f"site-{sid}"
                 sp = f"{aname}/{sname}"
                 ui(lambda n=nid, p=sp: pt.add_node(n, p, "site"))
@@ -2417,11 +2804,10 @@ class BackupPage(ctk.CTkFrame):
                 # map it to the destination filter by name. Some S1
                 # versions don't include `filterName` in /groups responses.
                 _src_filter_name_by_id: dict = {}
-                for grp in groups:
+                for grp in _select_by_name(groups, group_f,
+                                            key=lambda g: g.get("name", "?")):
                     gname = grp.get("name", "?")
                     gid = grp.get("id", "")
-                    if not name_match(gname, group_f):
-                        continue
                     fid = (grp.get("filterId")
                            or (grp.get("filter") or {}).get("id"))
                     if fid and not grp.get("filterName"):
@@ -2608,7 +2994,19 @@ class BackupPage(ctk.CTkFrame):
 
         # ── STAR ──
         if "star_rules" in elements and scope_type != "group":
-            _fetch("star", "star", api.get_star_rules, scope)
+            rules = _fetch("star", "star", api.get_star_rules, scope)
+            # /cloud-detection/rules returns INHERITED rules at every level, so
+            # an account rule is also returned under each child site. Keep only
+            # this node's own-scope rules (except at global, the capture-all
+            # scope) so a rule isn't stored — and later re-created — at every
+            # site. See _star_rules_for_scope.
+            if isinstance(rules, list) and scope_type != "global":
+                scoped = _star_rules_for_scope(rules, scope_type)
+                data["star"] = scoped
+                for _i, (_nm, _v) in enumerate(results):
+                    if _nm == "star":
+                        results[_i] = ("star", len(scoped))
+                        break
 
         # ── Threat Intel ──
         if "threat_intel" in elements and scope_type == "account":
@@ -2683,7 +3081,25 @@ class BackupPage(ctk.CTkFrame):
 
         # ── RBAC roles ──
         if "roles" in elements and scope_type == "account":
-            _fetch("roles", "roles", api.get_roles)
+            roles = _fetch("roles", "roles", api.get_roles,
+                           params={"accountIds": scope_id})
+            for r in (roles or []):
+                # Skip predefined roles — they exist on every console and can't
+                # be re-created. S1 flags them via `predefined` or the
+                # `predefinedRole` boolean depending on the endpoint.
+                if not isinstance(r, dict) or r.get("predefined") is True \
+                        or r.get("predefinedRole") is True:
+                    continue
+                rid = r.get("id")
+                if not rid:
+                    continue
+                try:
+                    full = api.get_role(rid, params={"accountIds": scope_id})
+                    if isinstance(full, dict):
+                        r.update(full)
+                except Exception as e:
+                    cli_log(f"Role definition fetch failed for "
+                            f"{r.get('name', rid)}: {e}", "warning")
 
         # ── Service users ──
         if "service_users" in elements and scope_type == "account":
@@ -2710,6 +3126,66 @@ class BackupPage(ctk.CTkFrame):
             return
         rows = [{"log": line} for line in self._operation_log]
         export_report("Backup Log", ["log"], rows)
+
+    def _export_star_rules(self):
+        """Read STAR custom detection rules live from the selected console and
+        write a detailed, filterable Excel workbook. Independent of a backup —
+        it only needs a connection, and honours the Account/Site filters."""
+        api = self._get_backup_api()
+        if not api:
+            return
+
+        acct_f = self.acct_filter.get().strip()
+        site_f = self.site_filter.get().strip()
+        console = self._console_var.get()
+
+        path = filedialog.asksaveasfilename(
+            title="Export STAR Rules to Excel",
+            initialfile=f"s1-star-rules-{datetime.now():%Y%m%d-%H%M}",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx")])
+        if not path:
+            return
+
+        self._star_btn.configure(state="disabled", text="⏳ Exporting…")
+        cli_log("Collecting STAR custom detection rules…", "cmd")
+
+        def do():
+            rules = _collect_star_rules(api, acct_f, site_f)
+            if not rules:
+                return 0
+            from export_utils import generate_star_rules_excel
+            return generate_star_rules_excel(path, rules, meta={
+                "console": getattr(api, "base_url", console),
+                "account_filter": acct_f,
+                "site_filter": site_f,
+            })
+
+        def _reset():
+            self._star_btn.configure(state="normal", text="⭐ STAR → Excel")
+
+        def done(count):
+            _reset()
+            if not count:
+                cli_log("No STAR rules matched the current filters.",
+                        "warning")
+                messagebox.showinfo(
+                    "No STAR rules",
+                    "No custom detection rules matched the current "
+                    "Account/Site filters on this console.")
+                return
+            cli_log(f"Exported {count} STAR rule(s) → "
+                    f"{os.path.basename(path)}", "success")
+            messagebox.showinfo(
+                "STAR Rules Exported",
+                f"{count} custom detection rule(s) written to:\n{path}")
+
+        def fail(exc):
+            _reset()
+            cli_log(f"STAR export failed: {exc}", "error")
+            messagebox.showerror("Export Error", str(exc))
+
+        run_async(self, do, done, fail)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3515,28 +3991,36 @@ class RestorePage(ctk.CTkFrame):
             command=self._stop, state="disabled")
         self._stop_btn.pack(side="left", padx=(0, 4))
         self._skip_btn = ctk.CTkButton(
-            action_row, text="⏭  Skip Element", height=38, width=140,
+            action_row, text=_SKIP_DEFAULT, height=38, width=180,
             fg_color=WARN_HOVER, hover_color=WARN_HOVER,
             font=(UI_FONT, 13, "bold"),
             command=self._skip_current_element, state="disabled")
         self._skip_btn.pack(side="left", padx=(0, 12))
 
-        # Progress + timer (right-aligned)
-        self._status_lbl = ctk.CTkLabel(action_row, text="",
-                                         font=(UI_FONT, 12, "bold"),
-                                         text_color=TEXT_MUTED)
-        self._status_lbl.pack(side="right", padx=(8, 0))
-        self._timer_lbl = ctk.CTkLabel(action_row, text="",
-                                        font=(MONO_FONT, 12),
-                                        text_color=TEXT_MUTED)
-        self._timer_lbl.pack(side="right", padx=(8, 0))
-        self.progress = ctk.CTkProgressBar(action_row, width=200)
-        self.progress.pack(side="right", padx=8)
+        # Progress strip lives in its own full-width row below (see
+        # progress_row) so it never crams the RUN buttons or floats mid-row.
+
+        progress_row = ctk.CTkFrame(self, fg_color="transparent")
+        progress_row.grid(row=8, column=0, sticky="ew", padx=20, pady=(2, 6))
+        progress_row.grid_columnconfigure(0, weight=1)   # bar stretches
+
+        self.progress = ctk.CTkProgressBar(progress_row, height=12,
+                                           corner_radius=6,
+                                           progress_color=GREEN)
+        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         self.progress.set(0)
+        self._timer_lbl = ctk.CTkLabel(progress_row, text="",
+                                       font=(MONO_FONT, 12),
+                                       text_color=TEXT_MUTED)
+        self._timer_lbl.grid(row=0, column=1, sticky="e", padx=(0, 10))
+        self._status_lbl = ctk.CTkLabel(progress_row, text="",
+                                        font=(UI_FONT, 12, "bold"),
+                                        text_color=TEXT_MUTED)
+        self._status_lbl.grid(row=0, column=2, sticky="e")
 
         # ── Phase 3 · REVIEW ───────────────────────────────────────────
         review_row = ctk.CTkFrame(self, fg_color="transparent")
-        review_row.grid(row=8, column=0, sticky="ew", padx=20, pady=(6, 4))
+        review_row.grid(row=9, column=0, sticky="ew", padx=20, pady=(6, 4))
         _phase_label(review_row, "3 · REVIEW").pack(side="left", padx=(0, 6))
 
         self._export_btn = ctk.CTkButton(
@@ -3588,7 +4072,7 @@ class RestorePage(ctk.CTkFrame):
         # an internal canvas (its real Tk path is `…!canvas.!progresstable`,
         # not `…!progresstable`). So we add plain tk.Frame holders and
         # nest the actual widgets inside them.
-        self.grid_rowconfigure(9, weight=1)
+        self.grid_rowconfigure(10, weight=1)
         import tkinter as _tk
         split = _tk.PanedWindow(
             self, orient="horizontal",
@@ -3596,7 +4080,7 @@ class RestorePage(ctk.CTkFrame):
             bd=0, sashpad=0,
             opaqueresize=True)
         theme.tk_track(split, lambda w: w.configure(bg=theme.tkcolor(CARD)))
-        split.grid(row=9, column=0, sticky="nsew", padx=20, pady=(4, 12))
+        split.grid(row=10, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
         # CRITICAL: PanedWindow doesn't constrain its children's heights —
         # without pack_propagate(False) the inner CTkScrollableFrame would
@@ -3853,11 +4337,25 @@ class RestorePage(ctk.CTkFrame):
             raise RuntimeError("Backup engine unavailable for snapshot")
 
         nodes = _enumerate_tree(api, filters or {}, levels or {})
+        total = len(nodes)
         out_nodes = []
-        for n in nodes:
+        for idx, n in enumerate(nodes, 1):
+            # Honor the Skip button ("⏭ Skip snapshot") — stop capturing and
+            # let the restore proceed. Whatever was captured so far is kept.
+            if self._skip_element or self._cancelled:
+                break
             ntype, sid = n["type"], n["id"]
             scope = (_scope(ntype, sid) if ntype != "global"
                      else {"tenant": "true"})
+            # Per-node progress so the snapshot never looks frozen: a full
+            # destination backup can take a while, and a single static
+            # "Snapshotting…" label reads as a hang. Show which node of how
+            # many we're on (and hint that Skip works).
+            self.after(0, lambda i=idx, t=total, p=n["path"]:
+                       self._status_lbl.configure(
+                           text=f"📸 Snapshot {i}/{t}: {p} "
+                                f"(Skip to stop)…",
+                           text_color=INFO))
             try:
                 data = bp._read_node(api, ntype, sid, scope, elements, self.log)
             except Exception as exc:
@@ -4321,6 +4819,14 @@ class RestorePage(ctk.CTkFrame):
         self._skip_btn.configure(state="disabled")
         cli_log("Skip requested — jumping to next element…", "warning")
 
+    def _set_skip_label(self, label: str):
+        """Rename the Skip button so it names the element/phase currently
+        running (e.g. '⏭ Skip policy'), giving the operator a clear picture
+        of what a Skip click will jump past. Safe to call from the restore
+        worker thread — the widget update is marshalled to the UI thread."""
+        text = _skip_button_text(label)
+        self.after(0, lambda: self._skip_btn.configure(text=text))
+
     def _stop(self):
         self._cancelled = True
         self._stop_btn.configure(state="disabled")
@@ -4341,7 +4847,7 @@ class RestorePage(ctk.CTkFrame):
             self._auto_btn.configure(state="disabled")
             self._resume_btn.configure(state="disabled")
             self._stop_btn.configure(state="normal")
-            self._skip_btn.configure(state="normal")
+            self._skip_btn.configure(state="normal", text=_SKIP_DEFAULT)
             self._export_btn.configure(state="disabled")
             self._explain_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
@@ -4350,7 +4856,7 @@ class RestorePage(ctk.CTkFrame):
             self._start_btn.configure(state="normal")
             self._auto_btn.configure(state="normal")
             self._stop_btn.configure(state="disabled")
-            self._skip_btn.configure(state="disabled")
+            self._skip_btn.configure(state="disabled", text=_SKIP_DEFAULT)
             self._export_btn.configure(state="normal")
             # enable Explain Errors only if the last run produced any
             has_failures = any(
@@ -4559,8 +5065,10 @@ class RestorePage(ctk.CTkFrame):
 
         def do():
             if take_snapshot:
+                self._set_skip_label("snapshot")
                 self.after(0, lambda: self._status_lbl.configure(
-                    text="Snapshotting destination…", text_color=INFO))
+                    text="📸 Snapshot: backing up destination "
+                         "(for rollback)…", text_color=INFO))
                 try:
                     snap = self._take_dest_snapshot(
                         api, levels, scope_filters, elements)
@@ -4582,6 +5090,22 @@ class RestorePage(ctk.CTkFrame):
                         f"⚠ Destination snapshot FAILED: {exc} — "
                         f"rollback will not be available.")
                     cli_log(f"Destination snapshot failed: {exc}", "error")
+                # A Skip clicked during the (potentially long) snapshot phase
+                # leaves _skip_element set and the button disabled. Clear both
+                # so the restore itself stays fully skippable; the partial
+                # snapshot that was captured is still saved.
+                if self._skip_element:
+                    self._skip_element = False
+                    self._operation_log.append(
+                        "    ⏭ snapshot: skipped remaining by user request "
+                        "(partial snapshot saved)")
+                self.after(0, lambda: self._skip_btn.configure(
+                    state="normal", text=_SKIP_DEFAULT))
+                # Snapshot phase is done — clear its status text so the
+                # lingering "📸 Snapshot…" label doesn't make the actual
+                # restore look like it's still snapshotting.
+                self.after(0, lambda: self._status_lbl.configure(
+                    text="Restoring…", text_color=INFO))
             return self._run_restore(api, self.backup_data, elements,
                                      levels, scope_filters)
 
@@ -4943,6 +5467,10 @@ class RestorePage(ctk.CTkFrame):
 
             # ── resolve destination (auto-create if needed) ──
             ui(lambda n=nid: pt.set_running(n))
+            # Keep the status label in sync with the real phase so it never
+            # shows a stale "📸 Snapshot…" while the restore is running.
+            ui(lambda p=npath, x=i, t=total: self._status_lbl.configure(
+                text=f"Restoring {x+1}/{t}: {p}…", text_color=INFO))
             ui(lambda n=nid: pt.set_detail(n, "resolving…"))
             # Follow the active node in the diff panel so the operator
             # always sees source-vs-dest for whatever is currently being
@@ -5100,6 +5628,7 @@ class RestorePage(ctk.CTkFrame):
 
             def _r(label, fn, *a, **kw):
                 """Restore helper: call fn, track ok/skip/fail."""
+                self._set_skip_label(label)
                 ui(lambda n=nid, l=label: pt.set_detail(n, f"restoring {l}…"))
                 try:
                     fn(*a, **kw)
@@ -5117,11 +5646,22 @@ class RestorePage(ctk.CTkFrame):
                         })
                         self._operation_log.append(
                             f"    ✗ {label}: {exc}")
+                # A single API call can't be interrupted mid-flight, so a Skip
+                # clicked during this step lands too late to stop it. Absorb the
+                # flag here (and re-enable the button) so it doesn't leak into —
+                # and wrongly skip — the NEXT element. Cancel (Stop) is left set.
+                if self._skip_element:
+                    self._skip_element = False
+                    ui(lambda: self._skip_btn.configure(state="normal"))
+                    self._operation_log.append(
+                        f"    ⏭ {label}: Skip clicked but step already "
+                        f"completed (single-shot, not interruptible)")
 
             def _r_bulk(label, items, fn):
                 """Bulk restore: create items one by one, skip existing."""
                 item_list = items or []
                 total_items = len(item_list)
+                self._set_skip_label(label)
                 ui(lambda n=nid, l=label, c=total_items:
                    pt.set_detail(n, f"restoring {l} (0/{c})…"))
                 ok = skip = fail = 0
@@ -5168,6 +5708,18 @@ class RestorePage(ctk.CTkFrame):
                     self._operation_log.append(
                         f"    ✗ {label} last error: {last_err_msg}")
                     cli_log(f"{npath} {label}: {last_err_msg}", "error")
+
+            def _skip_reset(label):
+                """After a custom (non-_r_bulk) loop breaks on a Skip click,
+                clear the flag and re-enable the button so the NEXT element is
+                skippable again, and record it in the operation log. Cancel
+                (Stop) is intentionally left set so the outer node loop halts
+                too."""
+                if self._skip_element:
+                    self._skip_element = False
+                    ui(lambda: self._skip_btn.configure(state="normal"))
+                    self._operation_log.append(
+                        f"    ⏭ {label}: skipped remaining by user request")
 
             def _summarize(result_key, ok, skip, fail, last_err):
                 """Shared 'N new, N exist, N err' summary row + last-error log
@@ -5225,15 +5777,41 @@ class RestorePage(ctk.CTkFrame):
 
             # ── Policy ──
             if "policy" in elements and data.get("policy"):
-                _r("policy", api.set_policy, ntype, dest_id or "",
-                   data["policy"])
+                def _restore_policy(pol):
+                    try:
+                        return api.set_policy(ntype, dest_id or "", pol)
+                    except Exception as exc:
+                        msg = (str(exc) + " "
+                               + str(getattr(exc, "detail", ""))).lower()
+                        # The source policy's forensics auto-triggering
+                        # references RemoteOps forensic-script profiles by
+                        # ID; those profiles don't exist on the destination,
+                        # so S1 rejects the policy with "Bad auto-triggering
+                        # policy information provided (code 4000010)". Drop
+                        # that block and retry so the rest of the policy
+                        # still lands.
+                        if "auto-triggering" in msg or "triggering" in msg:
+                            self._operation_log.append(
+                                "    ↳ dropped forensicsAutoTriggering "
+                                "(source RemoteOps forensic profile not on "
+                                "destination) and retried policy")
+                            return api.set_policy(
+                                ntype, dest_id or "",
+                                _drop_forensics_triggering(pol))
+                        raise
+                _r("policy", _restore_policy, data["policy"])
 
             # ── Exclusions ──
             if "exclusions" in elements and data.get("exclusions"):
+                self._set_skip_label("excl")
                 e_ok = e_skip = e_fail = 0
                 e_last_err = ""
                 for etype, items in data["exclusions"].items():
+                    if self._skip_element or self._cancelled:
+                        break
                     for item in (items or []):
+                        if self._skip_element or self._cancelled:
+                            break
                         try:
                             payload = _whitelist(item, _EXCL_FIELDS)
                             # Scrub invisible bidi/zero-width chars that
@@ -5261,10 +5839,12 @@ class RestorePage(ctk.CTkFrame):
                                     "name": item.get("value", "?")[:80],
                                     "error": full_err[:500],
                                 })
+                _skip_reset("excl")
                 _summarize("excl", e_ok, e_skip, e_fail, e_last_err)
 
             # ── Unified Exclusions ──
             if "unified_exclusions" in elements and data.get("unified_exclusions"):
+                self._set_skip_label("unified-excl")
                 u_ok = u_skip = u_fail = 0
                 u_last_err = ""
                 # Build the unified-exclusion filter with scopeLevel
@@ -5280,6 +5860,8 @@ class RestorePage(ctk.CTkFrame):
                 if _ue_slid:
                     ue_filter["scopeLevelId"] = _ue_slid
                 for item in data["unified_exclusions"]:
+                    if self._skip_element or self._cancelled:
+                        break
                     try:
                         payload = _whitelist(item, _UNIFIED_EXCL_FIELDS)
                         # Map common field-name variants
@@ -5320,6 +5902,7 @@ class RestorePage(ctk.CTkFrame):
                                          or item.get("value", "?"))[:80],
                                 "error": full_err[:500],
                             })
+                _skip_reset("unified-excl")
                 _summarize("unified-excl", u_ok, u_skip, u_fail, u_last_err)
 
             # ── Blocklist ──
@@ -5354,6 +5937,7 @@ class RestorePage(ctk.CTkFrame):
                     log(f"  fw-rules: 0 rules at {ntype} scope "
                         f"({_fw_inherited} inherited rules skipped)")
             if "firewall_rules" in elements and fw_r:
+                self._set_skip_label("fw-rules")
                 sorted_fw = sorted(fw_r,
                     key=lambda r: r.get("order", 9999))
                 new_fw_ids = []
@@ -5361,6 +5945,8 @@ class RestorePage(ctk.CTkFrame):
                 fw_last_err = ""
                 fw_loc_stripped = 0
                 for rule in sorted_fw:
+                    if self._skip_element or self._cancelled:
+                        break
                     cleaned = _whitelist(rule, _FW_RULE_FIELDS)
                     # avoid conflict: use os_types if present, drop osType
                     if "os_types" in cleaned and "osType" in cleaned:
@@ -5428,6 +6014,7 @@ class RestorePage(ctk.CTkFrame):
                         f"created without their original location "
                         f"binding (source location IDs don't exist on "
                         f"this destination — re-attach manually).")
+                _skip_reset("fw-rules")
                 _summarize("fw-rules", fw_ok, fw_skip, fw_fail, fw_last_err)
                 if len(new_fw_ids) > 1:
                     try:
@@ -5473,11 +6060,14 @@ class RestorePage(ctk.CTkFrame):
                     log(f"  dc-rules: 0 rules at {ntype} scope "
                         f"({len(dc_r)} inherited rules skipped)")
                 else:
+                    self._set_skip_label("dc-rules")
                     sorted_dc = sorted(dc_r_scoped,
                                        key=lambda r: r.get("order", 9999))
                     new_dc_ids = []
                     dc_ok = dc_skip = dc_fail = 0
                     for rule in sorted_dc:
+                        if self._skip_element or self._cancelled:
+                            break
                         rname = rule.get("ruleName", "?")
                         try:
                             resp = api.create_device_control_rule(
@@ -5502,6 +6092,7 @@ class RestorePage(ctk.CTkFrame):
                                     "name": str(rname)[:80],
                                     "error": full_err[:500],
                                 })
+                    _skip_reset("dc-rules")
                     parts = []
                     if dc_ok:   parts.append(f"{dc_ok} new")
                     if dc_skip: parts.append(f"{dc_skip} exist")
@@ -5514,18 +6105,79 @@ class RestorePage(ctk.CTkFrame):
                             pass
 
             # ── Tags ──
-            tags = data.get("config", {}).get("tags", {})
+            cfg = data.get("config", {}) or {}
+            tags = cfg.get("tags", {}) or {}
+
+            def _create_tag(tag, tag_type):
+                """POST /tags for one backed-up tag. `scope` is sent so the tag
+                lands at this node's level (matching the reference CLI); if a
+                console rejects it, retry without it — the {filter} envelope
+                already targets the scope."""
+                body = _tag_payload(tag, tag_type, ntype)
+                try:
+                    return api.create_tag(scope, body)
+                except Exception as exc:
+                    if _is_exists_error(exc) or "scope" not in body:
+                        raise
+                    if "scope" not in _err_detail(exc).lower():
+                        raise
+                    body.pop("scope", None)
+                    return api.create_tag(scope, body)
+
+            def _restore_tags(label, items, tag_type):
+                """Restore one tag group. GET /tags returns inherited tags at
+                every level, so keep only the ones this node owns. Always
+                records a row — a silent no-op is how endpoint tags went
+                missing without any error (Joshua Tooley, 2026-08)."""
+                items = items or []
+                own = _tags_for_scope(items, ntype)
+                if not own:
+                    if items:
+                        log(f"  {label}: 0 tags at {ntype} scope "
+                            f"({len(items)} inherited skipped)")
+                    results.append((label, "0"))
+                    return
+                _r_bulk(label, own, lambda t: _create_tag(t, tag_type))
+
             if "tags_firewall" in elements:
-                ft = tags.get("firewall") or data.get("tags_firewall") or []
-                if ft: _r_bulk("tags-fw", ft,
-                               lambda t: api.create_tag(scope, _whitelist(t, _TAG_FIELDS)))
+                _restore_tags("tags-fw",
+                              tags.get("firewall") or data.get("tags_firewall"),
+                              "firewall")
             if "tags_network_quarantine" in elements:
-                nt = tags.get("networkQuarantine") or data.get("tags_nq") or []
-                if nt: _r_bulk("tags-nq", nt,
-                               lambda t: api.create_tag(scope, _whitelist(t, _TAG_FIELDS)))
+                _restore_tags("tags-nq",
+                              tags.get("networkQuarantine")
+                              or data.get("tags_nq"),
+                              "network-quarantine")
+            if "tags_endpoint" in elements:
+                # Device-inventory (Ranger) tags are named /tags objects…
+                _restore_tags("tags-ep",
+                              tags.get("deviceInventory")
+                              or data.get("tags_endpoint"),
+                              "device-inventory")
+                # …while unified endpoint tags are key/value pairs created
+                # through the Tag Manager API.
+                ep_tags = cfg.get("endpointTags") or []
+                if ep_tags:
+                    _r_bulk("ep-tags", ep_tags,
+                            lambda t: api.create_endpoint_tag(
+                                _endpoint_tag_payload(t), scope))
+                else:
+                    results.append(("ep-tags", "0"))
 
             # ── STAR ──
             star = data.get("star") or data.get("star_rules") or []
+            if "star_rules" in elements and star:
+                # Only restore rules that belong to THIS node's own scope. The
+                # /cloud-detection/rules API returns inherited rules at every
+                # level, so without this an account rule gets re-created at
+                # every child site (reported by DJ Wilhelm, 2026-07). Mirrors
+                # the firewall/device-control scope filters above, and also
+                # repairs OLD backups that captured the inherited rules.
+                _star_inherited = len(star)
+                star = _star_rules_for_scope(star, ntype)
+                if not star:
+                    log(f"  star: 0 rules at {ntype} scope "
+                        f"({_star_inherited} inherited rules skipped)")
             if "star_rules" in elements and star:
                 def _create_star(rule):
                     cleaned = _clean_for_restore(rule)
@@ -5641,6 +6293,7 @@ class RestorePage(ctk.CTkFrame):
             # fails with "Password is missing". Show a gentle skip
             # instead of a scary error.
             if stg.get("smtp"):
+                self._set_skip_label("set-smtp")
                 ui(lambda n=nid: pt.set_detail(n, "restoring set-smtp…"))
                 try:
                     api.set_smtp_settings(scope,
@@ -5712,17 +6365,23 @@ class RestorePage(ctk.CTkFrame):
             # ── Threat Intel ──
             ti = data.get("threatIntel") or []
             if "threat_intel" in elements and ti:
+                self._set_skip_label("threat-intel")
                 ok = fail = 0
                 batch = []
                 for ioc in ti:
+                    if self._skip_element or self._cancelled:
+                        break
                     batch.append(ioc)
                     if len(batch) >= 100:
                         try: api.upsert_threat_intel(scope, batch); ok += len(batch)
                         except Exception: fail += len(batch)
                         batch = []
-                if batch:
+                # Flush the final partial batch only if we weren't asked to
+                # skip/stop mid-stream (an interrupted run leaves it unsent).
+                if batch and not (self._skip_element or self._cancelled):
                     try: api.upsert_threat_intel(scope, batch); ok += len(batch)
                     except Exception: fail += len(batch)
+                _skip_reset("threat-intel")
                 results.append(("threat-intel", f"{ok}/{ok+fail}"))
 
             # ── Log collection rules ──
@@ -5813,6 +6472,53 @@ class RestorePage(ctk.CTkFrame):
                     f"({len(scripts)}): {names}{more}")
                 results.append(("scripts", f"{len(scripts)} listed"))
 
+            roles = data.get("roles") or []
+            if "roles" in elements and roles and ntype == "account":
+                r_acct = dest_id or ""
+                try:
+                    existing_roles = {
+                        (r.get("name") or "").strip().lower()
+                        for r in (api.get_roles(
+                            params={"accountIds": r_acct}) or [])}
+                except Exception:
+                    existing_roles = set()
+                creatable_roles = []
+                skipped_predef = 0
+                for r in roles:
+                    if not isinstance(r, dict):
+                        continue
+                    # Predefined roles exist on every console; the list/detail
+                    # endpoints flag them via `predefined` OR `predefinedRole`.
+                    if r.get("predefined") is True or r.get("predefinedRole") is True:
+                        skipped_predef += 1
+                        continue
+                    nm = (r.get("name") or "").strip().lower()
+                    if not nm or nm in existing_roles:
+                        continue
+                    creatable_roles.append(r)
+                if skipped_predef:
+                    self._operation_log.append(
+                        f"  ℹ Skipped {skipped_predef} predefined role(s) — "
+                        f"they exist on every console")
+                if creatable_roles:
+                    # Fetch the destination's create-ready role template once so
+                    # every new role starts from the dest schema + licensed
+                    # permission set (see _build_role_payload). Best-effort:
+                    # fall back to a name/description-only payload if it fails.
+                    scope_filter = _role_scope_filter(r_acct)
+                    try:
+                        role_template = api.get_role_template(
+                            params={"accountIds": r_acct})
+                    except Exception as e:
+                        role_template = None
+                        self._operation_log.append(
+                            f"  ⚠ Role template unavailable ({e}); creating "
+                            f"roles with name/description only")
+                    _r_bulk("roles", creatable_roles,
+                            lambda r: api.create_role(
+                                _build_role_payload(r, role_template),
+                                scope_filter))
+
             # ── Console (human) users ──
             # Only locally-created users can be provisioned via API. SSO/SCIM
             # users auto-provision on first login, so re-creating them here is
@@ -5836,7 +6542,9 @@ class RestorePage(ctk.CTkFrame):
                 try:
                     dest_roles = {
                         (r.get("name") or "").strip().lower(): r.get("id")
-                        for r in (api.get_roles() or [])}
+                        for r in ((api.get_roles() or [])
+                                  + (api.get_roles(
+                                      params={"accountIds": acct_id}) or []))}
                 except Exception:
                     dest_roles = {}
 
@@ -7183,7 +7891,7 @@ class RestorePage(ctk.CTkFrame):
             f'<div style="font-family:Consolas,monospace; font-size:11px; '
             f'color:#888; padding:1px 0;">{l}</div>'
             for l in log)
-        log_html = f"""<details style="margin-top:28px;">
+        log_html = f"""<details open style="margin-top:28px;">
           <summary style="color:#888; cursor:pointer; font-size:14px;
             margin-bottom:8px;">Full Operation Log ({len(log)} lines)</summary>
           <div style="background:#111; border-radius:8px; padding:16px;
@@ -7215,21 +7923,21 @@ class RestorePage(ctk.CTkFrame):
         path = filedialog.asksaveasfilename(
             title="Export Restore Report",
             initialfile=f"s1-restore-report-{ts}",
-            defaultextension=".html",
+            defaultextension=".json",
             filetypes=[
-                ("HTML Report", "*.html"),
                 ("JSON Data", "*.json"),
+                ("HTML Report", "*.html"),
             ])
         if not path:
             return
         ext = os.path.splitext(path)[1].lower()
-        if ext == ".json":
+        if ext == ".html":
+            with open(path, "w") as f:
+                f.write(html)
+        else:
             report = {"meta": meta, "nodes": nodes, "log": log}
             with open(path, "w") as f:
                 json.dump(report, f, indent=2, default=str)
-        else:
-            with open(path, "w") as f:
-                f.write(html)
         cli_log(f"Restore report exported → {os.path.basename(path)}",
                 "success")
         messagebox.showinfo("Report Exported",

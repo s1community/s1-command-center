@@ -80,6 +80,22 @@ def _client(responses):
     return api
 
 
+def test_client_requests_uncompressed_json():
+    api = S1API("https://example.sentinelone.net", "tok")
+    assert api.session.headers["Accept-Encoding"] == "identity"
+
+
+def test_content_decoding_error_is_wrapped_with_endpoint():
+    err = s1_api.requests.exceptions.ContentDecodingError(
+        "Error -3 while decompressing data: incorrect header check")
+    api = _client([err, err, err, err])
+    with pytest.raises(S1APIError) as exc:
+        api._request("GET", "/accounts")
+    assert "GET /accounts failed after 4 attempts" in str(exc.value)
+    assert "response decoding failed" in exc.value.detail
+    assert "incorrect header check" in exc.value.detail
+
+
 # ── _request happy path ─────────────────────────────────────────────────
 
 def test_request_returns_json_on_200():
@@ -165,6 +181,195 @@ def test_non_json_error_body_falls_back_to_text():
     with pytest.raises(S1APIError) as ei:
         api._request("GET", "/x")
     assert ei.value.detail == "plain text error"
+
+
+def test_get_roles_passes_account_scope():
+    api = _client([FakeResp(200, {"data": [{"id": "r1", "name": "Custom"}]})])
+    roles = api.get_roles(params={"accountIds": "A1"})
+    assert roles == [{"id": "r1", "name": "Custom"}]
+    _method, url, params, _json = api.session.calls[0]
+    assert url.endswith("/rbac/roles")
+    assert params["accountIds"] == "A1"
+
+
+def test_get_roles_no_params_still_works():
+    api = _client([FakeResp(200, {"data": []})])
+    assert api.get_roles() == []
+
+
+def test_get_role_hits_definition_endpoint_with_scope():
+    api = _client([FakeResp(200, {"data": {"id": "r1", "name": "Custom",
+                                           "permissions": [{"id": "p"}]}})])
+    role = api.get_role("r1", params={"accountIds": "A1"})
+    assert role["permissions"] == [{"id": "p"}]
+    _method, url, params, _json = api.session.calls[0]
+    assert url.endswith("/rbac/role/r1")
+    assert params["accountIds"] == "A1"
+
+
+def test_create_role_posts_data_envelope():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_role({"name": "Custom", "pages": []})
+    method, url, _params, body = api.session.calls[0]
+    assert method == "POST"
+    assert url.endswith("/rbac/role")
+    # No scope filter passed → bare data envelope.
+    assert body == {"data": {"name": "Custom", "pages": []}}
+
+
+def test_create_role_includes_scope_filter():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_role({"name": "Custom"}, {"accountIds": ["DEST"]})
+    _method, url, _params, body = api.session.calls[0]
+    assert url.endswith("/rbac/role")
+    # S1 requires a top-level `filter`; scope must not be inside `data`.
+    assert body == {"data": {"name": "Custom"},
+                    "filter": {"accountIds": ["DEST"]}}
+
+
+def test_get_role_template_hits_rbac_role_with_scope():
+    api = _client([FakeResp(200, {"data": {"pages": [{"id": "p"}]}})])
+    tmpl = api.get_role_template(params={"accountIds": "A1"})
+    assert tmpl == {"pages": [{"id": "p"}]}
+    _method, url, params, _json = api.session.calls[0]
+    assert url.endswith("/rbac/role")
+    assert params["accountIds"] == "A1"
+
+
+# ── tags ────────────────────────────────────────────────────────────────
+# Endpoint ("unified") tags are a different API from the named /tags objects.
+# The old code called a non-existent /endpoint-tags route, so endpoint tags
+# were silently never backed up and never restored (Joshua Tooley, 2026-08).
+
+def test_get_tags_passes_type_and_scope():
+    api = _client([FakeResp(200, {"data": [{"id": "t1", "name": "Servers"}]})])
+    tags = api.get_tags("firewall", {"siteIds": ["S1"]})
+    assert tags == [{"id": "t1", "name": "Servers"}]
+    method, url, params, _body = api.session.calls[0]
+    assert method == "GET" and url.endswith("/tags")
+    assert params["type"] == "firewall" and params["siteIds"] == ["S1"]
+
+
+def test_create_tag_uses_filter_data_envelope():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_tag({"siteIds": ["S1"]}, {"name": "Servers", "type": "firewall"})
+    method, url, _params, body = api.session.calls[0]
+    assert method == "POST" and url.endswith("/tags")
+    assert body == {"filter": {"siteIds": ["S1"]},
+                    "data": {"name": "Servers", "type": "firewall"}}
+
+
+def test_get_endpoint_tags_hits_agents_tags():
+    api = _client([FakeResp(200, {"data": [{"id": "e1", "key": "Dept"}]})])
+    assert api.get_endpoint_tags({"siteIds": ["S1"]}) == \
+        [{"id": "e1", "key": "Dept"}]
+    method, url, params, _body = api.session.calls[0]
+    assert method == "GET" and url.endswith("/agents/tags")
+    assert params["siteIds"] == ["S1"]
+
+
+def test_create_endpoint_tag_posts_tag_manager_with_scope():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_endpoint_tag({"key": "Dept", "type": "endpoints"},
+                            {"siteIds": ["S1"]})
+    method, url, _params, body = api.session.calls[0]
+    assert method == "POST" and url.endswith("/tag-manager")
+    assert body == {"data": {"key": "Dept", "type": "endpoints"},
+                    "filter": {"siteIds": ["S1"]}}
+
+
+def test_create_endpoint_tag_without_scope_omits_filter():
+    api = _client([FakeResp(201, {"data": {"id": "new"}})])
+    api.create_endpoint_tag({"key": "Dept", "type": "endpoints"})
+    _method, _url, _params, body = api.session.calls[0]
+    assert body == {"data": {"key": "Dept", "type": "endpoints"}}
+
+
+# ── POST /tag-manager: a 2xx is not proof of a create ────────────────────
+# The beijerrefab restore (2026-08-13) reported ~150 endpoint tags created
+# with zero errors against a console that ended up with none: the route
+# answers 200 to a body it does not store.
+
+def _ep_tag(api):
+    return api.create_endpoint_tag({"key": "Dept", "type": "endpoints"},
+                                   {"siteIds": ["S1"]})
+
+
+_NOT_THERE = FakeResp(200, {"data": []})       # read-back: no such tag
+
+
+def _posts(api):
+    return [c for c in api.session.calls if c[0] == "POST"]
+
+
+def test_empty_2xx_is_not_counted_as_a_created_tag():
+    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE,
+                   FakeResp(200, {"data": {}}), _NOT_THERE,
+                   FakeResp(200, {"data": {}}), _NOT_THERE])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert "created nothing" in str(exc.value)
+    # every supported shape was tried, each one confirmed absent first
+    assert len(_posts(api)) == 3
+
+
+def test_affected_zero_is_not_counted_as_a_created_tag():
+    api = _client([FakeResp(200, {"data": {"affected": 0}}), _NOT_THERE] * 3)
+    with pytest.raises(S1APIError):
+        _ep_tag(api)
+
+
+def test_affected_count_counts_as_a_created_tag():
+    api = _client([FakeResp(200, {"data": {"affected": 1}})])
+    assert _ep_tag(api) == {"data": {"affected": 1}}
+    assert len(api.session.calls) == 1
+
+
+def test_create_endpoint_tag_falls_back_to_the_shape_that_stores():
+    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE,
+                   FakeResp(200, {"data": [{"id": "new"}]})])
+    assert _ep_tag(api) == {"data": [{"id": "new"}]}
+    _m, _u, _p, body = _posts(api)[1]
+    assert body == {"data": [{"key": "Dept", "type": "endpoints"}],
+                    "filter": {"siteIds": ["S1"]}}
+
+
+def test_a_create_the_console_stored_but_did_not_echo_is_accepted():
+    # If the tag IS there afterwards, the empty response was just terse —
+    # sending the next shape at it would create a second copy.
+    api = _client([FakeResp(200, {}),
+                   FakeResp(200, {"data": [{"id": "e1", "key": "Dept"}]})])
+    _ep_tag(api)
+    assert len(_posts(api)) == 1
+    _m, _u, params, _b = api.session.calls[1]
+    assert params["key__contains"] == "Dept"
+    assert params["siteIds"] == ["S1"]
+
+
+def test_unconfirmable_create_is_never_retried():
+    # Read-back failed, so whether the tag was stored is unknown. Retrying
+    # would risk duplicating it — raise instead.
+    api = _client([FakeResp(200, {}), FakeResp(400, {})])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert "could not confirm" in str(exc.value)
+    assert len(_posts(api)) == 1
+
+
+def test_create_endpoint_tag_tries_next_shape_when_one_is_rejected():
+    api = _client([FakeResp(400, {"errors": [{"detail": "unknown field"}]}),
+                   FakeResp(201, {"data": {"id": "new"}})])
+    assert _ep_tag(api) == {"data": {"id": "new"}}
+
+
+def test_create_endpoint_tag_surfaces_already_exists_immediately():
+    # 409 is a real answer about this tag — it must not be retried as a
+    # shape problem, so the restore can report it as "exists", not "new".
+    api = _client([FakeResp(409, {"errors": [{"detail": "Already Exists"}]})])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert exc.value.status_code == 409
+    assert len(api.session.calls) == 1
 
 
 # ── throttle telemetry ───────────────────────────────────────────────────

@@ -86,7 +86,7 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Threat Intel** — IOC management
 - **Ranger & Rogues** — Network discovery
 - **Remote Scripts** — Script library management
-- **Tags** — Tag management
+- **Tags** — Audit what tags a console actually holds, scope by scope, own vs inherited — plus a write probe that diagnoses why endpoint tag creation silently fails
 - **Raw API** — Direct API access for any endpoint
 
 ## Installation
@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.1.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.2.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -208,7 +208,7 @@ Navigate to **Restore to Dest**:
 | Network Quarantine | ✅ | ✅ | Config and rules |
 | Tags (Firewall) | ✅ | ✅ | Firewall classification tags |
 | Tags (NQ) | ✅ | ✅ | Network quarantine tags |
-| Tags (Endpoint) | ✅ | ✅ | Device inventory tags |
+| Tags (Endpoint) | ✅ | ✅ | Two different objects: device inventory (Ranger) tags via `/tags`, and unified endpoint tags via the Tag Manager API — the latter needs its own token permission |
 | STAR Rules | ✅ | ✅ | Custom detection rules, auto-fixes expired dates |
 | Saved Filters | ✅ | ✅ | Deep Visibility saved queries |
 | Threat Intel | ✅ | ✅ | IOCs (batched, up to 5000) |
@@ -288,6 +288,10 @@ s1-command-center/
 ├── s1_api.py         # SentinelOne REST API client
 ├── config.py         # Configuration/context manager (saved connections)
 ├── export_utils.py   # HTML & Excel report generation
+├── migtools.py       # Pure migration logic (preflight, reconciliation, diffs)
+├── tag_audit.py      # Tag audit & endpoint-tag write probe (Tags page core)
+├── theme.py          # Colour palette, fonts, widget theming
+├── tests/            # pytest suite (no console required — fakes throughout)
 ├── requirements.txt  # Python dependencies
 └── s1cc.ico          # Application icon
 ```
@@ -325,8 +329,11 @@ The API token needs these minimum permissions for full backup/restore:
 | `DeviceControl.view`, `DeviceControl.edit` | Backup/restore device control |
 | `STAR.view`, `STAR.create` | Backup/restore custom rules |
 | `Settings.view`, `Settings.edit` | Backup/restore settings |
-| `Tags.view`, `Tags.create` | Backup/restore tags |
+| `Tags.view`, `Tags.create` | Backup/restore firewall / network-quarantine / device-inventory tags |
+| `Tag Management.view`, `Tag Management.create` | Backup/restore unified endpoint tags (Tag Manager) |
 | `ThreatIntelligence.view`, `ThreatIntelligence.create` | Backup/restore IOCs |
+
+> **Endpoint tags need their own permission.** `Tags.create` does *not* cover the Tag Manager route. A token with only `Tags.create` restores firewall tags and leaves the destination's endpoint tag list empty. If tags go missing after a restore, the **Tags** page audits what the console really holds and diagnoses which half is failing.
 
 > **Recommendation:** Use a Service User with **Admin** role for full access.
 
@@ -349,6 +356,107 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.2.4 — 2026-08-21
+#### Bug Fixes
+- **The tag diagnosis stated a cause it hadn't proven** — "no format worked" was reported as a missing `Tag Management.create` permission. A global-admin token with that permission granted produced the same verdict, because asking a single listing route and discarding the console's reply can't tell "discarded the write" from "stored it somewhere else". Both are now reported, each with its own next step.
+- **Endpoint tags were only looked for on `GET /agents/tags`** — a console serving them elsewhere was reported as having none. Every known route is tried, and the answering route is named.
+- **Read-back matched the `key` field exactly** — `tagName` and `name` now count, case-insensitively.
+
+#### New
+- **The console's raw response is recorded per request format** and logged, so a create the console claims but nothing can list is its own verdict rather than a silent no-op.
+- **The diagnosis can be saved as a report** — formats, outcomes, routes and raw responses, for sending on.
+
+### v2.2.3 — 2026-08-19
+#### Bug Fixes
+- **Result tables drew their first row over the column headers** — a batched load numbered the first row one place too high, so it shared a grid row with the header. Affected every operations page; most visible on the Tags audit, where "own" appeared printed over "owned".
+
+### v2.2.2 — 2026-08-16
+#### New
+- **Tag audit, built into the app** — the v2.2.1 audit was a command-line script, which meant cloning the repo to answer "did my tags actually land?". It's now the **Tags** page (Operations → Inventory). **Run Audit** is read-only and lists every tag the chosen console really holds, per scope, from both tag APIs, separating each scope's own tags from inherited ones — filterable by tag type, account and site, and exportable. **Diagnose endpoint tags** writes (with confirmation): it tries each request format `POST /tag-manager` may accept using throwaway `s1cc-probe-…` keys, re-reads to see which one actually stored, deletes them again, and reports either the format that works or that the console accepts and discards everything — what a token without `Tag Management.create` looks like.
+- **An empty endpoint tag list explains itself** — if the audit finds none, the summary says so and points at the diagnosis rather than leaving a blank table.
+
+#### Changed
+- Restore errors for failed tag creates now point at the Tags page instead of a script.
+
+### v2.2.1 — 2026-08-16
+#### Bug Fixes
+- **A tag create the console throws away is no longer reported as success** — `POST /tag-manager` answers `200` to a body it doesn't store, so a restore could report ~150 endpoint tags created against a destination whose Tag Manager list stayed empty. Creation now has to see a created object in the response (an id, a non-empty list, or a positive `affected` count) before it counts as new; anything else is an error on the node, not a phantom "N new". The request is also retried in each envelope the route accepts — but only after reading the tag back and confirming it isn't there, so a console that stores the tag and answers with an empty body can't end up with duplicates.
+- **Failed endpoint tags are named properly** — key/value tags have no `name`, so the failure list showed only the value ("Finance"). It now reads `key=value`.
+
+#### New
+- **Tag audit tooling** — lists every tag a console actually holds, per scope, separating a scope's own tags from inherited ones, so you can confirm a restore landed without re-running it. An opt-in write probe finds which `POST /tag-manager` body the console really stores and cleans up after itself. Shipped here as a script; moved into the Tags page in v2.2.2.
+
+#### Docs
+- **Endpoint tags need `Tag Management.create`** — a separate permission from `Tags.create`, now listed in the API token permissions page.
+
+### v2.2.0 — 2026-08-13
+#### Bug Fixes
+- **Endpoint tags are finally restored** — selecting **tags_endpoint** backed the tags up, counted them in preview/validation and listed them in the restore report, but the restore loop had no branch for them at all: nothing was created on the destination and no error was raised, so a "restore tags" run looked successful while the destination stayed empty. Device-inventory tags now restore through `/tags` and unified endpoint tags through the Tag Manager API.
+- **Endpoint tag backup hit a route that doesn't exist** — unified endpoint tags were read from `/endpoint-tags`, which isn't a SentinelOne API endpoint. The 404 was swallowed as "n/a", so those tags were never in the backup file in the first place. Listing now uses `/agents/tags` and creation `POST /tag-manager`.
+- **Firewall / network-quarantine tag creation no longer sends read-only fields** — the create payload carried `kind`, which the console rejects, and omitted the tag scope. Payloads are now rebuilt from the writable fields only, with the destination scope stamped in (and a retry without it for consoles that don't accept it).
+- **Inherited tags no longer duplicate down the tree** — `GET /tags` returns the tags a scope inherits from its parents, so restoring a site re-created the account and global tags at site level. Tags are now filtered to the scope that actually owns them, matching the existing firewall / device-control / STAR behaviour.
+- **A tag step that does nothing now says so** — every selected tag group reports a row (`0` included) instead of silently disappearing from the restore report.
+
+#### Tests
+- New restore-coverage guard: every element the backup captures must have a restore branch (or a documented exception), so "backed up but never restored" can't ship again. Plus coverage for tag scope filtering, tag/endpoint-tag payload building, and the corrected API routes. 180 tests total.
+
+### v2.1.10 — 2026-07-29
+#### Bug Fixes
+- **Saved filters now actually restore — and dynamic groups stay dynamic** — a migrated site could come out with none of its Deep Visibility filters, every dynamic group downgraded to **static**, and an empty **Group Ranking** page. All three were the same bug: `/filters` reports a filter's own scope as `scopeLevel`, and that source value was still being sent in the create payload even though the destination scope travels separately in the request's `filter` envelope. The console rejected every create, so no filters landed; group restore then couldn't resolve each dynamic group's filter by name and created it static, and S1 only ranks dynamic groups, so ranking came up empty. `scopeLevel` is now stripped alongside the other scope references. Re-running a restore repairs an affected site.
+
+#### New
+- **Export STAR rules to Excel** — a **⭐ STAR → Excel** button on the Backup page reads every custom detection rule live from the selected console (no backup required) and writes a two-sheet workbook: a *Summary* with totals and breakdowns by scope / status / severity / account, and a *STAR Rules* sheet with all 24 fields per rule, frozen header, auto-filter on, and colour-coded scope / status / severity. Honours the page's Account Name / Site Name filters.
+- **Targeted STAR rule cleanup** — the cleanup script gained `--site-name` / `--site-id` and `--mode all-site-scoped`, to strip every site-scoped rule from a site that a pre-2.1.9 build filled with copies of the tenant's global ruleset.
+
+### v2.1.9 — 2026-07-28
+#### Bug Fixes
+- **Custom detection (STAR) rules no longer duplicate across scopes** — an account-scoped rule was captured at the account *and* under every child site, then re-created at each one, so a single rule ended up repeated per site on the destination. The `/cloud-detection/rules` API returns inherited rules at every scope level; backup and restore now filter each rule to its own scope, matching the existing firewall / device-control behaviour. The restore-side filter also repairs backups taken with earlier builds, so no re-capture is needed.
+
+#### New
+- **Duplicate STAR rule cleanup script** — `scripts/cleanup_duplicate_star_rules.py` finds site-scoped rules that duplicate an account/global rule and bulk-deletes them through the Delete Rules API (the console UI can't filter or bulk-select by site scope). Dry-run by default; `--delete` to apply.
+
+### v2.1.8 — 2026-07-28
+#### Bug Fixes
+- **Backup name filters now prefer an exact match** — typing a specific **Site Name** like `Servers` no longer also backs up supersets such as `HighQ_Servers` or `TR-Servers`. When a name matches exactly it wins; if nothing matches exactly, partial (substring) matching still works as a fallback. The same exact-preferred rule applies to the **Account Name** and **Group Name** filters and the migration/preview tree.
+
+### v2.1.7 — 2026-07-27
+#### Bug Fixes
+- **Custom RBAC roles now restore correctly** — role creation was rejected with "Unknown field" / "Missing required field" validation errors. Restore now sends the role scope as the required top-level `filter`, drops the read-only fields the API rejects (`scope`, `predefinedRole`, `accountIds`, `pages`), and rebuilds each role from the destination console's own role template so permissions carry over even across consoles with different licensed features.
+- **Backup account matching is more reliable** — Account Name filters now normalize invisible Unicode/control characters, copied rich-text spacing, and case before matching API account names. If a stale ticket account ID is present, backup falls back to the visible Account Name instead of returning 0 nodes.
+
+### v2.1.6 — 2026-07-22
+#### Bug Fixes
+- **API calls no longer fail with opaque decompression errors** — requests now prefer uncompressed JSON responses, and any bad compressed response is wrapped with the API endpoint and a clear decode-failure message.
+
+### v2.1.5 — 2026-07-22
+#### Improvements
+- **Account-scoped RBAC roles are now backed up and restored** — role backup now queries the selected account scope and captures full role definitions; restore re-creates custom account roles before creating console users so role assignments can map by name.
+- **Restore element info icons work again** — the ⓘ buttons now open hover/click tooltips instead of silently writing help text to the output console.
+- **Restore log export defaults to JSON** — JSON is now the default export format, and the HTML report expands the full operation log by default when selected.
+- **Source vs destination validation now compares every item** — large exclusion sets are no longer sampled at 50 entries, so missing path exclusions deep in a 300-item list are surfaced in the validation export.
+- **Operations → Exclusions & Blocklist is scope-aware** — add Account/Site filters to load account/site-scoped exclusions instead of only tenant-scoped entries.
+
+### v2.1.4 — 2026-07-14
+#### Improvements
+- **Restore progress bar redesigned** — the bar, timer, and live status no longer float to the right of the RUN buttons with a big gap; they now sit in a dedicated full-width strip directly under the buttons (bar spans the page, timer + status right-aligned).
+
+### v2.1.3 — 2026-07-14
+#### Improvements
+- **macOS Keychain toggle now warns before it bites** — Enabling "Store API tokens in OS keychain" on an unsigned build makes macOS prompt for keychain permission on every launch and after every update. The toggle now confirms this before enabling and reverts if you decline. Default stays OFF (owner-only `0600` file, no prompts). Getting the prompt after an upgrade? Turn this toggle OFF in Settings → Security & Storage.
+
+### v2.1.2 — 2026-07-14
+#### Bug Fixes
+- **Restore no longer looks like it's stuck "Snapshotting" while it's actually restoring** — the pre-restore snapshot label (`📸 Snapshot …`) lingered on the status line for the whole restore. It's now cleared when the snapshot finishes, and the restore shows a live `Restoring i/total: <node>…` label so the current phase is always clear.
+
+### v2.1.1 — 2026-07-14
+Restore reliability release.
+#### Bug Fixes
+- **Policy restore no longer fails on forensics auto-triggering** — Restoring a policy whose `forensicsAutoTriggering` references a RemoteOps forensic-script profile that doesn't exist on the destination failed the whole policy with *"Bad auto-triggering policy information provided (code 4000010)"*. Restore now drops just that block and retries so the rest of the policy lands. Verified live.
+- **STAR custom-detection rules no longer rejected on restore** — Creating a STAR rule failed with *"data: activeResponse: Unknown field (code 4000010)"*; the read-only `activeResponse` field is now stripped before create. Verified live.
+#### Improvements
+- **"Snapshot first" is now interruptible and shows progress** — the pre-restore destination snapshot shows per-node progress (`i/total: path`) and honors **Skip**/**Stop** mid-snapshot instead of looking frozen (captured data is still saved for rollback).
+- **Per-element Skip button** — the Skip button names the element/phase currently running (e.g. "⏭ Skip FW rules") and every restore step honors it and re-enables between elements, so each element is independently skippable.
 
 ### v2.1.0 — 2026-07-13
 UI/UX release.
