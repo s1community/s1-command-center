@@ -256,7 +256,7 @@ def main():
             "total_rules_scanned": len(rules),
             "candidates": [{k: r.get(k) for k in fields} for r in extras],
         }
-        with open(args.out, "w") as fh:
+        with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
         print(f"\nWrote audit list ({len(extras)} rule(s)) to {args.out}")
 

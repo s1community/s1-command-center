@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.2.5 — 2026-08-21
+
+### Bug Fixes
+- **Exporting a report crashed on Windows** ([#3](https://github.com/s1community/s1-command-center/issues/3), reported by ADDefender) — `'charmap' codec can't encode characters in position 17809-17810`. Files were written with Python's default encoding, which is cp1252 on Windows, so one non-ASCII character anywhere in a report killed the export. The STAR Rules report hit it first because rule names and S1QL queries carry accents, dashes and quotes. Every file the app writes or reads is now explicitly UTF-8 — reports, backups, snapshots, restore and validation reports, migration manifests, the alerts CSV, saved connections, profiles, settings and the audit log. **Exports that didn't crash were also affected:** cp1252 bytes were being written into HTML that declares `charset="utf-8"`, so accented characters rendered as mojibake. Reading is fixed too, so a backup or rules file containing non-ASCII no longer fails to load on Windows.
+- **Importing STAR rules created nothing and called it a success** ([#4](https://github.com/s1community/s1-command-center/issues/4), reported by ADDefender) — the STAR Rules page posted the exported JSON back unchanged, and `POST /cloud-detection/rules` refuses that three separate ways: read-only fields it doesn't accept (`id`, `creator`, `activeResponse`, the scope fields), null values that mean "use the default", and an `expiration` that has to fall inside the next six months — an exported rule's is usually in the past. Every rule was rejected, and the result was reported as `✓ Imported 0/1 STAR rules` at success level. The import now prepares each rule exactly as a migration restore does.
+- **The reason was thrown away** — the import loop caught every exception and ignored it, so the console's explanation (which said precisely what was wrong) never reached the user. Each failure is now logged with the rule name and the API's own message, the summary is coloured and logged by outcome, and a failed import raises an error dialog naming the first few reasons instead of "Done".
+
+### Changed
+- **One implementation of the STAR create payload** — the restore path and the Operations import now share `migtools.prepare_star_rule`, along with `clean_for_restore` and the strip list, which moved into `migtools.py`. The Operations import had quietly missed every fix the restore path learned; sharing the code is what stops that recurring.
+
+### Tests
+- 15 covering the STAR payload: identifiers, scope fields, `activeResponse` and computed counters stripped; nulls dropped while `False`/`0` survive; expiry clamped when past or beyond six months, left alone when valid, and left for the console to reject when unparseable. Plus a guard that both call sites use the shared builder and the import doesn't return to swallowing errors.
+- 4 for encoding, including a source guard over all 30 text `open()` calls in the app — the round-trip tests pass on macOS and Linux whatever the code does, since only Windows defaults to cp1252, so the guard is what actually protects the Windows build. 243 tests total.
+
 ## v2.2.4 — 2026-08-21
 
 ### Bug Fixes
