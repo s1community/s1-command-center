@@ -26,6 +26,24 @@ class S1APIError(Exception):
         super().__init__(self.message)
 
 
+def created_something(resp: dict) -> bool:
+    """Did a create response describe an object that now exists?
+
+    A 2xx is not proof on its own: ``POST /tag-manager`` answers 200 to a
+    body it does not understand and stores nothing, which is how a restore
+    can report "150 new" against a console that ends up with none. A
+    response counts as a real create when it carries an object, a non-empty
+    list, or a positive ``affected`` count.
+    """
+    data = (resp or {}).get("data")
+    if isinstance(data, dict) and "affected" in data:
+        try:
+            return int(data.get("affected") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+    return bool(data)
+
+
 class S1API:
     API_PREFIX = "/web/api/v2.1"
 
@@ -553,21 +571,8 @@ class S1API:
 
     @staticmethod
     def _created_something(resp: dict) -> bool:
-        """Did a create response describe an object that now exists?
-
-        A 2xx is not proof on its own: ``POST /tag-manager`` answers 200 to a
-        body it does not understand and stores nothing, which is how a restore
-        can report "150 new" against a console that ends up with none. A
-        response counts as a real create when it carries an object, a
-        non-empty list, or a positive ``affected`` count.
-        """
-        data = (resp or {}).get("data")
-        if isinstance(data, dict) and "affected" in data:
-            try:
-                return int(data.get("affected") or 0) > 0
-            except (TypeError, ValueError):
-                return False
-        return bool(data)
+        """Did a create response describe an object that now exists?"""
+        return created_something(resp)
 
     def endpoint_tag_exists(self, data: dict,
                             scope: dict | None = None) -> Optional[bool]:

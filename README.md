@@ -350,6 +350,16 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v2.2.4 — 2026-08-21
+#### Bug Fixes
+- **The tag diagnosis stated a cause it hadn't proven** — "no format worked" was reported as a missing `Tag Management.create` permission. A global-admin token with that permission granted produced the same verdict, because asking a single listing route and discarding the console's reply can't tell "discarded the write" from "stored it somewhere else". Both are now reported, each with its own next step.
+- **Endpoint tags were only looked for on `GET /agents/tags`** — a console serving them elsewhere was reported as having none. Every known route is tried, and the answering route is named.
+- **Read-back matched the `key` field exactly** — `tagName` and `name` now count, case-insensitively.
+
+#### New
+- **The console's raw response is recorded per request format** and logged, so a create the console claims but nothing can list is its own verdict rather than a silent no-op.
+- **The diagnosis can be saved as a report** — formats, outcomes, routes and raw responses, for sending on.
+
 ### v2.2.3 — 2026-08-19
 #### Bug Fixes
 - **Result tables drew their first row over the column headers** — a batched load numbered the first row one place too high, so it shared a grid row with the header. Affected every operations page; most visible on the Tags audit, where "own" appeared printed over "owned".

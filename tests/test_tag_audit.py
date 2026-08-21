@@ -18,9 +18,12 @@ class FakeAPI:
     """Minimal stand-in for S1API: canned reads, recorded writes."""
 
     def __init__(self, tags=None, endpoint_tags=None, accounts=None,
-                 sites=None, groups=None, errors=None):
+                 sites=None, groups=None, errors=None,
+                 endpoint_route="/agents/tags"):
         self.tags = tags or []
         self.endpoint_tags = list(endpoint_tags or [])
+        # Which route this console lists unified endpoint tags on.
+        self.endpoint_route = endpoint_route
         self.accounts = accounts or []
         self.sites = sites or []
         self.groups = groups or []
@@ -31,13 +34,18 @@ class FakeAPI:
         # which is the beijerrefab symptom.
         self.stores = None
         self.store_at_scope = True
+        # A console that says "created" but never lists the tag anywhere.
+        self.claim_only = False
+        self.claim_response = {"data": {"affected": 1}}
 
     # ── reads ──
     def get_all(self, endpoint, params=None):
         params = params or {}
         if endpoint in self.errors:
             raise S1APIError(self.errors[endpoint], 403)
-        if endpoint == "/agents/tags":
+        if endpoint in tag_audit.ENDPOINT_TAG_ROUTES:
+            if endpoint != self.endpoint_route:
+                raise S1APIError(f"GET {endpoint} → 404", 404)
             if not self.store_at_scope and params.get("tenant") != "true":
                 return []
             return list(self.endpoint_tags)
@@ -65,6 +73,8 @@ class FakeAPI:
     # ── writes ──
     def _post(self, endpoint, body=None):
         self.posts.append(body)
+        if self.claim_only:
+            return self.claim_response
         if self.stores is not None and body == self.stores:
             tag = body.get("data")
             if isinstance(tag, list):
@@ -216,6 +226,25 @@ def test_one_unreadable_tag_type_does_not_blank_the_others():
 def test_endpoint_tags_are_read_from_agents_tags():
     found = tag_audit.read_scope(_api_with_tags(), "site", "s1")
     assert [t["key"] for t in found["endpoint"]] == ["Dept"]
+    assert found["endpoint_route"] == "/agents/tags"
+
+
+def test_endpoint_tags_are_found_on_an_alternate_route():
+    # A console that doesn't serve /agents/tags must not be reported as
+    # holding no endpoint tags.
+    api = _api_with_tags()
+    api.endpoint_route = "/tag-manager"
+    found = tag_audit.read_scope(api, "site", "s1")
+    assert [t["key"] for t in found["endpoint"]] == ["Dept"]
+    assert found["endpoint_route"] == "/tag-manager"
+
+
+def test_no_route_answering_is_recorded_as_an_error():
+    api = _api_with_tags()
+    api.endpoint_route = "/somewhere-else"
+    found = tag_audit.read_scope(api, "site", "s1")
+    assert found["errors"]["endpoint"]
+    assert found["endpoint"] == []
 
 
 # ── row flattening ─────────────────────────────────────────────────────
@@ -258,8 +287,57 @@ def test_probe_reports_no_op_when_nothing_is_stored():
     api = FakeAPI()
     res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
     assert res["winner"] is None
+    assert not res["unreadable"]
     assert {r["outcome"] for r in res["results"]} == {"no-op"}
     assert len(api.posts) == len(tag_audit.PROBE_SHAPES)
+
+
+def test_probe_separates_a_claimed_create_from_a_discarded_one():
+    # The console says it created something and no route can show it: the
+    # write may well have worked, so this must not be called a no-op.
+    api = FakeAPI()
+    api.claim_only = True
+    res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
+    assert res["unreadable"]
+    assert res["winner"] is None
+    assert {r["outcome"] for r in res["results"]} == {"claimed-unreadable"}
+
+
+def test_a_claim_of_zero_affected_is_still_a_no_op():
+    api = FakeAPI()
+    api.claim_only = True
+    api.claim_response = {"data": {"affected": 0}}
+    res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
+    assert not res["unreadable"]
+    assert {r["outcome"] for r in res["results"]} == {"no-op"}
+
+
+def test_probe_keeps_what_the_console_answered():
+    api = FakeAPI()
+    api.claim_only = True
+    api.claim_response = {"data": {"affected": 1}}
+    res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
+    assert all("affected" in r["response"] for r in res["results"])
+    assert res["probe_keys"] == [f"s1cc-probe-120000-{i}"
+                                 for i in range(1, 6)]
+
+
+def test_probe_finds_a_tag_listed_on_an_alternate_route():
+    api = FakeAPI(endpoint_route="/tag-manager")
+    scope = tag_audit.scope_filter("site", "s1")
+    api.stores = {"data": {"type": "endpoints", "key": "s1cc-probe-120000-1",
+                           "value": "probe"}, "filter": scope}
+    res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
+    assert res["winner"] == "data object + filter  (what the restore sends)"
+    assert res["found_via"] == "GET /tag-manager"
+
+
+def test_a_tag_keyed_under_a_different_field_still_counts():
+    api = FakeAPI()
+    api.endpoint_tags.append({"id": "e9", "tagName": "S1CC-Probe-120000-1"})
+    found, where, at_scope = tag_audit.find_endpoint_tag(
+        api, "s1cc-probe-120000-1", tag_audit.scope_filter("site", "s1"))
+    assert found and at_scope and where == "GET /agents/tags"
 
 
 def test_probe_flags_a_tag_stored_at_the_wrong_scope():

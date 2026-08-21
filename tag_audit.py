@@ -26,11 +26,21 @@ both:
 Everything here is read-only except :func:`probe_endpoint_tag_shapes`, which
 writes throwaway tags and deletes them again.
 """
+import json
 import unicodedata
 
-from s1_api import S1APIError
+from s1_api import S1APIError, created_something
 
 TAG_TYPES = ("firewall", "network-quarantine", "device-inventory")
+
+# Routes a console might list unified endpoint tags under. `/agents/tags` is
+# the documented one; the rest are cheap to try and a 404 just skips them.
+# A probe that only asks one route can't tell "never stored" from "stored
+# where we didn't look", and those need completely different fixes.
+ENDPOINT_TAG_ROUTES = ("/agents/tags", "/tag-manager")
+
+# Field names seen holding a tag's key across API versions.
+KEY_FIELDS = ("key", "tagName", "name")
 
 
 def norm_name(value) -> str:
@@ -139,7 +149,7 @@ def read_scope(api, ntype: str, node_id: str) -> dict:
     """
     scope = scope_filter(ntype, node_id)
     level = "global" if ntype == "global" else ntype
-    out = {"named": {}, "endpoint": [], "errors": {}}
+    out = {"named": {}, "endpoint": [], "endpoint_route": "", "errors": {}}
 
     for ttype in TAG_TYPES:
         params = dict(scope)
@@ -152,10 +162,20 @@ def read_scope(api, ntype: str, node_id: str) -> dict:
         own, inherited = _split_own(api, params, level, visible)
         out["named"][ttype] = {"own": own, "inherited": inherited}
 
-    try:
-        out["endpoint"] = api.get_all("/agents/tags", params=dict(scope)) or []
-    except S1APIError as exc:
-        out["errors"]["endpoint"] = str(exc)
+    first_error = ""
+    for route in ENDPOINT_TAG_ROUTES:
+        try:
+            found = api.get_all(route, params=dict(scope)) or []
+        except S1APIError as exc:
+            first_error = first_error or str(exc)
+            continue
+        out["endpoint_route"] = out["endpoint_route"] or route
+        if found:
+            out["endpoint"] = found
+            out["endpoint_route"] = route
+            break
+    if not out["endpoint_route"] and first_error:
+        out["errors"]["endpoint"] = first_error
     return out
 
 
@@ -205,18 +225,62 @@ PROBE_SHAPES = (
 )
 
 NO_SHAPE_WORKED = (
-    "No request shape created a tag: this console takes the request and "
-    "discards it. Two things do that — an API token without the "
-    "'Tag Management.create' permission, or a tenant where the route is "
-    "disabled. Check the token's permissions first.")
+    "No request shape produced a tag this tool can read back, on any known "
+    "listing route. Either the console discards the write, or it stores the "
+    "tag somewhere these routes don't show. Look for keys starting "
+    "'s1cc-probe-' in the console's own tag list: if they are there, the "
+    "write works and the listing route is wrong — send a screenshot. If they "
+    "are not, check the token's 'Tag Management' create permission and "
+    "whether the route is enabled for this tenant.")
+
+CLAIMED_BUT_UNREADABLE = (
+    "The console reported creating a tag, but no listing route can see it "
+    "afterwards. The write probably worked and this tool is reading the "
+    "wrong route — which would also explain an audit that shows no endpoint "
+    "tags. Check the console's tag list for keys starting 's1cc-probe-' and "
+    "delete them by hand: they could not be cleaned up automatically because "
+    "they could not be found.")
 
 
-def _find_probe_tag(api, key: str, params: dict) -> list:
+def _key_matches(tag: dict, key: str) -> bool:
+    wanted = key.strip().lower()
+    return any(str(tag.get(f) or "").strip().lower() == wanted
+               for f in KEY_FIELDS)
+
+
+def find_endpoint_tag(api, key: str, scope: dict) -> tuple:
+    """Look for one tag by key on every route and filter a console might
+    list it under. Returns (matches, where, at_scope) — `where` names what
+    found it, `at_scope` is False when only the tenant-wide read saw it.
+    """
+    seen: list = []
+    for route in ENDPOINT_TAG_ROUTES:
+        attempts = [(dict(scope), True)]
+        if scope.get("tenant") != "true":
+            attempts.append(({"tenant": "true"}, False))
+        for params, at_scope in attempts:
+            if (route, tuple(sorted(params))) in seen:
+                continue
+            seen.append((route, tuple(sorted(params))))
+            try:
+                found = [t for t in (api.get_all(route, params=params) or [])
+                         if _key_matches(t, key)]
+            except S1APIError:
+                continue
+            if found:
+                where = (f"GET {route}" if at_scope
+                         else f"GET {route} (tenant-wide)")
+                return found, where, at_scope
+    return [], "", False
+
+
+def _trim(resp) -> str:
+    """The console's own words, short enough to log."""
     try:
-        return [t for t in (api.get_all("/agents/tags", params=params) or [])
-                if t.get("key") == key]
-    except S1APIError:
-        return []
+        text = json.dumps(resp, default=str)
+    except (TypeError, ValueError):
+        text = str(resp)
+    return text if len(text) <= 300 else text[:300] + "…"
 
 
 def probe_endpoint_tag_shapes(api, ntype: str, node_id: str, stamp: str,
@@ -224,23 +288,30 @@ def probe_endpoint_tag_shapes(api, ntype: str, node_id: str, stamp: str,
     """WRITES. Find out which POST /tag-manager body the console stores.
 
     Each candidate body is sent with its own throwaway key, then proven by
-    re-reading GET /agents/tags — a 2xx is not evidence. Anything that does
-    appear is deleted again. `stamp` makes the throwaway keys identifiable;
-    the caller supplies it so this stays deterministic under test.
+    reading it back — a 2xx is not evidence. What the console *said* is kept
+    alongside what could be found, because "it claimed a create and nothing
+    is readable" means the listing route is wrong, while "it claimed nothing
+    and nothing is readable" means the write was discarded. Anything that
+    does appear is deleted again. `stamp` makes the throwaway keys
+    identifiable; the caller supplies it so this stays deterministic.
 
-    Returns {winner, wrong_scope, results[], leftovers[]}.
+    Returns {winner, found_via, wrong_scope, unreadable, results[],
+    leftovers[], probe_keys[]}.
     """
     scope = scope_filter(ntype, node_id)
-    out = {"winner": None, "wrong_scope": False, "results": [],
-           "leftovers": []}
+    out = {"winner": None, "found_via": "", "wrong_scope": False,
+           "unreadable": False, "results": [], "leftovers": [],
+           "probe_keys": []}
     leftovers: list = []
 
     for idx, (label, build) in enumerate(PROBE_SHAPES, 1):
         key = f"s1cc-probe-{stamp}-{idx}"
         tag = {"type": "endpoints", "key": key, "value": "probe"}
-        result = {"shape": label, "outcome": "", "detail": ""}
+        result = {"shape": label, "outcome": "", "detail": "",
+                  "response": "", "found_via": "", "key": key}
+        out["probe_keys"].append(key)
         try:
-            api._post("/tag-manager", body=build(tag, scope))
+            resp = api._post("/tag-manager", body=build(tag, scope))
         except S1APIError as exc:
             result["outcome"] = "rejected"
             result["detail"] = str(exc)
@@ -248,26 +319,36 @@ def probe_endpoint_tag_shapes(api, ntype: str, node_id: str, stamp: str,
             log(f"   [{idx}] {label} — rejected: {exc}")
             continue
 
-        at_scope = _find_probe_tag(api, key, dict(scope))
-        at_tenant = [] if at_scope else _find_probe_tag(api, key,
-                                                        {"tenant": "true"})
-        if at_scope:
+        result["response"] = _trim(resp)
+        claimed = created_something(resp)
+        log(f"   [{idx}] {label} — console answered: {result['response']}")
+
+        found, where, at_scope = find_endpoint_tag(api, key, scope)
+        result["found_via"] = where
+        if found and at_scope:
             result["outcome"] = "stored"
             out["winner"] = out["winner"] or label
-            log(f"   [{idx}] {label} — STORED, visible at this {ntype} scope")
-        elif at_tenant:
+            out["found_via"] = out["found_via"] or where
+            log(f"       STORED, visible at this {ntype} scope via {where}")
+        elif found:
             result["outcome"] = "wrong-scope"
             out["wrong_scope"] = True
             out["winner"] = out["winner"] or f"{label} [wrong scope]"
-            log(f"   [{idx}] {label} — stored, but NOT at the requested "
-                f"scope (the filter was ignored)")
+            out["found_via"] = out["found_via"] or where
+            log(f"       stored, but NOT at the requested scope — only "
+                f"{where} sees it, so the filter was ignored")
+        elif claimed:
+            result["outcome"] = "claimed-unreadable"
+            out["unreadable"] = True
+            log(f"       the console claims it created something, but no "
+                f"listing route can find '{key}' — the tag may exist where "
+                f"this tool isn't looking")
         else:
             result["outcome"] = "no-op"
-            log(f"   [{idx}] {label} — accepted, but the tag does not "
-                f"exist: no-op")
+            log(f"       accepted, claimed nothing, and nothing is "
+                f"readable: no-op")
         out["results"].append(result)
-        leftovers += [t.get("id") for t in (at_scope or at_tenant)
-                      if t.get("id")]
+        leftovers += [t.get("id") for t in found if t.get("id")]
 
     for tag_id in dict.fromkeys(leftovers):
         if not delete_endpoint_tag(api, tag_id):

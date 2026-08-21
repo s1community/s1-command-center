@@ -53,7 +53,7 @@ Answers "the restore said it created tags — are they really there?", which a r
 **Run Audit** (read-only) walks the tenant and every account/site matching the filters and lists what the console holds, from both APIs that back the word "tag":
 
 - `GET /tags` — named tags for **firewall**, **network-quarantine** and **device-inventory** (Ranger)
-- `GET /agents/tags` — unified **endpoint tags** (Tag Manager), key/value pairs
+- `GET /agents/tags`, falling back to `GET /tag-manager` — unified **endpoint tags** (Tag Manager), key/value pairs. Both are tried because a console that doesn't serve the first must not be reported as holding no tags; the summary names the route that answered.
 
 Because `GET /tags` returns everything *visible* at a scope, including tags inherited from a parent account or the tenant, each scope's own tags are listed separately from inherited ones — tick **Show inherited tags** to see both. **Include group scopes** is off by default: groups inherit their site's tags and it costs a request per group.
 
@@ -65,13 +65,14 @@ Because `GET /tags` returns everything *visible* at a scope, including tags inhe
 | `tag` | Tag name, or `key=value` for endpoint tags |
 | `owned` | `own` = belongs to this scope; `inherited` = comes from a parent |
 
-**Diagnose endpoint tags** — *this one writes* — is for when a restore reports endpoint tags as created and the console shows none. `POST /tag-manager` answers `200` to a request body it doesn't store, so the only way to know is to write and read back. It creates a throwaway tag per candidate request format (key `s1cc-probe-…`), re-reads each, and deletes them again, then reports one of:
+**Diagnose endpoint tags** — *this one writes* — is for when a restore reports endpoint tags as created and the console shows none. `POST /tag-manager` answers `200` to a request body it doesn't store, so the only way to know is to write and read back. It creates a throwaway tag per candidate request format (key `s1cc-probe-…`), looks for it on every known listing route, and deletes what it finds. The console's own response body is recorded for each format, because that is what separates the last two outcomes:
 
-- **a format that works** — creation is fine on this console
+- **a format that works** — creation is fine on this console; the report names the format and the route that could read it back
 - **stored, but not at the requested scope** — the scope filter was ignored; look tenant-wide
-- **nothing was stored** — the console accepts and discards every shape, which is what an API token without `Tag Management.create` looks like. Check the token first.
+- **the console claims a create that nothing can read** — the write probably worked and the tool is listing the wrong route. Search the console's own tag list for `s1cc-probe-…`: if the keys are there, this is a read problem, not a write problem — and those tags need deleting by hand, because the cleanup can only delete what it can find
+- **nothing was stored and nothing was claimed** — the console accepted and discarded every shape. Check the token's `Tag Management` create permission and whether the route is enabled for the tenant
 
-Anything it fails to delete is named in the output so you can remove it by hand.
+At the end you're offered a report containing each format, its outcome and the console's raw response — that file is what to send when asking someone else to look.
 
 ## Raw API Page
 

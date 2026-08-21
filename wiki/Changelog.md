@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.2.4 — 2026-08-21
+
+### Bug Fixes
+- **The diagnosis blamed a permission it couldn't actually see** — when no request format produced a readable tag, the verdict named a missing `Tag Management.create` as the cause. A global-admin service user with Unified Tags granted 4/4 then produced exactly that verdict, so the claim was wrong: "the console discarded the write" and "the console stored it somewhere this tool doesn't read" are indistinguishable if you only ask one listing route and throw away the console's reply. Both possibilities are now reported, with what to check for each.
+- **Endpoint tags were only ever looked for on one route** — the audit and the probe both read `GET /agents/tags` alone, so a console serving unified tags elsewhere would be reported as holding none. Every known route is tried, and the summary names the one that answered.
+- **A tag whose key sits in a different field was invisible** — read-back matched `key` exactly and case-sensitively; `tagName` and `name` now count too.
+
+### New
+- **The console's own answer is kept and shown** — the probe records the response body for each request format and logs it. A response claiming a create, with nothing readable afterwards, is now its own verdict ("the write probably worked, the listing route is wrong") instead of being lumped in with a silent no-op — and it names the probe keys to search for, since tags that can't be found can't be cleaned up automatically.
+- **Save the diagnosis as a report** — each format, its outcome, the route that read it back and the raw response. There's no way to copy the output console, and this is the artefact you actually need to send someone.
+
+### Tests
+- Seven more: the claimed-but-unreadable verdict, `affected: 0` still counting as a no-op, alternate-route discovery for both the audit and the probe, key matching on other fields, and the response bodies being retained. 224 tests total.
+
 ## v2.2.3 — 2026-08-19
 
 ### Bug Fixes

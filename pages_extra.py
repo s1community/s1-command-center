@@ -1808,18 +1808,22 @@ class TagsPage(ctk.CTkFrame):
                 text=f"0/{len(scopes)} scopes…"))
             rows: list[dict] = []
             errors: dict = {}
+            routes: list[str] = []
             ep_total = 0
             for i, (ntype, node_id, path) in enumerate(scopes, 1):
                 found = tag_audit.read_scope(api, ntype, node_id)
                 rows += tag_audit.scope_rows(ntype, path, found, inherited,
                                              ttype)
                 ep_total += len(found["endpoint"])
+                if found["endpoint_route"] not in routes:
+                    routes.append(found["endpoint_route"])
                 for what, err in found["errors"].items():
                     errors.setdefault(what, err)
                 self._ui(lambda n=i, t=len(scopes): self.info_lbl.configure(
                     text=f"{n}/{t} scopes…"))
             return {"rows": rows, "errors": errors, "scopes": len(scopes),
-                    "endpoint_total": ep_total, "type": ttype}
+                    "endpoint_total": ep_total, "type": ttype,
+                    "endpoint_routes": [r for r in routes if r]}
 
         run_async(self, do, self._audit_done, self._audit_failed)
 
@@ -1845,10 +1849,12 @@ class TagsPage(ctk.CTkFrame):
         # The case this page exists for: the restore said it created endpoint
         # tags and the console holds none.
         if res["type"] in ("all", "endpoint") and not res["endpoint_total"]:
-            text += ("  No unified endpoint tags exist anywhere in this "
-                     "scope. If a restore reported creating them, use "
-                     "Diagnose endpoint tags — the likeliest cause is an API "
-                     "token without the 'Tag Management.create' permission.")
+            routes = ", ".join(res["endpoint_routes"]) or "no route answered"
+            text += (f"  No unified endpoint tags were found in this scope "
+                     f"({routes}). If a restore reported creating them, run "
+                     f"Diagnose endpoint tags: it distinguishes a write the "
+                     f"console discarded from one it stored somewhere this "
+                     f"tool doesn't read.")
             colour, level = WARN, "warning"
         if res["errors"]:
             text += "  Errors: " + "; ".join(
@@ -1917,13 +1923,19 @@ class TagsPage(ctk.CTkFrame):
             self._set_busy(False)
             if res["winner"] and not res["wrong_scope"]:
                 msg = (f"This console stores endpoint tags sent as: "
-                       f"{res['winner']}. Creation works here — a restore "
-                       f"that reports errors is hitting something else.")
+                       f"{res['winner']}, readable via {res['found_via']}. "
+                       f"Creation works here — a restore that reports errors "
+                       f"is hitting something else.")
                 colour, level = GREEN, "success"
             elif res["winner"]:
                 msg = (f"The console stored the tag ({res['winner']}) but "
                        f"ignored the scope filter, so tags land somewhere "
-                       f"other than {path}. Check the tenant-wide list.")
+                       f"other than {path} — only {res['found_via']} sees "
+                       f"it.")
+                colour, level = WARN, "warning"
+            elif res["unreadable"]:
+                msg = (f"{tag_audit.CLAIMED_BUT_UNREADABLE}  Search for: "
+                       f"{', '.join(res['probe_keys'])}.")
                 colour, level = WARN, "warning"
             else:
                 msg = tag_audit.NO_SHAPE_WORKED
@@ -1937,7 +1949,18 @@ class TagsPage(ctk.CTkFrame):
                                     text_color=colour)
             self._summary.configure(text=msg, text_color=colour)
             cli_log(msg, level)
-            messagebox.showinfo("Endpoint tag diagnosis", msg)
+            if messagebox.askyesno(
+                    "Endpoint tag diagnosis",
+                    f"{msg}\n\nSave the full diagnosis — what the console "
+                    f"answered for each request format — as a report?"):
+                export_report(
+                    "Endpoint Tag Diagnosis",
+                    ["shape", "outcome", "found_via", "response", "detail"],
+                    res["results"],
+                    stats=[{"label": "Console", "value": self.role_var.get()},
+                           {"label": "Scope", "value": path},
+                           {"label": "Verdict", "value": msg}],
+                    subtitle=f"Probe keys: {', '.join(res['probe_keys'])}")
 
         def fail(exc):
             self._set_busy(False)
