@@ -753,12 +753,17 @@ def export_report(title: str, columns: list[str], rows: list[dict],
         if ext == ".xlsx":
             generate_excel(path, title, columns, rows)
         elif ext == ".json":
-            with open(path, "w") as f:
+            # encoding is explicit everywhere: Python defaults to the
+            # platform encoding, which is cp1252 on Windows, so a single
+            # non-ASCII character in a rule name or query killed the export
+            # ("'charmap' codec can't encode…") — and where it didn't, the
+            # bytes contradicted the utf-8 the HTML declares.
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(rows, f, indent=2, default=str)
         else:
             html = generate_html(title, columns, rows, stats=stats,
                                  subtitle=subtitle)
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
 
         cli_log(f"Exported {len(rows)} records → {os.path.basename(path)}",

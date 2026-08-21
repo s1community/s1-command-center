@@ -20,6 +20,7 @@ from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
 from export_utils import export_report
 from s1_api import S1APIError
 from config import APP_VERSION
+import migtools
 
 EXCL_TYPES = ["white_hash", "path", "file_type", "certificate", "browser"]
 
@@ -522,50 +523,11 @@ class ProgressTable(ctk.CTkFrame):
             row["detail"].configure(text=text, text_color=TEXT_MUTED)
 
 
-# Fields to strip from source objects before creating on destination
-_STRIP_FIELDS = {
-    # identifiers & timestamps
-    "id", "createdAt", "updatedAt", "createdAt__gt", "createdAt__lt",
-    "lastModified",
-    # user references
-    "creator", "creatorId", "updater", "updaterId",
-    "userId", "userName", "userFullName",
-    # scope references (destination scope is passed separately)
-    # `scopeLevel` is what /filters reports ('account' / 'site' / 'global').
-    # Saved filters are created with the destination scope in the request's
-    # `filter` envelope, so leaving the SOURCE scopeLevel in `data` contradicts
-    # it and S1 rejects the create — which silently left every migrated site
-    # with no filters, and therefore every dynamic group downgraded to static.
-    "scope", "scopeName", "scopePath", "scopeId", "scopeLevel",
-    "accountId", "accountName", "siteId", "siteName",
-    "groupId", "groupName",
-    # read-only computed fields
-    "imported", "editable", "inAppInventory", "notRecommended",
-    "generatedAlerts", "lastAlertTime", "reachedLimit",
-    "statusReason", "expired", "source",
-    "reportingAgents", "activeFirewallRules",
-    # STAR-rule read-only flag: the GET returns `activeResponse` (whether
-    # the rule has an auto-response / RemoteOps action) but the create
-    # endpoint rejects it with "data: dict_values(['activeResponse']):
-    # Unknown field (code 4000010)".
-    "activeResponse",
-    # site/group read-only
-    "activeLicenses", "activeAgents", "totalAgents",
-    "registrationToken", "healthStatus", "numberOfSites",
-    "agentsInCompleteSku", "agentsInControlSku", "agentsInCoreSku",
-    "completeSites", "controlSites", "coreSites",
-    "totalComplete", "totalControl", "totalCore",
-    "unlimitedComplete", "unlimitedControl", "unlimitedCore",
-    "salesforceId", "makeSocDefaultUi",
-    # settings read-only
-    "ssoElevatedSessionReauthTypeEnabled",
-    "ssoInheritableDomains", "ssoEl",
-}
-
-
-def _clean_for_restore(obj: dict) -> dict:
-    """Remove source-specific fields before pushing to destination."""
-    return {k: v for k, v in obj.items() if k not in _STRIP_FIELDS}
+# The payload shaping lives in migtools so the Operations pages can create
+# objects the same way a migration does — an importer that skips it posts
+# raw exported JSON and the console rejects every item.
+_STRIP_FIELDS = migtools.STRIP_FIELDS
+_clean_for_restore = migtools.clean_for_restore
 
 
 # Read-only / scope-binding fields that must never appear inside a role's
@@ -2246,7 +2208,7 @@ class BackupPage(ctk.CTkFrame):
 
     def _load_schedule(self):
         try:
-            with open(self._schedule_file()) as f:
+            with open(self._schedule_file(), encoding="utf-8") as f:
                 val = (json.load(f) or {}).get("interval", "Off")
             if val in self._SCHED_MINUTES:
                 self._sched_var.set(val)
@@ -2256,7 +2218,7 @@ class BackupPage(ctk.CTkFrame):
 
     def _on_schedule_change(self):
         try:
-            with open(self._schedule_file(), "w") as f:
+            with open(self._schedule_file(), "w", encoding="utf-8") as f:
                 json.dump({"interval": self._sched_var.get()}, f)
         except Exception:
             pass
@@ -2334,7 +2296,7 @@ class BackupPage(ctk.CTkFrame):
             self._timer_running = False
             self._set_ui_running(False)
             try:
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     json.dump(backup_data, f, indent=2, default=str)
                 os.chmod(path, 0o600)
             except Exception as e:
@@ -2596,7 +2558,7 @@ class BackupPage(ctk.CTkFrame):
                 cli_log("Backup returned 0 nodes — nothing was saved. "
                         "Check your connection and filters.", "warning")
                 return
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(backup_data, f, indent=2, default=str)
             # Backup contains sensitive config (SSO/SMTP/Syslog/AD) — restrict it.
             try:
@@ -3308,7 +3270,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
 
     def _load_file(self, path: str):
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 self._backup_data = json.load(f)
             self._file_path = path
             self._file_lbl.configure(
@@ -3490,7 +3452,7 @@ class SetDefaultsDialog(ctk.CTkToplevel):
                     changes += 1
 
         try:
-            with open(self._file_path, "w") as f:
+            with open(self._file_path, "w", encoding="utf-8") as f:
                 json.dump(self._backup_data, f, indent=2, default=str)
             try:
                 os.chmod(self._file_path, 0o600)
@@ -4230,7 +4192,7 @@ class RestorePage(ctk.CTkFrame):
         self.file_entry.delete(0, "end")
         self.file_entry.insert(0, fp)
         try:
-            with open(fp, "r") as f:
+            with open(fp, "r", encoding="utf-8") as f:
                 self.backup_data = json.load(f)
             n = len(self.backup_data)
             types = {}
@@ -4295,7 +4257,7 @@ class RestorePage(ctk.CTkFrame):
         if not path:
             return
         try:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(redacted, f, indent=2, default=str)
             try:
                 os.chmod(path, 0o600)
@@ -4389,7 +4351,7 @@ class RestorePage(ctk.CTkFrame):
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = os.path.join(self._snapshots_dir(),
                             f"snapshot-{host}-{ts}.json")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(out_nodes, f, indent=2, default=str)
         try:
             os.chmod(path, 0o600)
@@ -6180,33 +6142,10 @@ class RestorePage(ctk.CTkFrame):
                         f"({_star_inherited} inherited rules skipped)")
             if "star_rules" in elements and star:
                 def _create_star(rule):
-                    cleaned = _clean_for_restore(rule)
-                    # Drop null-valued fields — the destination API rejects
-                    # e.g. templateRuleId=null and treatAsThreat=null with
-                    # "Field may not be null" (code 4000010). Nulls mean
-                    # "use default", so dropping them is safe.
-                    cleaned = {k: v for k, v in cleaned.items()
-                               if v is not None}
-                    # S1 requires a temporary STAR rule's expiration to be
-                    # WITHIN THE NEXT SIX MONTHS. Source rules routinely carry
-                    # a date that's already in the past (expired) or further
-                    # out than six months — both rejected with "Expiration
-                    # date must be within the next six months (code 4000010)".
-                    # Clamp any out-of-range date to ~5 months ahead so it
-                    # always satisfies the constraint with margin to spare.
-                    if cleaned.get("expiration"):
-                        try:
-                            from datetime import timedelta
-                            now = datetime.now(timezone.utc)
-                            exp = datetime.fromisoformat(
-                                cleaned["expiration"].replace("Z", "+00:00"))
-                            six_months = now + timedelta(days=180)
-                            if exp <= now or exp > six_months:
-                                cleaned["expiration"] = (
-                                    now + timedelta(days=150)).isoformat()
-                        except Exception:
-                            pass
-                    api.create_star_rule(scope, cleaned)
+                    api.create_star_rule(
+                        scope,
+                        migtools.prepare_star_rule(
+                            rule, datetime.now(timezone.utc)))
                 _r_bulk("star", star, _create_star)
 
             # ── Saved filters ──
@@ -7932,11 +7871,11 @@ class RestorePage(ctk.CTkFrame):
             return
         ext = os.path.splitext(path)[1].lower()
         if ext == ".html":
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
         else:
             report = {"meta": meta, "nodes": nodes, "log": log}
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, default=str)
         cli_log(f"Restore report exported → {os.path.basename(path)}",
                 "success")
@@ -8629,11 +8568,11 @@ class ValidationPage(ctk.CTkFrame):
             return
         ext = os.path.splitext(path)[1].lower()
         if ext == ".json":
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump({"meta": meta, "results": res}, f, indent=2,
                           default=str)
         else:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
         cli_log(f"Validation report exported → {os.path.basename(path)}",
                 "success")
@@ -8664,14 +8603,14 @@ class ValidationPage(ctk.CTkFrame):
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext == ".md":
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     f.write(comment)
             else:
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     json.dump(manifest, f, indent=2, default=str)
                 # Also drop the PSO comment alongside the JSON for convenience.
                 md_path = os.path.splitext(path)[0] + "-pso-comment.md"
-                with open(md_path, "w") as f:
+                with open(md_path, "w", encoding="utf-8") as f:
                     f.write(comment)
         except Exception as e:
             cli_log(f"Manifest export error: {e}", "error")

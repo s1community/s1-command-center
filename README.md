@@ -357,6 +357,15 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v2.2.5 — 2026-08-21
+#### Bug Fixes
+- **Report export crashed on Windows** ([#3](https://github.com/s1community/s1-command-center/issues/3)) — `'charmap' codec can't encode characters…`: files were written in the platform default encoding (cp1252 on Windows), so one accent or dash in a rule name broke the export. Every file the app reads and writes is now explicitly UTF-8. Exports that didn't crash were writing cp1252 bytes into HTML declaring `charset="utf-8"`, which rendered as mojibake.
+- **STAR rule import created nothing and reported success** ([#4](https://github.com/s1community/s1-command-center/issues/4)) — the page posted exported rules back unchanged, which the create endpoint rejects for read-only fields, null values and an out-of-range expiry. Rules are now prepared the same way a migration restore prepares them.
+- **Import errors were silently discarded** — the console's explanation is now logged per rule and shown in an error dialog, instead of `✓ Imported 0/1` at success level.
+
+#### Changed
+- The restore path and the Operations import share one STAR payload builder (`migtools.prepare_star_rule`), so the ops page can't miss fixes the restore path already has.
+
 ### v2.2.4 — 2026-08-21
 #### Bug Fixes
 - **The tag diagnosis stated a cause it hadn't proven** — "no format worked" was reported as a missing `Tag Management.create` permission. A global-admin token with that permission granted produced the same verdict, because asking a single listing route and discarding the console's reply can't tell "discarded the write" from "stored it somewhere else". Both are now reported, each with its own next step.

@@ -5,10 +5,106 @@ Kept free of Tk/network so it can be unit-tested directly:
   * evaluate_preflight  — turn gathered facts into pass/warn/fail checks
   * reconcile_agents    — did the agents actually move?
   * diff_config_fields  — value-level diff for settings/policy singletons
+  * clean_for_restore   — strip source-only fields before a create
+  * prepare_star_rule   — a STAR rule the destination will actually accept
 """
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Restore payload shaping
+# ═══════════════════════════════════════════════════════════════════════
+
+# Fields to strip from source objects before creating on destination.
+STRIP_FIELDS = {
+    # identifiers & timestamps
+    "id", "createdAt", "updatedAt", "createdAt__gt", "createdAt__lt",
+    "lastModified",
+    # user references
+    "creator", "creatorId", "updater", "updaterId",
+    "userId", "userName", "userFullName",
+    # scope references (destination scope is passed separately)
+    # `scopeLevel` is what /filters reports ('account' / 'site' / 'global').
+    # Saved filters are created with the destination scope in the request's
+    # `filter` envelope, so leaving the SOURCE scopeLevel in `data` contradicts
+    # it and S1 rejects the create — which silently left every migrated site
+    # with no filters, and therefore every dynamic group downgraded to static.
+    "scope", "scopeName", "scopePath", "scopeId", "scopeLevel",
+    "accountId", "accountName", "siteId", "siteName",
+    "groupId", "groupName",
+    # read-only computed fields
+    "imported", "editable", "inAppInventory", "notRecommended",
+    "generatedAlerts", "lastAlertTime", "reachedLimit",
+    "statusReason", "expired", "source",
+    "reportingAgents", "activeFirewallRules",
+    # STAR-rule read-only flag: the GET returns `activeResponse` (whether
+    # the rule has an auto-response / RemoteOps action) but the create
+    # endpoint rejects it with "data: dict_values(['activeResponse']):
+    # Unknown field (code 4000010)".
+    "activeResponse",
+    # site/group read-only
+    "activeLicenses", "activeAgents", "totalAgents",
+    "registrationToken", "healthStatus", "numberOfSites",
+    "agentsInCompleteSku", "agentsInControlSku", "agentsInCoreSku",
+    "completeSites", "controlSites", "coreSites",
+    "totalComplete", "totalControl", "totalCore",
+    "unlimitedComplete", "unlimitedControl", "unlimitedCore",
+    "salesforceId", "makeSocDefaultUi",
+    # settings read-only
+    "ssoElevatedSessionReauthTypeEnabled",
+    "ssoInheritableDomains", "ssoEl",
+}
+
+
+def clean_for_restore(obj: dict) -> dict:
+    """Remove source-specific fields before pushing to destination."""
+    return {k: v for k, v in obj.items() if k not in STRIP_FIELDS}
+
+
+# A STAR rule read from `GET /cloud-detection/rules` cannot be posted back
+# unchanged — the console rejects it three different ways, all as code
+# 4000010. Anything creating a STAR rule (migration restore, or importing a
+# rules file on the STAR page) has to go through here, or it silently
+# creates nothing.
+STAR_EXPIRY_LIMIT_DAYS = 180
+STAR_EXPIRY_TARGET_DAYS = 150
+
+
+def prepare_star_rule(rule: dict, now: datetime) -> dict:
+    """A STAR custom-detection rule the destination will accept.
+
+    Three transformations, each learned from a rejected create:
+
+    1. read-only and scope fields removed (notably ``activeResponse``);
+    2. null-valued fields dropped — the API answers "Field may not be null"
+       for e.g. ``templateRuleId``/``treatAsThreat``, and a null means "use
+       the default" anyway;
+    3. ``expiration`` clamped into the next six months. Exported rules
+       routinely carry a date already in the past, or further out than the
+       six months S1 allows, and both are refused.
+
+    `now` is passed in rather than read from the clock so the result is
+    deterministic and testable.
+    """
+    cleaned = {k: v for k, v in clean_for_restore(rule).items()
+               if v is not None}
+
+    raw = cleaned.get("expiration")
+    if raw:
+        try:
+            exp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            limit = now + timedelta(days=STAR_EXPIRY_LIMIT_DAYS)
+            if exp <= now or exp > limit:
+                cleaned["expiration"] = (
+                    now + timedelta(days=STAR_EXPIRY_TARGET_DAYS)).isoformat()
+        except (TypeError, ValueError):
+            # Unparseable date: leave it for the console to reject with a
+            # real message rather than guessing at a replacement.
+            pass
+    return cleaned
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -35,7 +131,7 @@ class AuditLog:
         entry = {"when": when, "action": action}
         entry.update(fields)
         line = json.dumps(entry, default=str)
-        with open(self.path, "a") as f:
+        with open(self.path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
         try:
             os.chmod(self.path, 0o600)
@@ -48,7 +144,7 @@ class AuditLog:
         if not os.path.exists(self.path):
             return []
         out = []
-        with open(self.path) as f:
+        with open(self.path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

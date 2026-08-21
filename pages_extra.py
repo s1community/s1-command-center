@@ -16,6 +16,8 @@ from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
                  TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
+from s1_api import S1APIError
+import migtools
 import tag_audit
 
 
@@ -1186,7 +1188,7 @@ class STARRulesPage(ctk.CTkFrame):
             initialfile=f"star-rules-{datetime.now():%Y%m%d-%H%M}.json")
         if not path:
             return
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(self._rules, f, indent=2, default=str)
         messagebox.showinfo("Done", f"Exported {len(self._rules)} rules to {path}")
 
@@ -1199,7 +1201,7 @@ class STARRulesPage(ctk.CTkFrame):
             title="Import STAR rules from file")
         if not fp:
             return
-        with open(fp, "r") as f:
+        with open(fp, "r", encoding="utf-8") as f:
             rules = json.load(f)
         if not isinstance(rules, list):
             rules = [rules]
@@ -1208,19 +1210,45 @@ class STARRulesPage(ctk.CTkFrame):
             return
 
         def do():
-            ok = 0
+            ok, failures = 0, []
+            now = datetime.now(timezone.utc)
             for rule in rules:
+                name = rule.get("name") or rule.get("id") or "(unnamed)"
                 try:
-                    api.create_star_rule({"tenant": "true"}, rule)
+                    # An exported rule carries read-only fields, nulls and a
+                    # stale expiry, all of which the create endpoint refuses.
+                    # Same preparation the migration restore uses.
+                    api.create_star_rule({"tenant": "true"},
+                                         migtools.prepare_star_rule(rule, now))
                     ok += 1
-                except Exception:
-                    pass
-            return ok
+                except S1APIError as exc:
+                    detail = getattr(exc, "detail", "") or ""
+                    failures.append((name, f"{exc}"
+                                           f"{' — ' + detail if detail else ''}"))
+                except Exception as exc:
+                    failures.append((name, str(exc)))
+            return ok, failures
 
-        def done(n):
-            self.info_lbl.configure(text=f"Imported {n}/{len(rules)} rules")
-            cli_log(f"Imported {n}/{len(rules)} STAR rules", "success")
-            messagebox.showinfo("Done", f"Imported {n} STAR rules.")
+        def done(result):
+            n, failures = result
+            self.info_lbl.configure(
+                text=f"Imported {n}/{len(rules)} rules",
+                text_color=TEXT_MUTED if n == len(rules) else ACCENT)
+            level = "success" if n == len(rules) else (
+                "warning" if n else "error")
+            cli_log(f"Imported {n}/{len(rules)} STAR rules", level)
+            for name, err in failures:
+                cli_log(f"  ✗ {name}: {err}", "error")
+            if failures:
+                first = "\n\n".join(f"{nm}:\n{er}" for nm, er in failures[:3])
+                more = (f"\n\n…and {len(failures) - 3} more — see the OUTPUT "
+                        f"console." if len(failures) > 3 else "")
+                messagebox.showerror(
+                    "Import failed" if not n else "Imported with errors",
+                    f"Imported {n} of {len(rules)} STAR rules.\n\n"
+                    f"{first}{more}")
+            else:
+                messagebox.showinfo("Done", f"Imported {n} STAR rules.")
 
         run_async(self, do, done)
 
@@ -2725,7 +2753,7 @@ class UnifiedAlertsPage(ctk.CTkFrame):
                 filetypes=[("CSV", "*.csv")],
                 title="Save alerts CSV")
             if path:
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     f.write(csv_data)
                 cli_log(f"Alerts exported to {path}", "success")
                 self.info_lbl.configure(text=f"Exported to {path}",

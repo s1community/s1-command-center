@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 # Single source of truth for the app version (footer, reports, etc.).
-APP_VERSION = "2.2.4"
+APP_VERSION = "2.2.5"
 
 CONFIG_DIR    = os.path.join(os.path.expanduser("~"), ".s1-command-center")
 CONFIG_FILE   = os.path.join(CONFIG_DIR, "contexts.json")
@@ -73,7 +73,7 @@ class ConfigManager:
             self.contexts = []
             return
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 self.contexts = [Context(**c) for c in json.load(f)]
         except Exception:
             self.contexts = []
@@ -108,7 +108,7 @@ class ConfigManager:
             d = asdict(c)
             d["api_token"] = file_tok
             rows.append(d)
-        with open(CONFIG_FILE, "w") as f:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(rows, f, indent=2)
         # Even with keyring, the file may hold a plaintext fallback token —
         # lock it to the owner so other local users can't read credentials.
@@ -237,7 +237,7 @@ class ProfileManager:
             self.profiles = []
             return
         try:
-            with open(PROFILES_FILE, "r") as f:
+            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             # Tolerate unknown keys from newer versions by filtering to fields.
             allowed = MigrationProfile.__dataclass_fields__.keys()
@@ -249,7 +249,7 @@ class ProfileManager:
 
     def save(self):
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(PROFILES_FILE, "w") as f:
+        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
             json.dump([asdict(p) for p in self.profiles], f, indent=2)
         try:
             os.chmod(PROFILES_FILE, 0o600)
@@ -326,7 +326,7 @@ class SettingsManager:
         if not os.path.exists(SETTINGS_FILE):
             return
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except Exception:
             return  # corrupt/unreadable → keep defaults
@@ -348,7 +348,7 @@ class SettingsManager:
         payload = dict(self.data)
         payload["_schema"] = _SETTINGS_SCHEMA
         try:
-            with open(SETTINGS_FILE, "w") as f:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
             os.chmod(SETTINGS_FILE, 0o600)
         except OSError:
