@@ -12,7 +12,7 @@ Beyond backup/restore, S1 Command Center includes 16 operations pages for day-to
 | **Unified Alerts** | Modern GraphQL-based alert triage (see [[Unified Alerts]]) |
 | **Purple AI** | Natural language SDL queries (see [[Purple AI]]) |
 | **Exclusions & Block** | Manage exclusions and blocklist entries |
-| **STAR Rules** | View and manage custom detection rules |
+| **STAR Rules** | View, export and import custom detection rules, per scope |
 | **Users & Roles** | RBAC management, 2FA enrollment, token details |
 | **Activities** | Audit log viewer with type filtering |
 | **Deep Visibility** | DV query execution and saved filter management |
@@ -45,6 +45,16 @@ All operations pages share:
 - **Load Threats** — Fetch recent threats (up to 200)
 - **Timeline** — View attack timeline for a specific threat ID
 - **Notes** — View analyst notes on a threat
+
+## STAR Rules Page
+
+**Account** and **Site** set the scope for everything this page does. Leave both blank for the tenant (global) scope; name an Account to work inside it, and add a Site to narrow further.
+
+- **Load STAR Rules** — read the custom detection rules visible at that scope
+- **Export to JSON** — save the loaded rules as raw JSON
+- **Import from JSON** — create those rules at that scope. Each rule is prepared the same way a migration restore prepares it: read-only fields removed, nulls dropped, and an expiration outside the next six months pulled back into range
+
+Scope matters most on import. An API token that is scoped to an account or a site **cannot create a rule at the tenant**; the console answers *"User …:account can not create rule with higher scope None:tenant"* and nothing is created. Name the Account (and Site) to import into. If the token can reach exactly one account, the import moves there by itself and says so; when it can reach several, only you can say which one, so the error is reported instead.
 
 ## Tags Page
 

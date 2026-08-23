@@ -29,7 +29,7 @@ writes throwaway tags and deletes them again.
 import json
 import unicodedata
 
-from s1_api import S1APIError, created_something
+from s1_api import S1APIError, created_something, ENDPOINT_TAG_TYPE
 
 TAG_TYPES = ("firewall", "network-quarantine", "device-inventory")
 
@@ -208,9 +208,10 @@ def scope_rows(ntype: str, path: str, found: dict,
 
 
 # ── endpoint-tag write probe ───────────────────────────────────────────
-# The tag object is documented ({"type": "endpoints", "key": …}); the
-# envelope around it is not. These are the shapes POST /tag-manager is known
-# to answer 200 to — only one of them actually stores a tag.
+# The tag object is settled — {"type": "agents", "key": …, "value": …}, all
+# three required, and the type is what GET /agents/tags reports. The envelope
+# around it is what this probe is for: these are the shapes POST /tag-manager
+# is known to answer 200 to, and only one of them actually stores a tag.
 PROBE_SHAPES = (
     ("data object + filter  (what the restore sends)",
      lambda tag, scope: {"data": tag, "filter": scope}),
@@ -306,7 +307,7 @@ def probe_endpoint_tag_shapes(api, ntype: str, node_id: str, stamp: str,
 
     for idx, (label, build) in enumerate(PROBE_SHAPES, 1):
         key = f"s1cc-probe-{stamp}-{idx}"
-        tag = {"type": "endpoints", "key": key, "value": "probe"}
+        tag = {"type": ENDPOINT_TAG_TYPE, "key": key, "value": "probe"}
         result = {"shape": label, "outcome": "", "detail": "",
                   "response": "", "found_via": "", "key": key}
         out["probe_keys"].append(key)

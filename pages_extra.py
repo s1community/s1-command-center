@@ -85,6 +85,125 @@ def _pick_api(app, role="source"):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Helper: scope filters
+# ═══════════════════════════════════════════════════════════════════════
+
+def resolve_scope_filter(api, account_name="", site_name="") -> dict:
+    """Turn typed Account / Site names into the scope filter S1 expects.
+
+    Blank names mean the tenant (global) scope; a named Site wins over a
+    named Account. Raises ValueError when a name doesn't exist on the
+    console, so the caller can say which name was wrong.
+    """
+    account_name = (account_name or "").strip()
+    site_name = (site_name or "").strip()
+    acct_id = ""
+    if account_name:
+        for a in (api.get_accounts() or []):
+            if (a.get("name") or "").strip().lower() == account_name.lower():
+                acct_id = str(a.get("id", ""))
+                break
+        if not acct_id:
+            raise ValueError(f"Account '{account_name}' not found on this "
+                             f"console.")
+    if site_name:
+        sp = {"name": site_name}
+        if acct_id:
+            sp["accountIds"] = acct_id
+        sites = api.get_sites(params=sp) or []
+        match = next(
+            (s for s in sites
+             if (s.get("name") or "").strip().lower() == site_name.lower()),
+            None)
+        if not match:
+            raise ValueError(f"Site '{site_name}' not found"
+                             + (f" in account '{account_name}'." if account_name
+                                else "."))
+        return {"siteIds": str(match.get("id", ""))}
+    if acct_id:
+        return {"accountIds": acct_id}
+    return {"tenant": "true"}
+
+
+def scope_label(scope: dict) -> str:
+    if "siteIds" in (scope or {}):
+        return "site scope"
+    if "accountIds" in (scope or {}):
+        return "account scope"
+    return "tenant scope"
+
+
+def _error_text(exc) -> str:
+    detail = getattr(exc, "detail", "") or ""
+    return f"{exc}{' — ' + detail if detail else ''}"
+
+
+def _scope_refused(exc) -> bool:
+    """Did the console refuse this because the token sits below the scope we
+    asked for? e.g. "User 144…:account can not create rule with higher scope
+    None:tenant" — an account-scoped token asked to write at the tenant."""
+    text = _error_text(exc).lower()
+    return "scope" in text and ("higher scope" in text
+                                or "can not" in text or "cannot" in text)
+
+
+def sole_account_scope(api):
+    """The single account a scope-limited token can reach, or None when it
+    reaches none or several — then only the operator can say which to use."""
+    try:
+        accounts = api.get_accounts() or []
+    except Exception:
+        return None
+    if len(accounts) != 1:
+        return None
+    acct_id = str(accounts[0].get("id", ""))
+    return {"accountIds": acct_id} if acct_id else None
+
+
+def import_star_rules(api, rules, scope, now):
+    """Create STAR rules under `scope`. Returns (created, failures, scope).
+
+    Every rule goes through ``migtools.prepare_star_rule`` — the same
+    preparation the migration restore uses, because an exported rule carries
+    read-only fields, nulls and a stale expiry the create endpoint refuses.
+
+    If the console rejects the tenant scope because the token sits lower
+    ("can not create rule with higher scope None:tenant", issue #7) and that
+    token can reach exactly one account, the import moves to that account
+    instead of failing every rule. The scope actually used comes back so the
+    caller can report where the rules landed.
+    """
+    created, failures = 0, []
+    fallback_tried = False
+    for rule in rules:
+        name = rule.get("name") or rule.get("id") or "(unnamed)"
+        data = migtools.prepare_star_rule(rule, now)
+        try:
+            api.create_star_rule(scope, data)
+            created += 1
+        except S1APIError as exc:
+            fallback = None
+            if not fallback_tried and "tenant" in scope and _scope_refused(exc):
+                fallback_tried = True
+                fallback = sole_account_scope(api)
+            if fallback:
+                scope = fallback
+                try:
+                    api.create_star_rule(scope, data)
+                    created += 1
+                    continue
+                except S1APIError as retry_exc:
+                    exc = retry_exc
+                except Exception as retry_exc:
+                    failures.append((name, str(retry_exc)))
+                    continue
+            failures.append((name, _error_text(exc)))
+        except Exception as exc:
+            failures.append((name, str(exc)))
+    return created, failures, scope
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Accounts & Sites Page
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -994,42 +1113,12 @@ class ExclusionsBlocklistPage(ctk.CTkFrame):
         self.table.grid(row=3, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
     def _resolve_scope(self, api):
-        acct_name = self.acct_entry.get().strip()
-        site_name = self.site_entry.get().strip()
-        acct_id = ""
-        if acct_name:
-            for a in (api.get_accounts() or []):
-                if (a.get("name") or "").strip().lower() == acct_name.lower():
-                    acct_id = str(a.get("id", ""))
-                    break
-            if not acct_id:
-                raise ValueError(f"Account '{acct_name}' not found on this "
-                                 f"console.")
-        if site_name:
-            sp = {"name": site_name}
-            if acct_id:
-                sp["accountIds"] = acct_id
-            sites = api.get_sites(params=sp) or []
-            match = next(
-                (s for s in sites
-                 if (s.get("name") or "").strip().lower() == site_name.lower()),
-                None)
-            if not match:
-                raise ValueError(f"Site '{site_name}' not found"
-                                 + (f" in account '{acct_name}'." if acct_name
-                                    else "."))
-            return {"siteIds": str(match.get("id", ""))}
-        if acct_id:
-            return {"accountIds": acct_id}
-        return {"tenant": "true"}
+        return resolve_scope_filter(api, self.acct_entry.get(),
+                                    self.site_entry.get())
 
     @staticmethod
     def _scope_label(scope: dict) -> str:
-        if "siteIds" in scope:
-            return "site scope"
-        if "accountIds" in scope:
-            return "account scope"
-        return "tenant scope"
+        return scope_label(scope)
 
     def _load_excl(self):
         api = _pick_api(self.app)
@@ -1124,12 +1213,37 @@ class STARRulesPage(ctk.CTkFrame):
                      font=(UI_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self,
-                     text="View and manage Custom Detection (STAR) rules.",
+                     text="View and manage Custom Detection (STAR) rules. "
+                          "Leave Account/Site blank for the global (tenant) "
+                          "scope, or name a scope to read and import there.",
                      font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
-        btn = ctk.CTkFrame(self, fg_color="transparent")
-        btn.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        controls = ctk.CTkFrame(self, fg_color="transparent")
+        controls.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+
+        scope_row = ctk.CTkFrame(controls, fg_color="transparent")
+        scope_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(scope_row, text="Account:", font=(UI_FONT, 13)).pack(
+            side="left", padx=(0, 4))
+        self.acct_entry = ctk.CTkEntry(scope_row, width=180, height=34,
+                                       placeholder_text="(blank = tenant)")
+        self.acct_entry.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(scope_row, text="Site:", font=(UI_FONT, 13)).pack(
+            side="left", padx=(0, 4))
+        self.site_entry = ctk.CTkEntry(scope_row, width=180, height=34,
+                                       placeholder_text="(blank = all)")
+        self.site_entry.pack(side="left", padx=(0, 6))
+        _help_btn(scope_row,
+                  "Scope for both Load and Import. Blank Account + Site = "
+                  "global (tenant) scope. A token that is scoped to an "
+                  "account or site cannot create a rule at the tenant \u2014 the "
+                  "console answers 'can not create rule with higher scope' \u2014 "
+                  "so name the Account (and Site) to import into."
+                  ).pack(side="left", padx=(0, 6))
+
+        btn = ctk.CTkFrame(controls, fg_color="transparent")
+        btn.pack(fill="x")
         ctk.CTkButton(btn, text="Load STAR Rules", height=34,
                       fg_color=GREEN, hover_color=GREEN_HOVER,
                       command=self._load).pack(side="left", padx=(0, 4))
@@ -1163,19 +1277,27 @@ class STARRulesPage(ctk.CTkFrame):
             return
 
         def do():
-            return api.get_star_rules({"tenant": "true"})
+            scope = resolve_scope_filter(api, self.acct_entry.get(),
+                                         self.site_entry.get())
+            return scope, api.get_star_rules(scope)
 
-        def done(rules):
+        def done(result):
+            scope, rules = result
+            lbl = scope_label(scope)
             self._rules = rules
-            self.info_lbl.configure(text=f"{len(rules)} STAR rules")
+            self.info_lbl.configure(text=f"{len(rules)} STAR rules ({lbl})")
             self.table.load(rules)
-            cli_log(f"Retrieved {len(rules)} STAR rules", "success")
+            cli_log(f"Retrieved {len(rules)} STAR rules at {lbl}", "success")
             for r in rules[:3]:
                 cli_log(f"  {r.get('name','?')} [{r.get('status','?')}] severity={r.get('severity','?')}", "info")
             if len(rules) > 3:
                 cli_log(f"  … and {len(rules)-3} more", "info")
 
-        run_async(self, do, done)
+        def fail(exc):
+            self.info_lbl.configure(text=str(exc)[:60], text_color=ACCENT)
+            messagebox.showerror("Load failed", str(exc))
+
+        run_async(self, do, done, fail)
 
     def _export_json(self):
         if not self._rules:
@@ -1205,52 +1327,59 @@ class STARRulesPage(ctk.CTkFrame):
             rules = json.load(f)
         if not isinstance(rules, list):
             rules = [rules]
-        if not messagebox.askyesno("Confirm",
-                                   f"Import {len(rules)} STAR rule(s) to SOURCE console?"):
+        acct_name = self.acct_entry.get().strip()
+        site_name = self.site_entry.get().strip()
+        target = (f"site '{site_name}'" if site_name else
+                  f"account '{acct_name}'" if acct_name else
+                  "the global (tenant) scope")
+        if not messagebox.askyesno(
+                "Confirm",
+                f"Import {len(rules)} STAR rule(s) into {target} on the "
+                f"SOURCE console?"):
             return
 
         def do():
-            ok, failures = 0, []
-            now = datetime.now(timezone.utc)
-            for rule in rules:
-                name = rule.get("name") or rule.get("id") or "(unnamed)"
-                try:
-                    # An exported rule carries read-only fields, nulls and a
-                    # stale expiry, all of which the create endpoint refuses.
-                    # Same preparation the migration restore uses.
-                    api.create_star_rule({"tenant": "true"},
-                                         migtools.prepare_star_rule(rule, now))
-                    ok += 1
-                except S1APIError as exc:
-                    detail = getattr(exc, "detail", "") or ""
-                    failures.append((name, f"{exc}"
-                                           f"{' — ' + detail if detail else ''}"))
-                except Exception as exc:
-                    failures.append((name, str(exc)))
-            return ok, failures
+            # The rules are created under the scope named above, not always
+            # the tenant: a token scoped to an account or site cannot create
+            # a rule higher than itself (issue #7).
+            scope = resolve_scope_filter(api, acct_name, site_name)
+            return import_star_rules(api, rules, scope,
+                                     datetime.now(timezone.utc))
 
         def done(result):
-            n, failures = result
+            n, failures, scope = result
+            lbl = scope_label(scope)
             self.info_lbl.configure(
-                text=f"Imported {n}/{len(rules)} rules",
+                text=f"Imported {n}/{len(rules)} rules ({lbl})",
                 text_color=TEXT_MUTED if n == len(rules) else ACCENT)
             level = "success" if n == len(rules) else (
                 "warning" if n else "error")
-            cli_log(f"Imported {n}/{len(rules)} STAR rules", level)
+            cli_log(f"Imported {n}/{len(rules)} STAR rules at {lbl}", level)
             for name, err in failures:
                 cli_log(f"  ✗ {name}: {err}", "error")
             if failures:
                 first = "\n\n".join(f"{nm}:\n{er}" for nm, er in failures[:3])
                 more = (f"\n\n…and {len(failures) - 3} more — see the OUTPUT "
                         f"console." if len(failures) > 3 else "")
+                hint = ""
+                if any("higher scope" in er.lower() for _, er in failures):
+                    hint = ("\n\nThis API token is scoped below the tenant, so "
+                            "it cannot create a rule at the global scope. "
+                            "Enter the Account (and Site) to import into and "
+                            "run the import again.")
                 messagebox.showerror(
                     "Import failed" if not n else "Imported with errors",
-                    f"Imported {n} of {len(rules)} STAR rules.\n\n"
-                    f"{first}{more}")
+                    f"Imported {n} of {len(rules)} STAR rules into {lbl}.\n\n"
+                    f"{first}{more}{hint}")
             else:
-                messagebox.showinfo("Done", f"Imported {n} STAR rules.")
+                messagebox.showinfo("Done",
+                                    f"Imported {n} STAR rules into {lbl}.")
 
-        run_async(self, do, done)
+        def fail(exc):
+            self.info_lbl.configure(text=str(exc)[:60], text_color=ACCENT)
+            messagebox.showerror("Import failed", str(exc))
+
+        run_async(self, do, done, fail)
 
     def _export(self):
         stats = [{"label": "Total STAR Rules", "value": len(self.table._rows)}]
