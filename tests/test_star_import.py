@@ -151,12 +151,15 @@ def test_restore_and_ops_import_share_one_implementation():
     # Operations import came to post raw JSON while restore worked.
     import inspect
     import pages
+    import pages_extra
     assert pages.migtools.prepare_star_rule is migtools.prepare_star_rule
     src = inspect.getsource(pages)
     assert "migtools.prepare_star_rule" in src
 
-    ops = inspect.getsource(
-        __import__("pages_extra").STARRulesPage._import)
-    assert "migtools.prepare_star_rule" in ops
+    # The page hands the work to the shared creator, which prepares the rule.
+    ops = inspect.getsource(pages_extra.STARRulesPage._import)
+    assert "import_star_rules" in ops
+    creator = inspect.getsource(pages_extra.import_star_rules)
+    assert "migtools.prepare_star_rule" in creator
     # …and it must not go back to swallowing the reason.
-    assert "except Exception:\n                    pass" not in ops
+    assert "except Exception:\n                    pass" not in creator

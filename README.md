@@ -357,6 +357,17 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 
 ## Changelog
 
+### v2.2.6 — 2026-08-23
+#### Bug Fixes
+- **Endpoint tags failed to restore — all of them, everywhere** — *"Validation Error :: data: type, key, value: Missing data for required field (code 4000010)"* on every unified endpoint tag at every scope. The type was a guess: `POST /tag-manager` validates it, and every tag `GET /agents/tags` returns is typed **`agents`**, not `endpoints`. Worse, that isn't what the error said — after a rejection the client re-sent the tag in two other envelopes and reported the *last* error, so the console's answer about the real request was buried under its answer to a guess. One request is sent now, and its error is the one you see.
+- **A tag with no value was rejected too** — `value` is required, and the console stores `""` for a key-only tag; the field is now always sent.
+- **Endpoint tags stopped duplicating down the tree** — they record their level in `scopeLevel`, not the `scope` field named tags use, so an account's tags were recreated under every site below it. They're now filtered to the scope that owns them, like every other tag type.
+- **STAR rule import always aimed at the tenant** ([#7](https://github.com/s1community/s1-command-center/issues/7)) — *"User …:account can not create rule with higher scope None:tenant"*: the page had no way to choose a scope, so a token scoped to an account or site was asking to create rules above itself and every rule was refused. **Account** and **Site** boxes now scope both Load and Import, the same way they do on Exclusions & Blocklist.
+- **A scope-limited token is no longer a dead end** — when the tenant is refused and the token can reach exactly one account, the import moves there and says where the rules landed; with several accounts reachable it reports the error and how to fix it rather than guessing.
+
+#### Changed
+- `resolve_scope_filter` / `scope_label` are shared by the operations pages, and the STAR import loop moved into `pages_extra.import_star_rules` so it can be tested outside the UI.
+
 ### v2.2.5 — 2026-08-21
 #### Bug Fixes
 - **Report export crashed on Windows** ([#3](https://github.com/s1community/s1-command-center/issues/3)) — `'charmap' codec can't encode characters…`: files were written in the platform default encoding (cp1252 on Windows), so one accent or dash in a rule name broke the export. Every file the app reads and writes is now explicitly UTF-8. Exports that didn't crash were writing cp1252 bytes into HTML declaring `charset="utf-8"`, which rendered as mojibake.

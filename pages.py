@@ -18,7 +18,7 @@ from app import (run_async, LogBox, CARD, GREEN, GREEN_HOVER, ACCENT,
                  BRAND_HOVER, CARD_ELEVATED, BORDER, NEUTRAL, NEUTRAL_HOVER,
                  TEXT, TEXT_MUTED, TEXT_FAINT, SIDEBAR_BG, CONSOLE_BG)
 from export_utils import export_report
-from s1_api import S1APIError
+from s1_api import S1APIError, ENDPOINT_TAG_TYPE
 from config import APP_VERSION
 import migtools
 
@@ -1335,10 +1335,13 @@ _TAG_FIELDS = {
     "name", "description", "type", "key", "value", "scope",
 }
 
-# Unified endpoint tags (Tag Manager) are key/value pairs on a different
-# API — POST /tag-manager with type "endpoints"; `key` is mandatory.
+# Unified endpoint tags (Tag Manager) are key/value pairs on a different API
+# — POST /tag-manager, where `type`, `key` and `value` are all required. The
+# rest of what GET /agents/tags returns (id, scopeLevel/scopeId/scopePath,
+# the created/updated block, the endpoint counts, allowEdit) belongs to the
+# source console and is not sent.
 _ENDPOINT_TAG_FIELDS = {
-    "key", "value", "description",
+    "key", "value", "description", "type",
 }
 
 
@@ -1406,11 +1409,33 @@ def _tag_payload(tag: dict, tag_type: str, ntype: str) -> dict:
 
 def _endpoint_tag_payload(tag: dict) -> dict:
     """Create-ready POST /tag-manager `data` block for a unified endpoint tag.
-    These are key/value pairs — `key` is mandatory, `value`/`description` are
-    optional — and the type is always 'endpoints'."""
+
+    `type`, `key` and `value` are all required together. The type is the
+    tag's own — every tag GET /agents/tags returns is typed "agents" — and
+    not a guess: sending "endpoints" is refused for every tag on every scope,
+    which is what emptied the beijerrefab endpoint-tag migration. `value` is
+    sent even when empty, because the console stores "" for a key-only tag
+    but the API rejects the field being absent."""
     body = _whitelist(tag or {}, _ENDPOINT_TAG_FIELDS)
-    body["type"] = "endpoints"
+    body["type"] = body.get("type") or ENDPOINT_TAG_TYPE
+    body.setdefault("value", "")
     return body
+
+
+def _endpoint_tags_for_scope(tags: list, ntype: str) -> list:
+    """Keep the endpoint tags a node owns, drop the ones it inherits.
+
+    Same problem as `_tags_for_scope`, different field: unified endpoint tags
+    record their level in `scopeLevel`, not `scope`, so they need their own
+    filter — otherwise an account's tags are recreated again under every site
+    beneath it. Tags carrying no level at all are kept."""
+    ok = {"global", "tenant"} if ntype == "global" else {ntype}
+    out = []
+    for tag in tags or []:
+        lvl = str(tag.get("scopeLevel") or tag.get("scope") or "").strip().lower()
+        if not lvl or lvl in ok:
+            out.append(tag)
+    return out
 
 
 def _collect_star_rules(api, acct_filter: str = "",
@@ -6119,11 +6144,15 @@ class RestorePage(ctk.CTkFrame):
                 # …while unified endpoint tags are key/value pairs created
                 # through the Tag Manager API.
                 ep_tags = cfg.get("endpointTags") or []
-                if ep_tags:
-                    _r_bulk("ep-tags", ep_tags,
+                own_ep = _endpoint_tags_for_scope(ep_tags, ntype)
+                if own_ep:
+                    _r_bulk("ep-tags", own_ep,
                             lambda t: api.create_endpoint_tag(
                                 _endpoint_tag_payload(t), scope))
                 else:
+                    if ep_tags:
+                        log(f"  ep-tags: 0 tags at {ntype} scope "
+                            f"({len(ep_tags)} inherited skipped)")
                     results.append(("ep-tags", "0"))
 
             # ── STAR ──

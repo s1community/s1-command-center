@@ -259,6 +259,15 @@ def test_create_tag_uses_filter_data_envelope():
                     "data": {"name": "Servers", "type": "firewall"}}
 
 
+# The endpoint tag every console hands back is typed "agents"; `type`, `key`
+# and `value` are all required by the create schema.
+_TAG = {"type": s1_api.ENDPOINT_TAG_TYPE, "key": "Dept", "value": "Finance"}
+
+
+def test_endpoint_tag_type_is_the_one_the_console_reports():
+    assert s1_api.ENDPOINT_TAG_TYPE == "agents"
+
+
 def test_get_endpoint_tags_hits_agents_tags():
     api = _client([FakeResp(200, {"data": [{"id": "e1", "key": "Dept"}]})])
     assert api.get_endpoint_tags({"siteIds": ["S1"]}) == \
@@ -270,19 +279,17 @@ def test_get_endpoint_tags_hits_agents_tags():
 
 def test_create_endpoint_tag_posts_tag_manager_with_scope():
     api = _client([FakeResp(201, {"data": {"id": "new"}})])
-    api.create_endpoint_tag({"key": "Dept", "type": "endpoints"},
-                            {"siteIds": ["S1"]})
+    api.create_endpoint_tag(_TAG, {"siteIds": ["S1"]})
     method, url, _params, body = api.session.calls[0]
     assert method == "POST" and url.endswith("/tag-manager")
-    assert body == {"data": {"key": "Dept", "type": "endpoints"},
-                    "filter": {"siteIds": ["S1"]}}
+    assert body == {"data": _TAG, "filter": {"siteIds": ["S1"]}}
 
 
 def test_create_endpoint_tag_without_scope_omits_filter():
     api = _client([FakeResp(201, {"data": {"id": "new"}})])
-    api.create_endpoint_tag({"key": "Dept", "type": "endpoints"})
+    api.create_endpoint_tag(_TAG)
     _method, _url, _params, body = api.session.calls[0]
-    assert body == {"data": {"key": "Dept", "type": "endpoints"}}
+    assert body == {"data": _TAG}
 
 
 # ── POST /tag-manager: a 2xx is not proof of a create ────────────────────
@@ -291,11 +298,11 @@ def test_create_endpoint_tag_without_scope_omits_filter():
 # answers 200 to a body it does not store.
 
 def _ep_tag(api):
-    return api.create_endpoint_tag({"key": "Dept", "type": "endpoints"},
-                                   {"siteIds": ["S1"]})
+    return api.create_endpoint_tag(_TAG, {"siteIds": ["S1"]})
 
 
 _NOT_THERE = FakeResp(200, {"data": []})       # read-back: no such tag
+_UNREADABLE = FakeResp(400, {})                # read-back: couldn't tell
 
 
 def _posts(api):
@@ -303,18 +310,15 @@ def _posts(api):
 
 
 def test_empty_2xx_is_not_counted_as_a_created_tag():
-    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE,
-                   FakeResp(200, {"data": {}}), _NOT_THERE,
-                   FakeResp(200, {"data": {}}), _NOT_THERE])
+    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE])
     with pytest.raises(S1APIError) as exc:
         _ep_tag(api)
     assert "created nothing" in str(exc.value)
-    # every supported shape was tried, each one confirmed absent first
-    assert len(_posts(api)) == 3
+    assert len(_posts(api)) == 1
 
 
 def test_affected_zero_is_not_counted_as_a_created_tag():
-    api = _client([FakeResp(200, {"data": {"affected": 0}}), _NOT_THERE] * 3)
+    api = _client([FakeResp(200, {"data": {"affected": 0}}), _NOT_THERE])
     with pytest.raises(S1APIError):
         _ep_tag(api)
 
@@ -325,20 +329,12 @@ def test_affected_count_counts_as_a_created_tag():
     assert len(api.session.calls) == 1
 
 
-def test_create_endpoint_tag_falls_back_to_the_shape_that_stores():
-    api = _client([FakeResp(200, {"data": {}}), _NOT_THERE,
-                   FakeResp(200, {"data": [{"id": "new"}]})])
-    assert _ep_tag(api) == {"data": [{"id": "new"}]}
-    _m, _u, _p, body = _posts(api)[1]
-    assert body == {"data": [{"key": "Dept", "type": "endpoints"}],
-                    "filter": {"siteIds": ["S1"]}}
-
-
 def test_a_create_the_console_stored_but_did_not_echo_is_accepted():
     # If the tag IS there afterwards, the empty response was just terse —
-    # sending the next shape at it would create a second copy.
+    # posting again would create a second copy.
     api = _client([FakeResp(200, {}),
-                   FakeResp(200, {"data": [{"id": "e1", "key": "Dept"}]})])
+                   FakeResp(200, {"data": [{"id": "e1", "key": "Dept",
+                                            "value": "Finance"}]})])
     _ep_tag(api)
     assert len(_posts(api)) == 1
     _m, _u, params, _b = api.session.calls[1]
@@ -347,24 +343,61 @@ def test_a_create_the_console_stored_but_did_not_echo_is_accepted():
 
 
 def test_unconfirmable_create_is_never_retried():
-    # Read-back failed, so whether the tag was stored is unknown. Retrying
-    # would risk duplicating it — raise instead.
-    api = _client([FakeResp(200, {}), FakeResp(400, {})])
+    # Both read-backs failed, so whether the tag was stored is unknown.
+    # Retrying would risk duplicating it — raise instead.
+    api = _client([FakeResp(200, {}), _UNREADABLE, _UNREADABLE])
     with pytest.raises(S1APIError) as exc:
         _ep_tag(api)
     assert "could not confirm" in str(exc.value)
     assert len(_posts(api)) == 1
 
 
-def test_create_endpoint_tag_tries_next_shape_when_one_is_rejected():
-    api = _client([FakeResp(400, {"errors": [{"detail": "unknown field"}]}),
+def test_read_back_falls_back_to_a_plain_scope_read():
+    # A console that rejects `key__contains` must not turn a good create
+    # into "could not confirm".
+    api = _client([FakeResp(200, {}), _UNREADABLE,
+                   FakeResp(200, {"data": [{"key": "Dept",
+                                            "value": "Finance"}]})])
+    assert _ep_tag(api) == {}
+    _m, _u, params, _b = api.session.calls[2]
+    assert "key__contains" not in params
+
+
+# ── the console's own error must survive ──────────────────────────────────
+# beijerrefab (2026-08-21): every endpoint tag failed, and the reported
+# reason was the console's answer to a *guessed* request shape, not to the
+# real one — "key, value, type: Missing data for required field" instead of
+# the complaint about the type that was actually sent.
+
+def test_a_rejected_create_reports_the_consoles_reason_verbatim():
+    api = _client([FakeResp(400, {"errors": [{"detail": "type: Invalid value"}]})])
+    with pytest.raises(S1APIError) as exc:
+        _ep_tag(api)
+    assert "Invalid value" in f"{exc.value} {exc.value.detail}"
+    assert len(_posts(api)) == 1
+
+
+def test_a_rejected_create_is_not_re_sent_in_another_envelope():
+    api = _client([FakeResp(400, {"errors": [{"detail": "key: Missing"}]})])
+    with pytest.raises(S1APIError):
+        _ep_tag(api)
+    # One request. Re-posting the tag inside a list or under data.tags only
+    # replaces the real error with a meaningless one.
+    assert len(_posts(api)) == 1
+
+
+def test_a_console_that_rejects_the_filter_envelope_gets_one_retry():
+    api = _client([FakeResp(400, {"errors": [{"detail": "filter: Unknown field"}]}),
                    FakeResp(201, {"data": {"id": "new"}})])
-    assert _ep_tag(api) == {"data": {"id": "new"}}
+    _ep_tag(api)
+    bodies = [c[3] for c in _posts(api)]
+    assert bodies == [{"data": _TAG, "filter": {"siteIds": ["S1"]}},
+                      {"data": _TAG}]
 
 
 def test_create_endpoint_tag_surfaces_already_exists_immediately():
-    # 409 is a real answer about this tag — it must not be retried as a
-    # shape problem, so the restore can report it as "exists", not "new".
+    # 409 is a real answer about this tag, so the restore can report it as
+    # "exists", not "new".
     api = _client([FakeResp(409, {"errors": [{"detail": "Already Exists"}]})])
     with pytest.raises(S1APIError) as exc:
         _ep_tag(api)

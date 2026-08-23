@@ -25,6 +25,7 @@ from pages import (
     _tags_for_scope,
     _tag_payload,
     _endpoint_tag_payload,
+    _endpoint_tags_for_scope,
 )
 
 
@@ -253,18 +254,103 @@ def test_tag_payload_does_not_mutate_source():
     assert src == {"name": "x", "kind": "user", "scope": "account"}
 
 
-def test_endpoint_tag_payload_is_key_value_typed_endpoints():
-    src = {"id": "7", "key": "Department", "value": "Finance",
-           "description": "dept tag", "createdAt": "2026-01-01",
-           "scope": "site", "creator": "admin"}
-    assert _endpoint_tag_payload(src) == {
-        "key": "Department", "value": "Finance",
-        "description": "dept tag", "type": "endpoints"}
+# ── _endpoint_tag_payload ───────────────────────────────────────────────
+# Verbatim from GET /agents/tags. POST /tag-manager requires `type`, `key`
+# and `value` together and validates the type, so a payload that guesses it
+# is refused for every tag on every scope (beijerrefab, 2026-08-21).
+
+def _console_endpoint_tag(**over):
+    tag = {
+        "allowEdit": True,
+        "createdAt": "2024-11-25T18:17:44.062145Z",
+        "createdBy": "SentinelOne",
+        "description": "",
+        "endpointsInCurrentScope": 0,
+        "id": "2091530492334218617",
+        "key": "ripple20",
+        "scopeId": "1655835019966207609",
+        "scopeLevel": "account",
+        "scopePath": "Global\\FIRST QUANTUM MINERALS (UK) LTD",
+        "totalEndpoints": 0,
+        "type": "agents",
+        "updatedAt": "2024-11-25T18:17:44.062151Z",
+        "updatedBy": "SentinelOne",
+        "value": "",
+    }
+    tag.update(over)
+    return tag
 
 
-def test_endpoint_tag_payload_value_is_optional():
+def test_endpoint_tag_payload_sends_only_the_four_writable_fields():
+    assert _endpoint_tag_payload(_console_endpoint_tag()) == {
+        "type": "agents", "key": "ripple20", "value": "", "description": ""}
+
+
+def test_endpoint_tag_payload_keeps_the_consoles_own_type():
+    out = _endpoint_tag_payload(_console_endpoint_tag(key="Department",
+                                                      value="Finance"))
+    assert out["type"] == "agents"
+
+
+def test_endpoint_tag_payload_never_guesses_the_type():
+    # The 100%-failure bug: "endpoints" is rejected by the create schema.
+    for tag in (_console_endpoint_tag(), {"key": "OnlyKey"}, {}):
+        assert _endpoint_tag_payload(tag)["type"] == "agents"
+
+
+def test_endpoint_tag_payload_defaults_a_missing_type():
+    assert _endpoint_tag_payload({"key": "K", "value": "V"}) == {
+        "type": "agents", "key": "K", "value": "V"}
+
+
+def test_endpoint_tag_payload_always_sends_value():
+    # `value` is required, so a key-only tag needs the empty string the
+    # console itself stores — omitting the field is a validation error.
     assert _endpoint_tag_payload({"key": "OnlyKey"}) == {
-        "key": "OnlyKey", "type": "endpoints"}
+        "type": "agents", "key": "OnlyKey", "value": ""}
+    assert _endpoint_tag_payload({"key": "K", "value": None})["value"] == ""
+
+
+def test_endpoint_tag_payload_keeps_a_literal_no_value():
+    # "No Value" is a real stored string on these consoles, not a placeholder.
+    assert _endpoint_tag_payload(
+        _console_endpoint_tag(value="No Value"))["value"] == "No Value"
+
+
+def test_endpoint_tag_payload_does_not_mutate_source():
+    src = _console_endpoint_tag()
+    before = dict(src)
+    _endpoint_tag_payload(src)
+    assert src == before
+
+
+# ── _endpoint_tags_for_scope ────────────────────────────────────────────
+# Endpoint tags carry their level in `scopeLevel`, not `scope`.
+
+def test_endpoint_tags_for_scope_keeps_only_this_levels_tags():
+    tags = [_console_endpoint_tag(key="acct", scopeLevel="account"),
+            _console_endpoint_tag(key="site", scopeLevel="site"),
+            _console_endpoint_tag(key="glob", scopeLevel="global")]
+    assert [t["key"] for t in _endpoint_tags_for_scope(tags, "account")] == \
+        ["acct"]
+    assert [t["key"] for t in _endpoint_tags_for_scope(tags, "site")] == \
+        ["site"]
+
+
+def test_endpoint_tags_for_scope_treats_tenant_as_global():
+    tags = [_console_endpoint_tag(key="a", scopeLevel="tenant"),
+            _console_endpoint_tag(key="b", scopeLevel="global")]
+    assert len(_endpoint_tags_for_scope(tags, "global")) == 2
+
+
+def test_endpoint_tags_for_scope_keeps_tags_with_no_level():
+    # Older backups have no scopeLevel; dropping them would migrate nothing.
+    tags = [{"key": "K", "value": "V"}]
+    assert _endpoint_tags_for_scope(tags, "site") == tags
+
+
+def test_endpoint_tags_for_scope_handles_empty():
+    assert _endpoint_tags_for_scope(None, "site") == []
 
 
 # ── _scope ──────────────────────────────────────────────────────────────

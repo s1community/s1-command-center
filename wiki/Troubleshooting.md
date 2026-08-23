@@ -64,6 +64,14 @@
 - **If nothing was stored and nothing was claimed**, check that the token has `Tag Management.create` — a **separate permission** from `Tags.create` (see [[API Token Permissions]]). Note that a global-admin service user with Unified Tags granted has still shown this symptom, so a granted permission doesn't close the question; save the diagnosis report and compare what the console answered for each request format
 - Endpoint tags are key/value pairs from Tag Manager; firewall, network-quarantine and device-inventory tags are different objects with different permissions, so one type restoring fine says nothing about the others
 
+## STAR Rule Issues
+
+### "can not create rule with higher scope None:tenant"
+- The API token is scoped to an account or a site, and the import was aimed at the tenant (global) scope — a token can't create a rule above itself, so every rule is rejected
+- On **STAR Rules** (Operations → Detection & Response), fill in **Account** — and **Site** if the rules belong to a site — then import again. The same boxes scope **Load STAR Rules**
+- A token that can reach exactly one account is redirected there automatically and the summary says which scope the rules landed in
+- Creating rules also needs `STAR.create` on the token's role (see [[API Token Permissions]])
+
 ## Purple AI Issues
 
 ### "Purple AI returned an error"

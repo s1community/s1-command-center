@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.2.6 — 2026-08-23
+
+### Bug Fixes
+- **Every endpoint tag failed to restore, and the reported reason was the answer to a different question** — the beijerrefab migration (2026-08-21) failed all 173 unified endpoint tags at every scope with *"Validation Error :: data: type: Missing data for required field., key: Missing data for required field., value: Missing data for required field. (code 4000010)"*. Two faults, one on top of the other:
+  - **The tag type was a guess, and it was wrong.** `POST /tag-manager` validates `type`, and every tag `GET /agents/tags` hands back is typed **`agents`** — the restore stamped `endpoints` on all of them, so the create was refused for every tag, on every scope, on every console. The tag's own type is now sent (defaulting to `agents`), never a guess.
+  - **The error came from a request nobody meant to send.** After a rejection the client re-sent the tag inside a list, then inside `data.tags`, and reported whichever error came *last* — so the console's complaint about the real request was replaced by its complaint about a guess: all three fields were indeed "missing" from an envelope the schema was never going to read. There is one request now — `{"data": {…}, "filter": {…}}` — and the console's answer to it is what gets reported.
+- **A key-only tag never sent its value** — `value` is required alongside `type` and `key`. The console stores `""` for a tag with no value, but the API rejects the field being absent, so tags like `ripple20` were refused even once the type was right. The empty string is now always sent.
+- **Inherited endpoint tags were recreated under every child scope** — unified tags record their level in `scopeLevel`, not the `scope` field the named `/tags` objects use, so the filter that keeps a node to the tags it owns never applied to them: an account's tags were sent again for every site beneath it. They are now filtered like every other tag type, and a scope whose tags are all inherited logs the count it skipped instead of reporting a bare `0`.
+- **A read-back the console can't answer no longer sinks a good create** — confirming a create that returned an empty body asks `GET /agents/tags?key__contains=…`; a console that rejects that filter made every such create "could not confirm". The scope is now re-read without the filter before giving up.
+- **The diagnosis was probing a tag the console would always reject** — *Diagnose endpoint tags* built its throwaway tags with the same wrong type, so every request envelope failed for a reason that had nothing to do with the envelope. It now probes with the type the console reports.
+- **STAR rule import always aimed at the tenant** ([#7](https://github.com/s1community/s1-command-center/issues/7), reported by ADDefender) — *"User 1449449408854677414:account can not create rule with higher scope None:tenant (code 4000010)"*. Both the Load and the Import on the STAR Rules page sent `{"tenant": "true"}` with no way to change it, so a token scoped to an account or a site was asking to create a rule above itself and every rule was refused. The page now has **Account** and **Site** boxes that scope both actions, exactly like Exclusions & Blocklist: blank means the tenant, a named Account means that account, and adding a Site narrows it further.
+- **A scope-limited token no longer has to be told twice** — if a tenant create is refused for that reason and the token can reach exactly one account, the import moves to that account and reports where the rules landed. With several accounts reachable, only the operator can say which is meant, so the error is reported instead of guessing — and the dialog now says what to do about it.
+
+### Changed
+- **One scope resolver for the operations pages** — `resolve_scope_filter` / `scope_label` moved out of the Exclusions page to module level and both pages use them, so Account/Site behave identically wherever they appear.
+- **The import loop is testable** — creating the rules moved into `pages_extra.import_star_rules(api, rules, scope, now)`, out of the Tk callback. It still prepares every rule with `migtools.prepare_star_rule` and still returns each failure with its reason.
+
+### Tests
+- 14 new: scope resolution (blank → tenant, account name → `accountIds`, site wins over account, case-insensitive matching, unknown names naming themselves), rules created at the scope asked for and prepared before sending, the reported failure recovering into the single reachable account, several reachable accounts reporting rather than guessing, a non-scope rejection not being retried elsewhere, and a guard that neither Load nor Import can go back to a hardcoded tenant.
+- 12 more for endpoint tags, built on a tag object copied verbatim out of a real console backup rather than an assumed shape: the type is the console's own and is never guessed, `value` is always sent, a literal `"No Value"` survives, the read-only half of the object (ids, scope path, counters, timestamps) is not, `scopeLevel` filtering keeps a node to its own tags, a rejected create reports the console's reason and is not re-sent in another envelope, and the read-back falls back to a plain scope read. 269 tests total.
+
 ## v2.2.5 — 2026-08-21
 
 ### Bug Fixes

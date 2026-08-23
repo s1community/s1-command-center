@@ -276,7 +276,7 @@ def test_rows_can_be_filtered_to_endpoint_tags_only():
 def test_probe_reports_the_shape_the_console_actually_stores():
     api = FakeAPI()
     scope = tag_audit.scope_filter("site", "s1")
-    api.stores = {"data": [{"type": "endpoints", "key": "s1cc-probe-120000-2",
+    api.stores = {"data": [{"type": "agents", "key": "s1cc-probe-120000-2",
                             "value": "probe"}], "filter": scope}
     res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
     assert res["winner"] == "data array + filter"
@@ -325,7 +325,7 @@ def test_probe_keeps_what_the_console_answered():
 def test_probe_finds_a_tag_listed_on_an_alternate_route():
     api = FakeAPI(endpoint_route="/tag-manager")
     scope = tag_audit.scope_filter("site", "s1")
-    api.stores = {"data": {"type": "endpoints", "key": "s1cc-probe-120000-1",
+    api.stores = {"data": {"type": "agents", "key": "s1cc-probe-120000-1",
                            "value": "probe"}, "filter": scope}
     res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
     assert res["winner"] == "data object + filter  (what the restore sends)"
@@ -343,7 +343,7 @@ def test_a_tag_keyed_under_a_different_field_still_counts():
 def test_probe_flags_a_tag_stored_at_the_wrong_scope():
     api = FakeAPI()
     scope = tag_audit.scope_filter("site", "s1")
-    api.stores = {"data": {"type": "endpoints", "key": "s1cc-probe-120000-1",
+    api.stores = {"data": {"type": "agents", "key": "s1cc-probe-120000-1",
                            "value": "probe"}, "filter": scope}
     api.store_at_scope = False  # only the tenant-wide read finds it
     res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
@@ -354,7 +354,7 @@ def test_probe_flags_a_tag_stored_at_the_wrong_scope():
 def test_probe_deletes_every_tag_it_created():
     api = FakeAPI()
     scope = tag_audit.scope_filter("site", "s1")
-    api.stores = {"data": {"type": "endpoints", "key": "s1cc-probe-120000-1",
+    api.stores = {"data": {"type": "agents", "key": "s1cc-probe-120000-1",
                            "value": "probe"}, "filter": scope}
     res = tag_audit.probe_endpoint_tag_shapes(api, "site", "s1", "120000")
     assert api.deletes
@@ -366,7 +366,7 @@ def test_probe_deletes_every_tag_it_created():
 def test_probe_names_tags_it_could_not_delete():
     api = FakeAPI()
     scope = tag_audit.scope_filter("site", "s1")
-    api.stores = {"data": {"type": "endpoints", "key": "s1cc-probe-120000-1",
+    api.stores = {"data": {"type": "agents", "key": "s1cc-probe-120000-1",
                            "value": "probe"}, "filter": scope}
 
     def undeletable(method, endpoint, body=None):
