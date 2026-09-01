@@ -26,6 +26,8 @@ from pages import (
     _tag_payload,
     _endpoint_tag_payload,
     _endpoint_tags_for_scope,
+    _overrides_for_scope,
+    _override_payload,
 )
 
 
@@ -347,6 +349,93 @@ def test_endpoint_tags_for_scope_keeps_tags_with_no_level():
     # Older backups have no scopeLevel; dropping them would migrate nothing.
     tags = [{"key": "K", "value": "V"}]
     assert _endpoint_tags_for_scope(tags, "site") == tags
+
+
+# ── _overrides_for_scope ──────────────────────────────────────
+
+def test_overrides_for_scope_drops_other_scopes():
+    ovr = [{"name": "acct", "scope": "account"},
+           {"name": "grp", "scope": "group"},
+           {"name": "st", "scope": "site"}]
+    assert [o["name"] for o in _overrides_for_scope(ovr, "account")] == ["acct"]
+    assert [o["name"] for o in _overrides_for_scope(ovr, "group")] == ["grp"]
+    assert [o["name"] for o in _overrides_for_scope(ovr, "site")] == ["st"]
+
+
+def test_overrides_for_scope_global_accepts_tenant_alias():
+    ovr = [{"name": "g1", "scope": "global"},
+           {"name": "g2", "scope": "tenant"},
+           {"name": "s", "scope": "site"}]
+    assert sorted(o["name"] for o in _overrides_for_scope(ovr, "global")) == \
+        ["g1", "g2"]
+
+
+def test_overrides_for_scope_keeps_overrides_with_no_scope_field():
+    ovr = [{"name": "Legacy"}]
+    assert _overrides_for_scope(ovr, "site") == ovr
+
+
+def test_overrides_for_scope_empty_input():
+    assert _overrides_for_scope(None, "site") == []
+    assert _overrides_for_scope([], "account") == []
+
+
+def test_overrides_for_scope_account_query_owns_none_of_its_descendants():
+    """Real shape from the Beijer Ref backup: querying /config-override at the
+    account returned 14 group-scoped and 3 site-scoped overrides and zero
+    account-scoped ones. Unfiltered, all 17 were re-created at the account."""
+    account_query_result = (
+        [{"name": f"g{i}", "scope": "group"} for i in range(14)]
+        + [{"name": f"s{i}", "scope": "site"} for i in range(3)]
+    )
+    assert _overrides_for_scope(account_query_result, "account") == []
+
+
+# ── _override_payload ────────────────────────────────────────
+
+def test_override_payload_keeps_the_overrides_own_scope():
+    ovr = {"name": "VSSConfig BNK", "scope": "group",
+           "config": {"vssConfig": {}}}
+    # Restoring the ACCOUNT node must not turn a group override into an
+    # account one.
+    assert _override_payload(ovr, "account")["scope"] == "group"
+
+
+def test_override_payload_drops_source_console_scope_objects():
+    ovr = {"name": "n", "scope": "group",
+           "account": {"id": "A1", "name": "Src"},
+           "site": {"id": "S1", "name": "SrcSite"},
+           "group": {"id": "G1", "name": "SrcGroup"}}
+    body = _override_payload(ovr, "group")
+    assert "account" not in body
+    assert "site" not in body
+    assert "group" not in body
+    assert body["name"] == "n"
+
+
+def test_override_payload_strips_read_only_fields():
+    ovr = {"name": "n", "scope": "site", "id": "9",
+           "createdAt": "t", "updatedAt": "t"}
+    body = _override_payload(ovr, "site")
+    assert "id" not in body
+    assert "createdAt" not in body
+    assert "updatedAt" not in body
+
+
+def test_override_payload_maps_tenant_to_global():
+    body = _override_payload({"name": "n", "scope": "tenant"}, "global")
+    assert body["scope"] == "global"
+
+
+def test_override_payload_falls_back_to_the_node_type():
+    # Old backups omit `scope`; the destination still requires data.scope.
+    assert _override_payload({"name": "n"}, "site")["scope"] == "site"
+
+
+def test_override_payload_does_not_mutate_input():
+    ovr = {"name": "n", "scope": "group", "group": {"id": "G1"}}
+    _override_payload(ovr, "account")
+    assert ovr == {"name": "n", "scope": "group", "group": {"id": "G1"}}
 
 
 def test_endpoint_tags_for_scope_handles_empty():

@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.2.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.2.7 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -356,6 +356,16 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.2.7 — 2026-09-01
+#### Bug Fixes
+- **Config overrides were recreated at the wrong scope, several times over** — `GET /config-override` returns every *descendant* scope's overrides as well as the node's own, so an account query also hands back the overrides belonging to its sites and groups. Nothing filtered that, and the restore then stamped the node's own type onto each one — so a group's override was created at the account, and again at the site, and again at the group. On one real tenant that turned 17 overrides into 47 create calls, 17 of them at a scope they never belonged to. Each override now keeps its own scope and is restored only on the node that owns it.
+- **Overrides carried the source console's IDs** — an override echoes its `account`, `site` and `group` back as nested objects. The field filter only removed the flat `accountId` / `siteId` / `groupId` forms, so source-tenant IDs travelled into the destination payload. They're stripped now.
+- **An element with nothing to restore left no trace** — when a backup held no data for a selected element, the restore skipped it with no row and no error, so the report looked clean while the destination was missing configuration. This is what made absent auto-upgrade policies, log-collection rules, webhooks and scheduled reports read as a failed migration rather than a backup that never captured them. Every selected element now reports, and *"0"* (nothing to restore) is distinguished from *"0 (not in backup)"* (never captured).
+- **An override with no home is now visible** — one whose own scope isn't part of the migration has nowhere to be restored to. It used to be silently misfiled at the parent; the run now says how many were skipped and why.
+
+#### Changed
+- Backups store only the overrides each scope actually owns, so the same override is no longer duplicated at every level above it. Existing backups are repaired on restore — no need to re-capture.
 
 ### v2.2.6 — 2026-08-23
 #### Bug Fixes

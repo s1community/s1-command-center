@@ -1438,6 +1438,55 @@ def _endpoint_tags_for_scope(tags: list, ntype: str) -> list:
     return out
 
 
+def _overrides_for_scope(overrides: list, ntype: str) -> list:
+    """Keep the config overrides a node owns, drop the ones it only sees.
+
+    Same trap as _rules_for_scope / _tags_for_scope, but in the opposite
+    direction: GET /config-override returns every DESCENDANT scope's
+    overrides as well, so an account query also returns the overrides that
+    belong to its sites and groups. Restoring that raw list re-creates a
+    group's override at the account (and again at the site, and again at the
+    group). Confirmed on the Beijer Ref backup: 17 real overrides were stored
+    47 times across the tree, and not one of them actually belonged to the
+    account node that returned them.
+
+    Overrides with no `scope` field are kept: older backups omit it and
+    dropping them would silently migrate nothing."""
+    ok = {"global", "tenant"} if ntype == "global" else {ntype}
+    out = []
+    for ovr in overrides or []:
+        sc = str((ovr or {}).get("scope", "")).strip().lower()
+        if not sc or sc in ok:
+            out.append(ovr)
+    return out
+
+
+# A config override echoes the source console's own scope objects back as
+# nested {id, name} dicts. `STRIP_FIELDS` only removes the scalar
+# accountId/siteId/groupId forms, so these would otherwise carry source-tenant
+# IDs into the destination POST.
+_OVERRIDE_SOURCE_REFS = ("account", "site", "group")
+
+
+def _override_payload(ovr: dict, ntype: str) -> dict:
+    """Create-ready POST /config-override `data` block for one override.
+
+    S1 requires `data.scope` (a string like "site" / "account" / "group" /
+    "global") even though the wrapping `filter` already names the scope, and
+    `_clean_for_restore` strips the source's `scope` — so it has to be put
+    back. Use the override's OWN scope rather than the node being restored:
+    stamping the node type turned a group-scoped override into an
+    account-scoped one whenever the account query returned it."""
+    body = _clean_for_restore(ovr or {})
+    for ref in _OVERRIDE_SOURCE_REFS:
+        body.pop(ref, None)
+    sc = str((ovr or {}).get("scope", "")).strip().lower()
+    if sc == "tenant":
+        sc = "global"
+    body["scope"] = sc or ntype
+    return body
+
+
 def _collect_star_rules(api, acct_filter: str = "",
                         site_filter: str = "") -> list:
     """Fetch every STAR custom detection rule the token can see, for export.
@@ -3002,8 +3051,30 @@ class BackupPage(ctk.CTkFrame):
 
         # ── Config overrides ──
         if "config_overrides" in elements:
-            _fetch(None, "overrides", api.get_config_overrides, scope,
-                   store_path=["config", "overrides"])
+            _ovr = _fetch(None, "overrides", api.get_config_overrides, scope,
+                          store_path=["config", "overrides"])
+            # /config-override returns the overrides of every DESCENDANT
+            # scope too, so an account query also returns its sites' and
+            # groups'. Store only this node's own, or the same override is
+            # backed up (and later re-created) at every level above it.
+            if isinstance(_ovr, list):
+                _own_ovr = _overrides_for_scope(_ovr, scope_type)
+                data.setdefault("config", {})["overrides"] = _own_ovr
+                _dropped = len(_ovr) - len(_own_ovr)
+                if _dropped:
+                    # Not a loss: each of these belongs to a descendant scope
+                    # and is captured on that node instead — unless that node
+                    # is outside the backup's scope filters, in which case it
+                    # has nowhere to be restored to and the operator needs to
+                    # know it was seen here.
+                    cli_log(
+                        f"{scope_type} overrides: kept {len(_own_ovr)} owned, "
+                        f"skipped {_dropped} belonging to a descendant scope",
+                        "info")
+                for _i, (_nm, _v) in enumerate(results):
+                    if _nm == "overrides":
+                        results[_i] = ("overrides", len(_own_ovr))
+                        break
 
         # ── Log collection rules ──
         if "log_collection_rules" in elements and scope_type in ("account", "site"):
@@ -5762,6 +5833,18 @@ class RestorePage(ctk.CTkFrame):
                             continue
                     raise exc  # decouple failed — surface the original reason
 
+            def _nothing(label, captured=True):
+                """Record a row for a selected element that wrote nothing.
+
+                A silently skipped element is indistinguishable from a
+                successful one in the report: that is how the missing tags
+                went unnoticed (Joshua Tooley, 2026-08), and then again how
+                auto-upgrade policies / log-collection rules / webhooks /
+                scheduled reports appeared to "not migrate" when in fact the
+                backup never captured them. Always leave a row, and say
+                whether the backup even holds the data."""
+                results.append((label, "0" if captured else "0 (not in backup)"))
+
             # ── Policy ──
             if "policy" in elements and data.get("policy"):
                 def _restore_policy(pol):
@@ -5897,6 +5980,9 @@ class RestorePage(ctk.CTkFrame):
             if "blocklist" in elements and bl:
                 _r_bulk("blocklist", bl,
                         lambda item: api.create_restriction(scope, _whitelist(item, _BLOCKLIST_FIELDS)))
+            elif "blocklist" in elements:
+                _nothing("blocklist",
+                         "restrictions" in data or "blocklist" in data)
 
             # ── Firewall ──
             fw = data.get("firewall", {})
@@ -6023,6 +6109,8 @@ class RestorePage(ctk.CTkFrame):
             if "nq_rules" in elements and nq.get("rules"):
                 _r_bulk("nq-rules", nq["rules"],
                         lambda rule: api.create_nq_rule(scope, _clean_for_restore(rule)))
+            elif "nq_rules" in elements:
+                _nothing("nq-rules", "rules" in nq)
 
             # ── Device Control ──
             dc = data.get("deviceControl", {})
@@ -6176,6 +6264,8 @@ class RestorePage(ctk.CTkFrame):
                         migtools.prepare_star_rule(
                             rule, datetime.now(timezone.utc)))
                 _r_bulk("star", star, _create_star)
+            elif "star_rules" in elements:
+                _nothing("star", "star" in data or "star_rules" in data)
 
             # ── Saved filters ──
             dv = data.get("deepVisibility", {})
@@ -6183,21 +6273,38 @@ class RestorePage(ctk.CTkFrame):
             if "saved_filters" in elements and flt:
                 _r_bulk("dv-filters", flt,
                         lambda f: api.create_saved_filter(scope, _clean_for_restore(f)))
+            elif "saved_filters" in elements:
+                _nothing("dv-filters",
+                         "filters" in (data.get("deepVisibility") or {})
+                         or "saved_filters" in data)
 
             # ── Config overrides ──
             ovr = data.get("config", {}).get("overrides") or []
             if "config_overrides" in elements and ovr:
+                # Repair OLD backups, which captured the descendant overrides
+                # the API returns at every level. Without this an account
+                # restore re-creates its groups' overrides at account scope.
+                _ovr_seen = len(ovr)
+                ovr = _overrides_for_scope(ovr, ntype)
+                _ovr_skipped = _ovr_seen - len(ovr)
+                if _ovr_skipped:
+                    # Log partial skips too, not just the all-dropped case:
+                    # an override whose own scope isn't in this migration has
+                    # no destination node and would otherwise disappear
+                    # without a trace.
+                    log(f"  overrides: {len(ovr)} at {ntype} scope "
+                        f"({_ovr_skipped} belonging to another scope "
+                        f"skipped)")
+            if "config_overrides" in elements and ovr:
                 # NOTE: S1 requires `data.scope` (a string like "site" /
                 # "account" / "group" / "global") even though the wrapping
                 # `filter` already names the scope. `_clean_for_restore`
-                # strips the source's `scope` field, so we re-inject it here
-                # using the destination scope type. Without this the API
+                # strips the source's `scope` field, so `_override_payload`
+                # re-injects the override's OWN scope. Without this the API
                 # rejects every create with "data: scope: Missing data for
                 # required field." See restore-error bundle (v1.2.0).
                 def _build_override(o):
-                    body = _clean_for_restore(o)
-                    body["scope"] = ntype
-                    return body
+                    return _override_payload(o, ntype)
 
                 def _create_override(o):
                     body = _build_override(o)
@@ -6246,6 +6353,9 @@ class RestorePage(ctk.CTkFrame):
                                 raise
                         raise
                 _r_bulk("overrides", ovr, _create_override)
+            elif "config_overrides" in elements:
+                _nothing("overrides",
+                         "overrides" in (data.get("config") or {}))
 
             # ── Settings ──
             stg = data.get("settings", {})
@@ -6357,12 +6467,16 @@ class RestorePage(ctk.CTkFrame):
             if "log_collection_rules" in elements and lcr:
                 _r_bulk("log-rules", lcr,
                         lambda r: api.create_log_collection_rule(_clean_for_restore(r)))
+            elif "log_collection_rules" in elements:
+                _nothing("log-rules", "logCollectionRules" in data)
 
             # ── Auto-upgrade policies ──
             aup = data.get("autoUpgradePolicies") or []
             if "auto_upgrade_policies" in elements and aup:
                 _r_bulk("upgrade-pol", aup,
                         lambda p: api.create_auto_upgrade_policy(_clean_for_restore(p)))
+            elif "auto_upgrade_policies" in elements:
+                _nothing("upgrade-pol", "autoUpgradePolicies" in data)
 
             # ── Locations ──
             # S1 only accepts location filters with accountIds / siteIds —
@@ -6399,12 +6513,16 @@ class RestorePage(ctk.CTkFrame):
                 self._operation_log.append(
                     f"  ↻ Locations skipped at group scope "
                     f"(S1 locations are site/account-only)")
+            elif "locations" in elements and ntype != "group":
+                _nothing("locations", "locations" in data)
 
             # ── Webhooks ──
             hooks = data.get("webhooks") or []
             if "webhooks" in elements and hooks:
                 _r_bulk("webhooks", hooks,
                         lambda w: api.create_webhook(scope, _clean_for_restore(w)))
+            elif "webhooks" in elements:
+                _nothing("webhooks", "webhooks" in data)
 
             # ── Scheduled reports ──
             sched = data.get("scheduledReports") or []
@@ -6412,6 +6530,8 @@ class RestorePage(ctk.CTkFrame):
                 _r_bulk("sched-rep", sched,
                         lambda r: api.create_scheduled_report(
                             scope, _clean_for_restore(r)))
+            elif "scheduled_reports" in elements:
+                _nothing("sched-rep", "scheduledReports" in data)
 
             # ── Marketplace inventory (read-only, log only) ──
             mkt = data.get("marketplaceApps") or []

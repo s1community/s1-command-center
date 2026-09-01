@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.2.7 — 2026-09-01
+
+### Bug Fixes
+- **Config overrides were restored at the wrong scope, and more than once** — reported during the Beijer Ref migration (2026-08-31) as *"policy override did not make the transfer"*. `GET /config-override` returns the overrides of every **descendant** scope as well as the node's own — the mirror image of the inherited-rule trap that firewall, device control, STAR and tags each had to be taught about. Querying the account returned 14 group-scoped and 3 site-scoped overrides and not one that belonged to the account. Nothing filtered them, and the restore then overwrote each override's `scope` with the type of the node being restored, so all 17 would have been created at the account and then created again at every site and group beneath it — 47 create calls for 17 overrides. Each override is now restored only on the node that owns it, keeping its own scope.
+- **Source-console IDs travelled with the override** — a config override echoes its `account`, `site` and `group` back as nested `{id, name}` objects. The field filter strips the flat `accountId` / `siteId` / `groupId` forms but never these, so the destination was being handed the source tenant's identifiers. They are removed before the create.
+- **A selected element with nothing to restore vanished from the report** — the restore skipped it with no row, no log line and no error, which is indistinguishable from success. That is how the missing tags went unnoticed in 2.2.0, and it happened again: a backup that had never captured auto-upgrade policies, log-collection rules, webhooks or scheduled reports produced a clean report while the destination was missing all four, so it read as a failed migration rather than an incomplete backup. Every selected element now records a result, and the report distinguishes **`0`** (the backup held the data, nothing needed restoring) from **`0 (not in backup)`** (the backup never captured it). Applied to the blocklist, network-quarantine rules, STAR rules, saved filters, config overrides, log-collection rules, auto-upgrade policies, locations, webhooks and scheduled reports.
+- **An override belonging to a scope outside the migration is now reported** — on the tenant above, one site-scoped override pointed at a site that wasn't part of the backup at all, so it had no destination node. Previously it was quietly misfiled at the parent scope; the run now states how many overrides were skipped and that they belong elsewhere, at both backup and restore time.
+
+### Changed
+- Backup stores only the overrides a scope actually owns, so the same override is no longer captured at every level above it. Backups taken before this release are corrected during restore — there is no need to re-capture.
+- New guard test (`test_restore_coverage.py`) fails CI if an element that can be empty is restored without reporting a row, so the silent no-op cannot come back.
+
 ## v2.2.6 — 2026-08-23
 
 ### Bug Fixes

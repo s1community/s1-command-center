@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 # Single source of truth for the app version (footer, reports, etc.).
-APP_VERSION = "2.2.6"
+APP_VERSION = "2.2.7"
 
 CONFIG_DIR    = os.path.join(os.path.expanduser("~"), ".s1-command-center")
 CONFIG_FILE   = os.path.join(CONFIG_DIR, "contexts.json")
