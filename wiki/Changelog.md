@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.2.8 — 2026-09-02
+
+### Bug Fixes
+- **Four elements were never captured, and the backup reported no failure** — the Beijer Ref backup (2026-08-31, taken on 2.2.6 with all 33 elements selected) contained no `autoUpgradePolicies`, `logCollectionRules`, `webhooks` or `scheduledReports` on any of its 252 nodes. All four were requested against paths that do not exist in the v2.1 API, every call returned 404, and `_fetch` recorded a 404 as *"n/a"* — the same swallow that hid `/endpoint-tags` in 2.2.6. Nothing was wrong with the operator's element selection; the requests were simply addressed to nowhere.
+  - Auto-upgrade policies: `/agents-policy/auto-upgrade-policies` → **`/upgrade-policy/policies`**
+  - Log collection rules: `/log-collection-rules` → **`/log-collection/rules`**
+  - Scheduled reports: `/reports/scheduled` → **`/report-tasks`** (`/reports` is the generated-report list; deletion is `POST /reports/delete-tasks`, there is no DELETE verb)
+- **A 404 is no longer treated as "not applicable"** — a `403` means the console declined and is still *n/a*; a `404` means this tool asked for a path that isn't there, which is a defect in the tool and is now surfaced as an error with a note to report it. Folding the two together is precisely what allowed four elements to vanish for a whole migration without a single warning.
+- **Auto-upgrade policies do not follow the API's normal shape** — the resource is scoped by `scopeLevel` + `scopeId` instead of the usual `accountIds`/`siteIds` filter, paginates on `skip`/`limit` instead of a cursor, and makes `osType`, `sortBy` and `sortOrder` mandatory. `get_all()` satisfied none of that, so even the corrected path would have returned 400. The client now issues one correctly-formed query per OS family (windows, linux, macOS) and merges the results, tagging each policy with the OS it came from.
+- **Creating an auto-upgrade policy is `POST /upgrade-policy/policy`, singular** — the plural `POST /upgrade-policy/policies` **deactivates every policy in the scope**. A guard test pins the singular path so a future edit can't turn a migration into a mass deactivation of the customer's auto-upgrade.
+- **Webhooks cannot be migrated by any API** — the entire `settings` resource is active-directory, microsoft, notifications, recipients, sms, smtp, sso and syslog; no tag in the 781-operation v2.1 spec exposes webhooks. `/notification-webhooks` was invented. The tool no longer pretends: backup reports `no API`, restore reports `manual`, and the migration-scope deck moves webhooks to the "re-create manually" slide instead of promising them.
+
+### Changed
+- Auto-upgrade policies are now captured at **group** scope as well as account and site — the API supports all four levels, and restricting the query to account/site would have silently dropped any group-level policy.
+- New guard tests: the four dead paths cannot reappear as string literals, the required `/upgrade-policy/policies` query parameters must all be present, `create_auto_upgrade_policy` must use the singular path, and CI fails if `403` and `404` are ever handled identically again.
+
 ## v2.2.7 — 2026-09-01
 
 ### Bug Fixes

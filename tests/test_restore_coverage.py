@@ -19,7 +19,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import s1_api
-from pages import BACKUP_ELEMENTS, RestorePage
+from pages import BACKUP_ELEMENTS, BackupPage, RestorePage
 
 
 # Restored, but driven by the backed-up `settings` payload rather than an
@@ -41,6 +41,10 @@ _NOT_RESTORED = {
     "service_users",
     # Proxy/gateway infrastructure is environment-specific.
     "gateways",
+    # There is no webhook endpoint anywhere in the v2.1 API, so webhooks can
+    # be neither captured nor created. The tool used to call an invented
+    # /notification-webhooks route, take the 404 as "n/a" and report nothing.
+    "webhooks",
 }
 
 
@@ -112,7 +116,6 @@ _MUST_REPORT_WHEN_EMPTY = {
     "log_collection_rules",
     "auto_upgrade_policies",
     "locations",
-    "webhooks",
     "scheduled_reports",
 }
 
@@ -136,6 +139,67 @@ def test_empty_row_says_whether_the_backup_held_the_data():
     # "0" (restored nothing) and "0 (not in backup)" (never captured) are
     # different problems and must be distinguishable in the report.
     assert "not in backup" in _restore_source()
+
+
+def test_api_paths_that_do_not_exist_are_not_used():
+    """Four routes were invented and every one 404'd, so `autoUpgradePolicies`,
+    `logCollectionRules`, `webhooks` and `scheduledReports` were absent from
+    every node of the Beijer Ref backup while the report showed no failure.
+    Same class as the /endpoint-tags bug in 2.2.6. Pin the real paths."""
+    src = inspect.getsource(s1_api)
+    for bogus in ("/agents-policy/auto-upgrade-policies",
+                  "/log-collection-rules",
+                  "/reports/scheduled",
+                  "/notification-webhooks"):
+        # Quoted only — these paths are named in comments on purpose, to
+        # stop someone "restoring" them.
+        assert f'"{bogus}"' not in src and f"'{bogus}'" not in src, (
+            f"{bogus} is not a real S1 v2.1 route — it 404s and the backup "
+            f"silently captures nothing")
+
+
+def test_real_api_paths_are_used():
+    listing = inspect.getsource(s1_api.S1API.get_log_collection_rules)
+    assert "/log-collection/rules" in listing
+    sched = inspect.getsource(s1_api.S1API.get_scheduled_reports)
+    assert "/report-tasks" in sched
+    aup = inspect.getsource(s1_api.S1API.get_auto_upgrade_policies)
+    assert "/upgrade-policy/policies" in aup
+
+
+def test_auto_upgrade_create_uses_the_singular_path():
+    # POST /upgrade-policy/policies (plural) DEACTIVATES every policy in the
+    # scope. Creating is the singular /policy. Getting this wrong would
+    # disable the customer's auto-upgrade during a migration.
+    create = inspect.getsource(s1_api.S1API.create_auto_upgrade_policy)
+    assert '"/upgrade-policy/policy"' in create
+    assert '"/upgrade-policy/policies"' not in create
+
+
+def test_auto_upgrade_queries_every_os_family():
+    # osType is a REQUIRED query param, so a single call can only ever see
+    # one OS family's policies.
+    assert set(s1_api.S1API.UPGRADE_OS_TYPES) == {"windows", "linux", "macos"}
+    src = inspect.getsource(s1_api.S1API.get_auto_upgrade_policies)
+    for required in ("scopeLevel", "osType", "sortBy", "sortOrder", "skip"):
+        assert required in src, (
+            f"{required} is a required parameter of GET /upgrade-policy/"
+            f"policies; omitting it returns 400")
+
+
+def test_webhooks_are_declared_unsupported():
+    assert hasattr(s1_api.S1API, "WEBHOOKS_UNSUPPORTED")
+    assert not hasattr(s1_api.S1API, "get_webhooks")
+    assert not hasattr(s1_api.S1API, "create_webhook")
+
+
+def test_missing_route_is_not_reported_as_not_applicable():
+    # A 403 is the console declining; a 404 is our own bad path. Reporting
+    # both as "n/a" is what hid all four missing elements.
+    src = inspect.getsource(BackupPage._read_node)
+    assert 'sc == 403' in src
+    assert 'sc == 404' in src
+    assert 'sc in (403, 404)' not in src
 
 
 def test_config_override_restore_filters_other_scopes():

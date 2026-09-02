@@ -407,17 +407,16 @@ class S1API:
         return self._delete("/locations", body={"filter": {"ids": ids}})
 
     # ── webhooks (notification channels) ───────────────────────────────
-    # S1 exposes a single notification-webhooks endpoint per tenant scope.
+    # There is NO webhook resource in the v2.1 management API. The whole
+    # `settings` tag is active-directory, microsoft, notifications,
+    # recipients, sms, smtp, sso and syslog — no webhooks — and no other
+    # tag exposes them either. `/notification-webhooks` was invented: it
+    # 404s, and the backup recorded that as "n/a", so it read as captured.
+    # Webhooks have to be recreated by hand on the destination.
 
-    def get_webhooks(self, scope: dict) -> list[dict]:
-        return self.get_all("/notification-webhooks", params=scope)
-
-    def create_webhook(self, scope: dict, data: dict) -> dict:
-        return self._post("/notification-webhooks", body={
-            "filter": scope, "data": data})
-
-    def delete_webhook(self, webhook_id: str) -> dict:
-        return self._delete(f"/notification-webhooks/{webhook_id}")
+    WEBHOOKS_UNSUPPORTED = (
+        "SentinelOne's v2.1 API exposes no webhook endpoint — webhooks must "
+        "be recreated manually on the destination console")
 
     # ── Singularity Marketplace (installed integrations inventory) ─────
     # NOTE: Marketplace applications cannot be re-installed via API — each
@@ -431,15 +430,21 @@ class S1API:
 
     # ── Scheduled reports ──────────────────────────────────────────────
 
+    # Scheduled reports are /report-tasks. `/reports` is the generated
+    # report list, and `/reports/scheduled` does not exist at all.
+
     def get_scheduled_reports(self, scope: dict) -> list[dict]:
-        return self.get_all("/reports/scheduled", params=scope)
+        return self.get_all("/report-tasks", params=scope)
 
     def create_scheduled_report(self, scope: dict, data: dict) -> dict:
-        return self._post("/reports/scheduled", body={
+        return self._post("/report-tasks", body={
             "filter": scope, "data": data})
 
     def delete_scheduled_report(self, report_id: str) -> dict:
-        return self._delete(f"/reports/scheduled/{report_id}")
+        # This resource has no DELETE verb — removal is a POST with the ids
+        # in a filter envelope.
+        return self._post("/reports/delete-tasks",
+                          body={"filter": {"ids": [report_id]}})
 
     # ── notification / integration settings ────────────────────────────
 
@@ -554,18 +559,51 @@ class S1API:
     # ── log collection rules ───────────────────────────────────────────
 
     def get_log_collection_rules(self, scope: dict) -> list[dict]:
-        return self.get_all("/log-collection-rules", params=scope)
+        # /log-collection/rules — NOT /log-collection-rules, which 404s.
+        # includeParents / includeChildren both default to false, which is
+        # what we want: each scope backs up only the rules it owns.
+        return self.get_all("/log-collection/rules", params=scope)
 
     def create_log_collection_rule(self, data: dict) -> dict:
-        return self._post("/log-collection-rules", body={"data": data})
+        return self._post("/log-collection/rules", body={"data": data})
 
     # ── upgrade / auto-upgrade policies ────────────────────────────────
 
-    def get_auto_upgrade_policies(self, scope: dict) -> list[dict]:
-        return self.get_all("/agents-policy/auto-upgrade-policies", params=scope)
+    # This resource does not behave like the rest of the API. The path is
+    # /upgrade-policy/policies (not /agents-policy/...), scope is given as
+    # scopeLevel + scopeId query params rather than the usual
+    # accountIds/siteIds filter, paging is skip/limit rather than a cursor,
+    # and osType is REQUIRED — so every OS family has to be queried
+    # separately to see all the policies. get_all() fits none of that.
+    UPGRADE_OS_TYPES = ("windows", "linux", "macos")
+    _UPGRADE_PAGE = 100
+
+    def get_auto_upgrade_policies(self, scope_level: str,
+                                  scope_id: str = "") -> list[dict]:
+        level = "tenant" if scope_level == "global" else scope_level
+        out: list[dict] = []
+        for os_type in self.UPGRADE_OS_TYPES:
+            skip = 0
+            while True:
+                q = {"scopeLevel": level, "osType": os_type,
+                     "limit": self._UPGRADE_PAGE, "skip": skip,
+                     "sortBy": "priority", "sortOrder": "asc"}
+                if scope_id:
+                    q["scopeId"] = str(scope_id)
+                page = self._get("/upgrade-policy/policies", q).get("data") or []
+                for pol in page:
+                    pol.setdefault("osType", os_type)
+                out.extend(page)
+                if len(page) < self._UPGRADE_PAGE:
+                    break
+                skip += self._UPGRADE_PAGE
+        return out
 
     def create_auto_upgrade_policy(self, data: dict) -> dict:
-        return self._post("/agents-policy/auto-upgrade-policies", body={"data": data})
+        # POST /upgrade-policy/policy (SINGULAR) adds a policy.
+        # POST /upgrade-policy/policies (PLURAL) deactivates every policy in
+        # the scope. Never point this at the plural path.
+        return self._post("/upgrade-policy/policy", body={"data": data})
 
     # ── endpoint tags (unified / "Tag Manager") ────────────────────────
     # These are key/value endpoint tags, NOT the named /tags objects used by

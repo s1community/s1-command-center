@@ -106,7 +106,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.2.7 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.2.8 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -356,6 +356,17 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+### v2.2.8 — 2026-09-02
+#### Bug Fixes
+- **Four elements were never backed up, and nothing said so** — auto-upgrade policies, log collection rules, webhooks and scheduled reports were requested against API paths that don't exist. Each call 404'd, the backup recorded that as *"n/a"*, and the elements were simply absent from the file. Selecting all 33 elements made no difference; there was nothing wrong with the operator's choices. Real paths are now used: `/upgrade-policy/policies`, `/log-collection/rules` and `/report-tasks`.
+- **A missing route no longer hides behind "n/a"** — a `403` is the console declining and is still reported as *n/a*, but a `404` means the tool asked for a path that doesn't exist. That's a defect in the tool and is now reported as an error, loudly. Collapsing the two is what let four elements go missing for an entire migration.
+- **Auto-upgrade policies needed a different kind of request entirely** — this resource is scoped by `scopeLevel`/`scopeId` rather than the usual filter, pages with `skip`/`limit` rather than a cursor, and requires `osType`, so a single call can only ever see one OS family. All three are now queried, at every scope level including groups.
+- **Webhooks can't be migrated at all** — there is no webhook endpoint anywhere in the v2.1 API. Rather than calling an invented route and reporting the failure as *n/a*, the tool now states plainly that webhooks must be recreated by hand, and the migration-scope deck lists them as manual.
+
+#### Changed
+- Auto-upgrade policies are captured at group scope as well as account and site.
+- Guard tests pin all four routes, assert `POST /upgrade-policy/policy` is never confused with `POST /upgrade-policy/policies` (which deactivates every policy in the scope), and fail CI if a `404` is ever folded back into *n/a*.
 
 ### v2.2.7 — 2026-09-01
 #### Bug Fixes

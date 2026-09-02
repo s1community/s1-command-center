@@ -2936,8 +2936,18 @@ class BackupPage(ctk.CTkFrame):
                 return result
             except Exception as e:
                 sc = getattr(e, "status_code", 0)
-                if sc in (403, 404):
+                if sc == 403:
+                    # Genuinely unavailable to this token — not our problem.
                     results.append((label, "n/a"))
+                elif sc == 404:
+                    # The route does not exist. That is a defect in THIS
+                    # tool, not a property of the console, and lumping it in
+                    # with 403 as "n/a" is what hid four missing elements for
+                    # a whole migration (Beijer Ref, 2026-08). Make it loud.
+                    results.append((label, "ERR 404"))
+                    cli_log(f"Backup of {label} failed: endpoint not found "
+                            f"({e}). This is a bug in the migration tool — "
+                            f"please report it.", "error")
                 else:
                     results.append((label, f"ERR"))
                     cli_log(f"Backup of {label} failed: {e}", "error")
@@ -3082,17 +3092,23 @@ class BackupPage(ctk.CTkFrame):
                    api.get_log_collection_rules, scope)
 
         # ── Auto-upgrade policies ──
-        if "auto_upgrade_policies" in elements and scope_type in ("account", "site"):
+        # Scoped by scopeLevel/scopeId, not the usual filter dict, and valid
+        # at every level including group — so don't restrict it to
+        # account/site or group-level policies go missing.
+        if "auto_upgrade_policies" in elements:
             _fetch("autoUpgradePolicies", "upgrade-pol",
-                   api.get_auto_upgrade_policies, scope)
+                   api.get_auto_upgrade_policies, scope_type, scope_id)
 
         # ── Locations (firewall location-awareness) ──
         if "locations" in elements:
             _fetch("locations", "locations", api.get_locations, scope)
 
         # ── Webhooks ──
+        # There is no webhook endpoint in the v2.1 API (see
+        # S1API.WEBHOOKS_UNSUPPORTED). Say so instead of calling a route
+        # that 404s and reporting the failure as "n/a".
         if "webhooks" in elements and scope_type in ("account", "site", "global"):
-            _fetch("webhooks", "webhooks", api.get_webhooks, scope)
+            results.append(("webhooks", "no API"))
 
         # ── Scheduled reports ──
         if "scheduled_reports" in elements and scope_type in ("account", "site", "global"):
@@ -6517,12 +6533,10 @@ class RestorePage(ctk.CTkFrame):
                 _nothing("locations", "locations" in data)
 
             # ── Webhooks ──
-            hooks = data.get("webhooks") or []
-            if "webhooks" in elements and hooks:
-                _r_bulk("webhooks", hooks,
-                        lambda w: api.create_webhook(scope, _clean_for_restore(w)))
-            elif "webhooks" in elements:
-                _nothing("webhooks", "webhooks" in data)
+            # Not migratable — the v2.1 API exposes no webhook endpoint, so
+            # these have to be recreated by hand on the destination.
+            if "webhooks" in elements:
+                results.append(("webhooks", "manual"))
 
             # ── Scheduled reports ──
             sched = data.get("scheduledReports") or []
