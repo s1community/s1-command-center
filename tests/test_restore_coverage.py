@@ -36,9 +36,6 @@ _DATA_DRIVEN = {
 # Captured for reporting/audit only — intentionally never written to the
 # destination.
 _NOT_RESTORED = {
-    # API tokens can't be migrated; a service user must be re-created (and a
-    # new token issued) on the destination by hand.
-    "service_users",
     # Proxy/gateway infrastructure is environment-specific.
     "gateways",
     # There is no webhook endpoint anywhere in the v2.1 API, so webhooks can
@@ -117,6 +114,7 @@ _MUST_REPORT_WHEN_EMPTY = {
     "auto_upgrade_policies",
     "locations",
     "scheduled_reports",
+    "service_users",
 }
 
 

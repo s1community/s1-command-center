@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2.9 — 2026-09-04
+
+### Bug Fixes
+- **Group ranking came out scrambled while every write reported success** — reported on the Landeshauptstadt München migration (2026-09-02). Two faults stacked on top of each other:
+  - **Ranks were applied one group at a time, in backup order.** SentinelOne renumbers a site's *other* groups on every rank write, so each of the 116 `PUT /groups/{id}` calls returned 200 and each one shifted the groups placed before it. The end state bore no relation to the source order. `rank` is no longer part of the per-group drift sync.
+  - **The bulk reorder was sent a partial list and the failure was swallowed.** `PUT /groups/ranks` received only the groups matched by name, and an incomplete set of a site's dynamic groups makes the endpoint answer 500 — which went to the operation log and never to the restore report, so four failed sites read as a clean run.
+  Ranking is now a single pass per site, after every group exists: it takes the site's **complete** set of destination dynamic groups (the endpoint is documented as dynamic-only — a static, pinned or Default group in the list is what breaks it), orders them by the source rank, applies the order, then **re-reads the console to verify it landed**. If the bulk call is rejected it falls back to per-group writes in ascending rank order, which converges instead of shuffling. The outcome is now a `group-ranks` row on the site's report, and a site that still doesn't match is marked as an error naming the groups.
+- **Service users were never restored** — the element was on a "capture for reporting only" list, so ticking `service_users` created nothing, reported nothing, and left no row in the report. The API *token* genuinely cannot be migrated (SentinelOne reveals a token exactly once, at creation, so it is never in the backup) but the service user itself is creatable. Each one is now re-created with its name, description and scope, with `scopeRoles` rebuilt from **names** — the source's site and role IDs are meaningless on the destination. A scope that doesn't resolve is reported by name and the user is created at account scope rather than being sent a stale ID, and the run tells the operator to issue a fresh token for each user and update whatever integration used the old one.
+- **Notification recipients failed on every scope of two consecutive migrations** — 43 of 43 beijerrefab scopes and the Landeshauptstadt München account, all with *"Bad Request :: Field data in request body must be valid class com.sentinelone.notification.preferences.rest.dto.NotificationRecipientDto"*: the console wants `data` to be **one** recipient, not a list. A per-recipient fallback already existed and would have worked, but it was gated on the error text containing "unknown field", which this message does not. Any `400` from the bulk PUT now reaches the fallbacks, so the recipients that can be migrated get through and the ones that can't surface their own reason. A non-400 (e.g. a `403`) is still raised untouched rather than retried.
+
+### Changed
+- Group ranking resolves each account's sites once instead of re-listing every account, site and group for every group node.
+- The migration-scope deck moves service users to the "can be migrated" side, with the token caveat spelled out on the caveats slide.
+- New guard tests: `/groups/ranks` is never sent a non-dynamic group, ranks are applied best-first and verified against the console, a failed ranking reaches the report, the per-group drift sync cannot start writing `rank` again, service-user payloads carry no source-side IDs or token metadata, and the recipients fallback is pinned against the exact error both consoles returned.
+
 ## v2.2.8 — 2026-09-02
 
 ### Bug Fixes

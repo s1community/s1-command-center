@@ -444,3 +444,116 @@ def test_throttle_callback_errors_are_swallowed():
     ])
     api.on_throttle = lambda info: 1 / 0  # must not break the request
     assert api._request("GET", "/x") == {"data": "ok"}
+
+
+# ── notification recipients ──────────────────────────────────────────────
+# The bulk PUT was rejected on all 43 beijerrefab scopes with "Field data in
+# request body must be valid class …NotificationRecipientDto" — `data` has to
+# be one recipient, not a list. The per-recipient fallback would have handled
+# it, but it was gated on the phrase "unknown field" and never ran.
+
+_DTO_400 = {"errors": [{"detail": "Field data in request body must be valid "
+                                  "class com.sentinelone.notification."
+                                  "preferences.rest.dto."
+                                  "NotificationRecipientDto"}]}
+
+
+def _recips():
+    return [{"email": "a@x.com"}, {"email": "b@x.com"}]
+
+
+def test_recipients_bulk_put_is_tried_first():
+    api = _client([FakeResp(200, {"data": {"success": True}})])
+    api.set_notification_recipients({"accountIds": ["1"]}, _recips())
+    assert len(api.session.calls) == 1
+    assert api.session.calls[0][3]["data"] == _recips()
+
+
+def test_dto_rejection_falls_through_to_the_per_recipient_posts():
+    api = _client([
+        FakeResp(400, _DTO_400),                    # bulk list
+        FakeResp(400, _DTO_400),                    # {"recipients": [...]}
+        FakeResp(200, {"data": {"id": "1"}}),       # per-recipient
+        FakeResp(200, {"data": {"id": "2"}}),
+    ])
+    out = api.set_notification_recipients({"accountIds": ["1"]}, _recips())
+    assert out == {"data": {"affected": 2}}
+    posts = [c for c in api.session.calls if c[0] == "POST"]
+    assert [p[3]["data"] for p in posts] == _recips()
+
+
+def test_a_partial_recipient_failure_still_migrates_the_rest():
+    api = _client([
+        FakeResp(400, _DTO_400),
+        FakeResp(400, _DTO_400),
+        FakeResp(200, {"data": {"id": "1"}}),
+        FakeResp(400, {"errors": [{"detail": "email: Not a valid email"}]}),
+    ])
+    out = api.set_notification_recipients({"accountIds": ["1"]}, _recips())
+    assert out == {"data": {"affected": 1}}
+
+
+def test_a_total_recipient_failure_surfaces_the_consoles_reason():
+    api = _client([
+        FakeResp(400, _DTO_400),
+        FakeResp(400, _DTO_400),
+        FakeResp(400, {"errors": [{"detail": "email: Not a valid email"}]}),
+        FakeResp(400, {"errors": [{"detail": "email: Not a valid email"}]}),
+    ])
+    with pytest.raises(S1APIError) as ei:
+        api.set_notification_recipients({"accountIds": ["1"]}, _recips())
+    assert "Not a valid email" in ei.value.detail
+
+
+def test_a_non_400_recipient_error_is_not_retried():
+    # 403 is the console declining, not a body-shape disagreement.
+    api = _client([FakeResp(403, {"errors": [{"detail": "Insufficient"}]})])
+    with pytest.raises(S1APIError) as ei:
+        api.set_notification_recipients({"accountIds": ["1"]}, _recips())
+    assert ei.value.status_code == 403
+    assert len(api.session.calls) == 1
+
+
+def test_no_recipients_makes_no_request():
+    api = _client([])
+    assert api.set_notification_recipients({"accountIds": ["1"]}, []) == {}
+
+
+# ── group ranks ──────────────────────────────────────────────────────────
+# PUT /groups/ranks answered 500 for every site of the Landeshauptstadt
+# München migration, so the source's dynamic-group order never landed.
+
+def test_reorder_groups_puts_the_ordered_ids_in_one_call():
+    api = _client([FakeResp(200, {"data": {"success": True}})])
+    api.reorder_groups("site-1", ["7", 8, "9"])
+    method, url, _params, body = api.session.calls[0]
+    assert method == "PUT"
+    assert url.endswith("/groups/ranks")
+    assert body == {"filter": {"siteIds": ["site-1"]},
+                    "data": {"groupIds": ["7", "8", "9"]}}
+    assert len(api.session.calls) == 1
+
+
+def test_reorder_groups_retries_with_the_sibling_endpoints_body_shape():
+    # `groups_PutRanksSchema` is not published and the sibling reorder
+    # routes (/firewall-control/reorder, /device-control/reorder) take
+    # `data: {ids: [...]}`. A rejected PUT changes nothing, so try both.
+    api = _client([
+        FakeResp(400, {"errors": [{"detail": "groupIds: Unknown field"}]}),
+        FakeResp(200, {"data": {"success": True}}),
+    ])
+    api.reorder_groups("site-1", ["7", "8"])
+    assert len(api.session.calls) == 2
+    assert api.session.calls[0][3]["data"] == {"groupIds": ["7", "8"]}
+    assert api.session.calls[1][3]["data"] == {"ids": ["7", "8"]}
+
+
+def test_reorder_groups_surfaces_the_last_error_when_no_shape_works():
+    api = _client([
+        FakeResp(400, {"errors": [{"detail": "groupIds: Unknown field"}]}),
+        FakeResp(400, {"errors": [{"detail": "ids: Unknown field"}]}),
+    ])
+    with pytest.raises(S1APIError) as ei:
+        api.reorder_groups("site-1", ["7", "8"])
+    assert ei.value.status_code == 400
+    assert "ids: Unknown field" in ei.value.detail

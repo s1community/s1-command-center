@@ -469,8 +469,15 @@ class S1API:
             return self._put("/settings/recipients", body={
                 "filter": scope, "data": data})
         except S1APIError as e:
-            msg = (str(getattr(e, "detail", "")) or str(e)).lower()
-            if e.status_code != 400 or "unknown field" not in msg:
+            # ANY 400 here is the tenant disagreeing about the body shape, so
+            # every one of them has to reach the fallbacks below. Matching on
+            # the phrase "unknown field" was too narrow: the beijerrefab and
+            # Landeshauptstadt München consoles both answer "Field data in
+            # request body must be valid class …NotificationRecipientDto"
+            # (i.e. `data` must be ONE recipient, not a list), which never
+            # matched, so the per-recipient path that would have worked was
+            # never tried and recipients failed on all 43 scopes.
+            if e.status_code != 400:
                 raise
             # Schema-shape fallback: try the singular field name.
             try:
@@ -830,9 +837,30 @@ class S1API:
         return {}
 
     def reorder_groups(self, site_id: str, group_ids: list[str]) -> dict:
-        return self._put("/groups/ranks", body={
-            "filter": {"siteIds": [site_id]},
-            "data": {"groupIds": group_ids}})
+        """PUT /groups/ranks — set the evaluation order of a site's groups.
+
+        `group_ids` must be ordered best-rank-first (index 0 becomes rank 1)
+        and must contain DYNAMIC groups only: the endpoint is documented as
+        "make sure the IDs of the groups in this command are for Dynamic
+        groups", and feeding it a static/pinned/Default group makes it fail.
+
+        The body schema (`groups_PutRanksSchema`) is not published and the
+        documented responses are 204/400/401/403 — a 500 means the payload
+        upset the server rather than the validator. The sibling reorder
+        endpoints in this API take `data: {ids: [...]}`, so try that shape
+        too before giving up. A rejected PUT changes no state, so retrying
+        with a second shape is safe.
+        """
+        ids = [str(g) for g in group_ids]
+        last_exc: Optional[S1APIError] = None
+        for key in ("groupIds", "ids"):
+            try:
+                return self._put("/groups/ranks", body={
+                    "filter": {"siteIds": [site_id]},
+                    "data": {key: ids}})
+            except S1APIError as e:
+                last_exc = e
+        raise last_exc  # type: ignore[misc]
 
     # ── agent migration ────────────────────────────────────────────────
 

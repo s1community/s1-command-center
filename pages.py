@@ -688,6 +688,77 @@ def _build_role_payload(role_def: dict, template=None) -> dict:
     return data
 
 
+def _build_service_user_payload(src: dict, dest_account_id: str,
+                                dest_sites: dict, dest_roles: dict) -> dict:
+    """Build the create `data` for POST /service-users.
+
+    A service user's API *token* can never be migrated — S1 reveals a token
+    exactly once, at creation, so the backup only ever holds its metadata
+    (`apiToken.expiresAt`, never the secret). The user itself is creatable,
+    which is what this payload does; the operator issues a fresh token on the
+    destination afterwards.
+
+    Every ID in the source payload is meaningless on the destination, so the
+    scope assignments are rebuilt from NAMES: each `scopeRoles` entry's site
+    name resolves against `dest_sites` and its role name against
+    `dest_roles`. Entries that resolve to nothing are dropped rather than
+    sent with a stale ID (S1 answers those with an opaque 400); if that
+    leaves no scope at all the user is bound to the destination account so
+    the operator gets a re-scopable object instead of nothing.
+    """
+    src = src or {}
+    data: dict = {"name": (src.get("name") or "").strip()}
+    desc = src.get("description")
+    if desc is not None:
+        data["description"] = desc
+
+    scope_roles = []
+    for entry in (src.get("scopeRoles") or []):
+        if not isinstance(entry, dict):
+            continue
+        role_id = dest_roles.get(
+            (entry.get("roleName") or "").strip().lower())
+        scope_id = dest_sites.get((entry.get("name") or "").strip().lower())
+        if not scope_id and (entry.get("accountName") or "").strip().lower() \
+                == (entry.get("name") or "").strip().lower():
+            scope_id = dest_account_id
+        if not scope_id or not role_id:
+            continue
+        scope_roles.append({"id": str(scope_id), "roleId": str(role_id)})
+
+    if scope_roles:
+        data["scope"] = src.get("scope") or "site"
+        data["scopeRoles"] = scope_roles
+    elif dest_account_id:
+        data["scope"] = "account"
+        data["scopeRoles"] = [{"id": str(dest_account_id)}]
+
+    expires = (src.get("apiToken") or {}).get("expiresAt") \
+        or src.get("expiresAt")
+    if expires:
+        data["expiresAt"] = expires
+    else:
+        data["unlimitedExpiry"] = True
+    return data
+
+
+def _unresolved_service_user_scopes(src: dict, dest_sites: dict,
+                                    dest_roles: dict) -> list:
+    """Names of the source scope assignments that don't exist on the
+    destination, so the operator can be told exactly what to re-grant."""
+    missing = []
+    for entry in (src.get("scopeRoles") or []):
+        if not isinstance(entry, dict):
+            continue
+        scope_name = (entry.get("name") or "").strip()
+        role_name = (entry.get("roleName") or "").strip()
+        if dest_sites.get(scope_name.lower()) \
+                and dest_roles.get(role_name.lower()):
+            continue
+        missing.append(f"{scope_name or '?'}/{role_name or '?'}")
+    return missing
+
+
 def _drop_forensics_triggering(policy: dict) -> dict:
     """Return a copy of a policy without its `forensicsAutoTriggering` block.
 
@@ -6621,6 +6692,81 @@ class RestorePage(ctk.CTkFrame):
                                 _build_role_payload(r, role_template),
                                 scope_filter))
 
+            # ── Service users (API users) ──
+            # These used to be captured for audit only, so a migration that
+            # ticked `service_users` reported nothing and created nothing
+            # (Landeshauptstadt München, 2026-09). The API token itself is
+            # genuinely un-migratable — S1 shows a token once, at creation —
+            # but the service user IS creatable, so re-create it with the
+            # source's name/description/scope and tell the operator to issue
+            # a fresh token on the destination.
+            svc_users = data.get("serviceUsers") or []
+            if "service_users" in elements and svc_users and ntype == "account":
+                su_acct = dest_id or ""
+                try:
+                    existing_svc = {
+                        (s.get("name") or "").strip().lower()
+                        for s in (api.get_service_users(
+                            params={"accountIds": su_acct}) or [])}
+                except Exception:
+                    existing_svc = set()
+                # Destination sites and roles by NAME — source IDs never
+                # match across consoles, names do.
+                try:
+                    dest_sites = {
+                        (s.get("name") or "").strip().lower(): s.get("id")
+                        for s in (api.get_sites(
+                            params={"accountIds": su_acct}) or [])}
+                except Exception:
+                    dest_sites = {}
+                try:
+                    dest_su_roles = {
+                        (r.get("name") or "").strip().lower(): r.get("id")
+                        for r in ((api.get_roles() or [])
+                                  + (api.get_roles(
+                                      params={"accountIds": su_acct}) or []))}
+                except Exception:
+                    dest_su_roles = {}
+
+                creatable_svc = []
+                already = 0
+                for s in svc_users:
+                    if not isinstance(s, dict):
+                        continue
+                    nm = (s.get("name") or "").strip()
+                    if not nm:
+                        continue
+                    if nm.lower() in existing_svc:
+                        already += 1
+                        continue
+                    creatable_svc.append(s)
+
+                if creatable_svc:
+                    self._operation_log.append(
+                        f"  🔑 Creating {len(creatable_svc)} service user(s). "
+                        f"API tokens are NOT migrated — SentinelOne reveals a "
+                        f"token only once, at creation. Issue a new token for "
+                        f"each in the destination console → Settings → Users "
+                        f"→ Service Users, and update whatever integration "
+                        f"used the old one.")
+                    for s in creatable_svc:
+                        gaps = _unresolved_service_user_scopes(
+                            s, dest_sites, dest_su_roles)
+                        if gaps:
+                            self._operation_log.append(
+                                f"    ⚠ '{s.get('name')}': scope(s) "
+                                f"{', '.join(gaps)} don't exist on the "
+                                f"destination — creating the user at account "
+                                f"scope; re-grant its access manually")
+                    _r_bulk("svc-users", creatable_svc,
+                            lambda s: api.create_service_user(
+                                _build_service_user_payload(
+                                    s, su_acct, dest_sites, dest_su_roles)))
+                elif already:
+                    results.append(("svc-users", f"{already} exist"))
+            elif "service_users" in elements and ntype == "account":
+                _nothing("svc-users", "serviceUsers" in data)
+
             # ── Console (human) users ──
             # Only locally-created users can be provisioned via API. SSO/SCIM
             # users auto-provision on first login, so re-creating them here is
@@ -6746,58 +6892,199 @@ class RestorePage(ctk.CTkFrame):
                 node_report["status"] = "error"
             self._report_nodes.append(node_report)
 
-        # ── Reorder groups by rank per site ──
-        # collect groups: {site_id: [(rank, dest_group_id), ...]}
-        site_groups = {}
-        for node in backup:
-            if node.get("type") != "group":
-                continue
-            grp = node.get("group", {})
-            rank = grp.get("rank")
-            if rank is None:
-                continue
-            npath = node.get("path", "").rstrip("/")
-            parts = npath.split("/")
-            if len(parts) < 2:
-                continue
-            acct_name = parts[0]
-            site_name = parts[1]
-            # find dest site ID
-            try:
-                accts = api.get_accounts()
-                acct_match = [a for a in accts if a.get("name") == acct_name]
-                if not acct_match:
-                    continue
-                all_sites = api.get_sites(params={"accountIds": acct_match[0]["id"]})
-                site_match = [s for s in all_sites if s.get("name") == site_name]
-                if not site_match:
-                    continue
-                site_id = site_match[0]["id"]
-                # find dest group ID
-                all_groups = api.get_groups(params={"siteIds": site_id})
-                grp_match = [g for g in all_groups
-                             if g.get("name") == grp.get("name")]
-                if grp_match:
-                    site_groups.setdefault(site_id, []).append(
-                        (rank, grp_match[0]["id"]))
-            except Exception:
-                pass
-        # reorder each site's groups
-        for site_id, ranked in site_groups.items():
-            ranked.sort(key=lambda x: x[0])
-            ids = [gid for _, gid in ranked]
-            if len(ids) > 1:
-                try:
-                    api.reorder_groups(site_id, ids)
-                    self._operation_log.append(
-                        f"  ✓ Reordered {len(ids)} groups in site {site_id}")
-                except Exception as e:
-                    self._operation_log.append(
-                        f"  ⚠ Group reorder failed: {e}")
+        # ── Group ranking (must run after every group exists) ──
+        self._rerank_groups(api, backup)
 
         self._operation_log.append(
             f"Total: {restored} restored, {skipped} skipped (of {total})")
         return restored
+
+    def _record_site_element(self, site_path, label, value):
+        """Fold a post-pass result into the site's already-emitted report row.
+
+        The group-ranking pass can only run once every group exists, i.e.
+        after each node has been reported. Without this the outcome lived in
+        the operation log only and never reached the restore report — which
+        is precisely how a 500 on /groups/ranks looked like a clean run
+        (Landeshauptstadt München, 2026-09)."""
+        want = (site_path or "").rstrip("/")
+        for report in reversed(self._report_nodes):
+            if report.get("type") != "site":
+                continue
+            if (report.get("path") or "").rstrip("/") != want:
+                continue
+            report.setdefault("elements", {})[label] = value
+            if str(value).startswith("ERR:"):
+                report["status"] = "error"
+            summary = report.get("summary") or ""
+            if summary in ("", "no data"):
+                report["summary"] = f"{label}: {value}"
+            else:
+                report["summary"] = f"{summary}, {label}: {value}"
+            return True
+        return False
+
+    def _rerank_groups(self, api, backup):
+        """Re-apply the source's dynamic-group ranking, per site.
+
+        Rank decides which dynamic group wins an agent when several match,
+        so what has to survive the migration is the ORDER, not the numbers.
+        Two things the previous implementation got wrong:
+
+        * It pushed every backed-up rank through PUT /groups/{id} inside the
+          per-group node loop, i.e. in backup order. S1 renumbers the
+          neighbours on each of those calls, so every PUT returned 200 while
+          the final order came out scrambled.
+        * Its bulk fallback sent whatever group IDs it had matched by name,
+          and a partial list of a site's dynamic groups makes /groups/ranks
+          return 500 — which was then swallowed into the operation log.
+
+        This pass runs once per site, after every group exists: it takes the
+        site's FULL set of destination dynamic groups, orders them by the
+        source rank, applies the order, then re-reads the site to verify.
+        """
+        # {(account_name, site_name): {group_name: source_rank}}
+        wanted = {}
+        for node in backup or []:
+            if node.get("type") != "group":
+                continue
+            grp = node.get("group") or {}
+            rank, name = grp.get("rank"), grp.get("name")
+            # Only dynamic groups carry a rank; static/pinned come back None.
+            if rank is None or not name:
+                continue
+            parts = (node.get("path") or "").rstrip("/").split("/")
+            if len(parts) < 2:
+                continue
+            wanted.setdefault((parts[0], parts[1]), {})[name] = rank
+        if not wanted:
+            return
+
+        try:
+            accounts = {a.get("name"): a.get("id")
+                        for a in (api.get_accounts() or [])}
+        except Exception as e:
+            self._operation_log.append(
+                f"  ⚠ Group ranking skipped — could not list destination "
+                f"accounts ({_err_detail(e)[:100]})")
+            return
+
+        sites_by_account = {}
+        for (acct_name, site_name), ranks in sorted(wanted.items()):
+            acct_id = accounts.get(acct_name)
+            if not acct_id:
+                continue
+            if acct_id not in sites_by_account:
+                try:
+                    sites_by_account[acct_id] = api.get_sites(
+                        params={"accountIds": acct_id}) or []
+                except Exception:
+                    sites_by_account[acct_id] = []
+            site_id = next((s.get("id")
+                            for s in sites_by_account[acct_id]
+                            if s.get("name") == site_name), None)
+            if not site_id:
+                continue
+            self._apply_group_ranks(
+                api, f"{acct_name}/{site_name}", site_id, ranks)
+
+    def _apply_group_ranks(self, api, site_path, site_id, wanted_ranks):
+        """Order one site's dynamic groups and verify the result landed."""
+        def _dynamic():
+            return [g for g in (api.get_groups(
+                        params={"siteIds": site_id}) or [])
+                    if g.get("type") == "dynamic" and g.get("id")]
+
+        try:
+            groups = _dynamic()
+        except Exception as e:
+            detail = _err_detail(e)
+            self._operation_log.append(
+                f"  ✗ Group ranking for {site_path}: could not list "
+                f"destination groups ({detail[:100]})")
+            self._record_site_element(site_path, "group-ranks",
+                                      f"ERR: {detail[:80]}")
+            return
+
+        # Groups the source ranked come first, in source order. Anything the
+        # destination has on top of that keeps its current relative order at
+        # the end, so /groups/ranks always receives the site's complete
+        # dynamic set instead of a partial list.
+        ranked = sorted((g for g in groups if g.get("name") in wanted_ranks),
+                        key=lambda g: (wanted_ranks[g["name"]],
+                                       g.get("name") or ""))
+        extra = sorted((g for g in groups if g.get("name") not in wanted_ranks),
+                       key=lambda g: (g.get("rank") if g.get("rank") is not None
+                                      else 10 ** 6, g.get("name") or ""))
+        ordered = ranked + extra
+        if len(ordered) < 2:
+            return
+        ids = [str(g["id"]) for g in ordered]
+        names = {str(g["id"]): g.get("name") or str(g["id"]) for g in ordered}
+        target = {gid: pos for pos, gid in enumerate(ids, start=1)}
+
+        def _out_of_order():
+            """IDs whose destination rank isn't the one we asked for, or
+            None when the destination can't be re-read."""
+            try:
+                live = {str(g["id"]): g.get("rank") for g in _dynamic()}
+            except Exception:
+                return None
+            return [gid for gid in ids if live.get(gid) != target[gid]]
+
+        bulk_err = ""
+        try:
+            api.reorder_groups(site_id, ids)
+        except Exception as e:
+            bulk_err = _err_detail(e)
+
+        drift = _out_of_order()
+        if drift:
+            # Deterministic fallback: set the ranks one group at a time,
+            # best rank FIRST. Applied in ascending order each write either
+            # lands on its final rank or pushes only the not-yet-placed
+            # groups down, so the sequence converges on the source order.
+            if bulk_err:
+                self._operation_log.append(
+                    f"    ↳ {site_path}: PUT /groups/ranks rejected "
+                    f"({bulk_err[:80]}) — falling back to per-group rank "
+                    f"updates")
+            for gid in ids:
+                try:
+                    api.update_group(gid, {"name": names[gid],
+                                           "rank": target[gid]})
+                except Exception as e:
+                    self._operation_log.append(
+                        f"    ✗ rank {target[gid]} for group "
+                        f"'{names[gid]}': {_err_detail(e)[:80]}")
+            drift = _out_of_order()
+
+        if drift is None:
+            self._operation_log.append(
+                f"  ⚠ Group ranking for {site_path}: applied to "
+                f"{len(ids)} dynamic group(s) but the destination could "
+                f"not be re-read to verify it")
+            self._record_site_element(site_path, "group-ranks",
+                                      f"{len(ids)} applied (unverified)")
+        elif drift:
+            worst = ", ".join(names[g] for g in drift[:5])
+            more = f" (+{len(drift) - 5} more)" if len(drift) > 5 else ""
+            self._operation_log.append(
+                f"  ✗ Group ranking for {site_path}: {len(drift)} of "
+                f"{len(ids)} dynamic group(s) are still out of order "
+                f"({worst}{more}) — set their rank by hand in the "
+                f"destination console")
+            cli_log(f"{site_path}: group ranking incomplete "
+                    f"({len(drift)}/{len(ids)} out of order)", "error")
+            self._record_site_element(
+                site_path, "group-ranks",
+                f"ERR: {len(drift)}/{len(ids)} still out of order")
+        else:
+            self._operation_log.append(
+                f"  ✓ Group ranking for {site_path}: ordered "
+                f"{len(ids)} dynamic group(s)")
+            self._record_site_element(site_path, "group-ranks",
+                                      f"{len(ids)} ordered")
 
     def _resolve_dest_id(self, api, node, log, progress=None):
         """Resolve destination ID, auto-creating sites/groups if missing."""
@@ -7387,11 +7674,16 @@ class RestorePage(ctk.CTkFrame):
                         f"is missing on destination site — leaving the "
                         f"existing group untouched. Restore "
                         f"`saved_filters` first, then re-run.")
-                # Description / rank can be safely synced regardless of
+                # Description can be safely synced regardless of
                 # dynamic/static — but skip empty-string vs None drift,
                 # which is cosmetic noise from S1 returning None for
                 # unset fields while the source carries "".
-                for k in ("description", "rank"):
+                # `rank` is deliberately NOT synced here: S1 renumbers a
+                # site's other groups on every rank write, so applying
+                # ranks group-by-group in backup order scrambles the final
+                # order. _rerank_groups() does it once per site, in
+                # ascending order, after every group exists.
+                for k in ("description",):
                     if k not in desired:
                         continue
                     src_val = desired[k]
