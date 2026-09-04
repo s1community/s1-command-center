@@ -2,3 +2,7 @@
 #     pip install -r requirements-dev.txt
 -r requirements.txt
 pytest>=8.0
+# Only needed to regenerate the customer-facing scope deck
+# (scripts/build_migration_scope_deck.py). The guard test in
+# tests/test_deck_coverage.py reads the content tables without it.
+python-pptx>=1.0

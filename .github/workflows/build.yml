@@ -7,7 +7,36 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ───────────────────────────────────────────────────────────────────
+  #  Tests
+  # ───────────────────────────────────────────────────────────────────
+  # Much of this tool's safety lives in guard tests — that a migration
+  # can't silently skip an element, that POST /upgrade-policy/policy
+  # stays singular (the plural deactivates every policy in scope), that
+  # the customer-facing scope deck can't drift from the restore loop.
+  # None of it was running in CI, so a release could ship red. The build
+  # jobs now depend on this one.
+  #
+  # The Tk-dependent tests call pytest.importorskip / skip themselves
+  # when no display is available, so a headless runner is fine.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: python -m pytest tests -q
+
   build-macos:
+    needs: test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -225,6 +254,7 @@ jobs:
           path: dist/S1-Command-Center-macOS.dmg
 
   build-windows:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
