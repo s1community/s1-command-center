@@ -21,6 +21,11 @@ from pages import (
     _is_exists_error,
     _FW_RULE_FIELDS,
     _rules_for_scope,
+    _scope_inherits_config,
+    _sched_report_payload,
+    _SCHED_REPORT_DEFAULTS,
+    _strip_unknown_fields,
+    _nq_rules_for_scope,
     _star_rules_for_scope,
     _tags_for_scope,
     _tag_payload,
@@ -127,6 +132,155 @@ def test_rules_for_scope_drops_missing_scope_and_handles_empty():
     assert _rules_for_scope([{"name": "x"}], "site") == []
     assert _rules_for_scope(None, "site") == []
     assert _rules_for_scope([], "account") == []
+
+
+# ── _strip_unknown_fields ───────────────────────────────────────────
+# The destination's OWN role template carries `pages`, and POST /rbac/role
+# then refuses it — all three Beijer Ref custom roles died on that
+# (2026-09-02).
+
+def test_strip_unknown_fields_reads_the_dict_values_shape():
+    payload = {"name": "Ranger Role", "description": "d", "pages": [1, 2]}
+    err = ("Validation Error :: data: dict_values(['pages']): "
+           "Unknown field (code 4000010)")
+    trimmed, dropped = _strip_unknown_fields(payload, err)
+    assert dropped == ["pages"]
+    assert trimmed == {"name": "Ranger Role", "description": "d"}
+    assert "pages" in payload          # original left intact
+
+
+def test_strip_unknown_fields_reads_the_plain_shape():
+    payload = {"name": "r", "widget": 1}
+    trimmed, dropped = _strip_unknown_fields(
+        payload, "data: widget: Unknown field")
+    assert dropped == ["widget"] and trimmed == {"name": "r"}
+
+
+def test_strip_unknown_fields_only_reports_fields_it_can_remove():
+    # No field named, or a field that isn't in the payload: no retry.
+    assert _strip_unknown_fields({"name": "r"}, "some other error") == \
+        ({"name": "r"}, [])
+    assert _strip_unknown_fields(
+        {"name": "r"}, "data: dict_values(['pages']): Unknown field") == \
+        ({"name": "r"}, [])
+
+
+# ── _sched_report_payload ───────────────────────────────────────────
+# All 159 of Beijer Ref's scheduled reports were rejected on 2026-09-02:
+# GET /report-tasks returns `day`, `recipients` and `isTrend` as null and
+# POST /report-tasks refuses them as null.
+
+def test_sched_report_fills_the_fields_the_create_api_refuses_as_null():
+    rep = {"id": "r1", "name": "Threats", "frequency": "daily",
+           "day": None, "recipients": None, "isTrend": None}
+    data, filled = _sched_report_payload(rep)
+    assert data["recipients"] == [] and data["isTrend"] is False
+    assert data["day"] == 1
+    assert sorted(filled) == ["day", "isTrend", "recipients"]
+    assert "id" not in data          # still cleaned of source identifiers
+
+
+def test_sched_report_never_overwrites_a_real_value():
+    rep = {"name": "Weekly", "day": 4, "recipients": ["a@b.com"],
+           "isTrend": True}
+    data, filled = _sched_report_payload(rep)
+    assert filled == []
+    assert (data["day"], data["recipients"], data["isTrend"]) == \
+        (4, ["a@b.com"], True)
+
+
+def test_sched_report_does_not_invent_a_data_window():
+    # fromDate/toDate decide which period the report covers. A wrong
+    # window that looks migrated is worse than a visible failure.
+    assert "fromDate" not in _SCHED_REPORT_DEFAULTS
+    assert "toDate" not in _SCHED_REPORT_DEFAULTS
+    data, filled = _sched_report_payload({"name": "x", "fromDate": None})
+    assert data["fromDate"] is None and "fromDate" not in filled
+
+
+# ── _scope_inherits_config ────────────────────────────────────────────
+# Writing a config the source only INHERITED onto a destination scope that
+# also inherits is rejected: "Cannot change firewall settings while
+# inheriting settings from parent (code 4000010)" — 141 of them in one
+# Beijer Ref run (2026-09-02). The payloads below are verbatim from that
+# customer's backup.
+
+_FW_INHERITED = {"enabled": True, "inheritAllFirewallRules": True,
+                 "inheritSettings": True, "inheritedFrom": None,
+                 "inherits": True, "locationAware": True,
+                 "selectedTags": []}
+_FW_OWN = {**_FW_INHERITED, "inheritSettings": False}
+_DC_INHERITED = {"enabled": False, "inheritedFrom": "global",
+                 "inherits": True, "reportBlocked": True}
+_DC_OWN = {"enabled": True, "inheritedFrom": None, "inherits": False,
+           "reportBlocked": True}
+
+
+def test_firewall_inheritance_is_read_from_inherit_settings():
+    # `inherits` is true on EVERY firewall config, including the scopes
+    # holding a real override — only `inheritSettings` distinguishes them.
+    assert _scope_inherits_config({}, _FW_INHERITED) is True
+    assert _scope_inherits_config({}, _FW_OWN) is False
+
+
+def test_device_control_inheritance_is_read_from_inherits():
+    # Device Control has no `inheritSettings` field at all.
+    assert "inheritSettings" not in _DC_INHERITED
+    assert _scope_inherits_config({}, _DC_INHERITED) is True
+    assert _scope_inherits_config({}, _DC_OWN) is False
+
+
+def test_group_policy_inheritance_is_not_config_inheritance():
+    # group.inherits is POLICY inheritance. Treating it as config
+    # inheritance skipped the firewall overrides of 4 Beijer groups.
+    node = {"group": {"inherits": True}}
+    assert _scope_inherits_config(node, _FW_OWN) is False
+    assert _scope_inherits_config(node, _DC_OWN) is False
+    # ...and it must not rescue an inheriting scope either — the config says
+    # so on its own.
+    assert _scope_inherits_config({"group": {"inherits": False}},
+                                  _FW_INHERITED) is True
+
+
+def test_scope_inherits_config_handles_missing_config():
+    assert _scope_inherits_config({}, None) is False
+    assert _scope_inherits_config({}, {}) is False
+
+
+# ── _nq_rules_for_scope ────────────────────────────────────────────────
+# Network Quarantine rules are served by the firewall-control API and are
+# returned at every level, so they leak downwards exactly like firewall
+# rules. Nobody hit this before 2.3.0 because the route was wrong and the
+# rules were never captured at all (Landeshauptstadt Muenchen, 2026-09).
+
+def test_nq_rules_for_scope_site_drops_inherited_account_rule():
+    rules = [
+        {"name": "AcctAllow", "scope": "account"},
+        {"name": "SiteAllow", "scope": "site"},
+    ]
+    assert [r["name"] for r in _nq_rules_for_scope(rules, "site")] == \
+        ["SiteAllow"]
+
+
+def test_nq_rules_for_scope_global_accepts_tenant_alias():
+    rules = [{"name": "g", "scope": "tenant"},
+             {"name": "a", "scope": "account"}]
+    assert [r["name"] for r in _nq_rules_for_scope(rules, "global")] == ["g"]
+
+
+def test_nq_rules_for_scope_keeps_rules_with_no_scope_field():
+    # The rule shape is unverified (the route 404'd until 2.3.0), so an
+    # unlabelled rule is restored rather than silently dropped — trading one
+    # silent loss for another is not a fix.
+    rules = [{"name": "NoScope"}, {"name": "Acct", "scope": "account"}]
+    assert [r["name"] for r in _nq_rules_for_scope(rules, "site")] == \
+        ["NoScope"]
+
+
+def test_nq_rules_for_scope_case_insensitive_and_empty():
+    assert _nq_rules_for_scope([{"scope": "GROUP"}], "group") == \
+        [{"scope": "GROUP"}]
+    assert _nq_rules_for_scope(None, "site") == []
 
 
 # ── _star_rules_for_scope (custom detection rule leak guard) ────────────
@@ -660,6 +814,35 @@ def test_explain_error_returns_full_shape():
         assert key in out
     assert out["label"] == "policy"
     assert "policy" in out["raw"] and "500" in out["raw"]
+
+
+_SERVER_5XX = ("Internal server error :: Server could not process the "
+               "request. (code 5000010)")
+
+
+def test_endpoint_tag_5xx_points_at_the_diagnostic_that_settles_it():
+    # 150 of 150 endpoint tags died on this one error with no guidance
+    # (Beijer Ref, 2026-09-02).
+    out = explain_error("ep-tags", _SERVER_5XX, 500)
+    assert "endpoint tag" in out["what"].lower()
+    assert "Diagnose endpoint tags" in out["fix"]
+
+
+def test_override_5xx_is_not_swallowed_by_the_generic_5xx_rule():
+    out = explain_error("overrides", _SERVER_5XX, 500)
+    assert "config override" in out["what"].lower()
+
+
+def test_other_elements_still_get_the_generic_5xx_explanation():
+    out = explain_error("policy", _SERVER_5XX, 500)
+    assert "server error" in out["what"].lower()
+
+
+def test_scheduled_report_without_a_data_window_is_explained():
+    detail = ("Validation Error :: data: fromDate: Field may not be null., "
+              "toDate: Field may not be null. (code 4000010)")
+    out = explain_error("sched-rep", detail, 400)
+    assert "data window" in out["what"].lower()
 
 
 def test_explain_error_unknown_falls_back_gracefully():

@@ -1,6 +1,7 @@
 """
 Export utilities — generates beautiful HTML and Excel reports from table data.
 """
+import csv
 import json
 import os
 import re
@@ -719,6 +720,634 @@ def generate_star_rules_excel(path: str, rules: list,
 
     wb.save(path)
     return len(rules)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Migration Gap Report — per-element restore reconciliation
+# ═══════════════════════════════════════════════════════════════════════
+#
+# The restore report answers "did the run finish?". It does NOT answer the
+# question every operator actually asks afterwards: "I backed up 45
+# exclusions and only 43 landed — WHICH two are missing, and why?".
+#
+# RestorePage._run_restore records one ledger row per item it touched:
+#   {node, scope, element, kind, item, status, reason}
+# status ∈ GAP_STATUSES. Everything below turns that flat ledger into a
+# tabbed document (one tab per element) with an explicit
+# restored / not-restored split. Pure functions — no GUI, no network.
+
+# Ordered so the report always reads the same way.
+GAP_STATUSES = ("created", "exists", "failed", "skipped", "manual",
+                "not attempted", "inherited", "empty")
+# What counts as "it is on the destination".
+GAP_RESTORED_STATUSES = ("created", "exists")
+# What the operator has to act on. `not attempted` is in here on purpose:
+# it means the element was selected but the backup held nothing for it,
+# which is how four elements went missing for a whole migration.
+GAP_MISSING_STATUSES = ("failed", "skipped", "manual", "not attempted")
+# Neither restored nor missing:
+#   inherited — the item belongs to a different scope and is restored
+#               there; re-creating it here would duplicate it.
+#   empty     — the element was selected and the backup legitimately holds
+#               no items for this scope.
+# Counting these as gaps would drown the real ones (the API returns
+# inherited rules/tags at EVERY level, so a 200-group migration would
+# report thousands of phantom "missing" items).
+GAP_INFO_STATUSES = ("inherited", "empty")
+
+# Restore-result label -> human tab title. Labels are the short ones used
+# in the restore results table / operation log, so the two line up.
+GAP_ELEMENT_TITLES = {
+    "(node)": "Scopes Skipped",
+    "policy": "Policy",
+    "excl": "Exclusions",
+    "unified-excl": "Unified Exclusions",
+    "blocklist": "Blocklist",
+    "fw-cfg": "Firewall Config",
+    "fw-rules": "Firewall Rules",
+    "nq-cfg": "Network Quarantine Config",
+    "nq-rules": "Network Quarantine Rules",
+    "dc-cfg": "Device Control Config",
+    "dc-rules": "Device Control Rules",
+    "tags-fw": "Tags — Firewall",
+    "tags-nq": "Tags — Network Quarantine",
+    "tags-ep": "Tags — Endpoint (named)",
+    "ep-tags": "Tags — Endpoint (key/value)",
+    "star": "STAR Custom Rules",
+    "dv-filters": "Saved Filters",
+    "overrides": "Config Overrides",
+    "threat-intel": "Threat Intelligence",
+    "log-rules": "Log Collection Rules",
+    "upgrade-pol": "Auto-Upgrade Policies",
+    "locations": "Locations",
+    "webhooks": "Webhooks",
+    "sched-rep": "Scheduled Reports",
+    "mkt-apps": "Marketplace Apps",
+    "scripts": "Remote Scripts",
+    "roles": "RBAC Roles",
+    "svc-users": "Service Users",
+    "users": "Console Users",
+    "set-noti": "Settings — Notifications",
+    "set-sysl": "Settings — Syslog",
+    "set-acti": "Settings — Active Directory",
+    "set-smtp": "Settings — SMTP",
+    "set-sso": "Settings — SSO",
+    "recipients": "Settings — Notification Recipients",
+    "group-rank": "Group Ranking",
+}
+
+# Tab display order — anything unknown is appended alphabetically after.
+_GAP_ORDER = list(GAP_ELEMENT_TITLES)
+
+
+def gap_element_title(key: str) -> str:
+    """Human tab title for a restore-result label."""
+    return GAP_ELEMENT_TITLES.get(key, str(key or "other").replace("-", " ").title())
+
+
+def build_gap_report(ledger: list, meta: Optional[dict] = None) -> dict:
+    """Group a flat restore ledger into per-element tabs with counts.
+
+    Returns a JSON-serialisable dict:
+      {generatedAt, meta, totals, elements: [{key, title, counts,
+        restored, missing, total, rows: [...]}]}
+    """
+    meta = dict(meta or {})
+    rows = [r for r in (ledger or []) if isinstance(r, dict)]
+
+    groups: dict = {}
+    for r in rows:
+        key = str(r.get("element") or "other")
+        groups.setdefault(key, []).append(r)
+
+    def _order(key):
+        return (_GAP_ORDER.index(key) if key in _GAP_ORDER
+                else len(_GAP_ORDER)), gap_element_title(key).lower()
+
+    elements = []
+    totals = {s: 0 for s in GAP_STATUSES}
+    for key in sorted(groups, key=_order):
+        items = groups[key]
+        counts = {s: 0 for s in GAP_STATUSES}
+        for r in items:
+            st = str(r.get("status") or "")
+            if st not in counts:
+                counts[st] = 0
+            counts[st] += 1
+            totals[st] = totals.get(st, 0) + 1
+        restored = sum(counts.get(s, 0) for s in GAP_RESTORED_STATUSES)
+        missing = sum(counts.get(s, 0) for s in GAP_MISSING_STATUSES)
+        info = sum(counts.get(s, 0) for s in GAP_INFO_STATUSES)
+        elements.append({
+            "key": key,
+            "title": gap_element_title(key),
+            "counts": counts,
+            "restored": restored,
+            "missing": missing,
+            "info": info,
+            "total": len(items) - info,
+            "rowCount": len(items),
+            # Not-restored rows first — that is what the report is for.
+            "rows": sorted(
+                items,
+                key=lambda r: (str(r.get("status")) in GAP_RESTORED_STATUSES,
+                               str(r.get("node") or ""),
+                               str(r.get("item") or ""))),
+        })
+
+    total_info = sum(totals.get(s, 0) for s in GAP_INFO_STATUSES)
+    total_items = len(rows) - total_info
+    total_restored = sum(totals.get(s, 0) for s in GAP_RESTORED_STATUSES)
+    total_missing = sum(totals.get(s, 0) for s in GAP_MISSING_STATUSES)
+    return {
+        "tool": "S1 Command Center",
+        "kind": "migration-gap-report",
+        "version": 1,
+        "generatedAt": datetime.now().isoformat(timespec="seconds"),
+        "meta": meta,
+        "totals": {
+            **totals,
+            "items": total_items,
+            "rows": len(rows),
+            "restored": total_restored,
+            "missing": total_missing,
+            "info": total_info,
+        },
+        "elements": elements,
+    }
+
+
+_GAP_STATUS_CLASS = {
+    "created": "badge-green", "exists": "badge-blue",
+    "failed": "badge-red", "skipped": "badge-yellow",
+    "manual": "badge-yellow", "not attempted": "badge-red",
+    "inherited": "badge-blue", "empty": "badge-blue",
+}
+
+_GAP_CSS = """
+.tabs { display:flex; flex-wrap:wrap; gap:6px; margin:24px 0 18px; }
+.tab-btn {
+    background:#1a1a2e; border:1px solid #2d2d44; color:#aaa;
+    border-radius:10px; padding:8px 14px; font-size:13px; cursor:pointer;
+    font-family:inherit;
+}
+.tab-btn:hover { background:#222238; color:#fff; }
+.tab-btn.active { background:#6b0aea; border-color:#6b0aea; color:#fff;
+    font-weight:600; }
+.tab-btn .n { font-size:11px; color:#fdcb6e; margin-left:6px; }
+.tab-btn.clean .n { color:#00b894; }
+.panel { display:none; }
+.panel.active { display:block; }
+h2.sec { color:#fff; margin:8px 0 12px; font-size:18px; }
+p.hint { color:#888; font-size:13px; margin-bottom:14px; }
+tbody td.err { color:#e94560; white-space:normal; font-size:12px; }
+tbody td.wrap { white-space:normal; }
+"""
+
+_GAP_JS = """
+function s1tab(id){
+  document.querySelectorAll('.panel').forEach(function(p){
+    p.classList.toggle('active', p.id === id); });
+  document.querySelectorAll('.tab-btn').forEach(function(b){
+    b.classList.toggle('active', b.dataset.target === id); });
+}
+"""
+
+
+def _esc(val) -> str:
+    s = "" if val is None else str(val)
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def generate_gap_html(report: dict) -> str:
+    """Render a gap report as a self-contained tabbed HTML document."""
+    report = report or {}
+    meta = report.get("meta", {}) or {}
+    elements = report.get("elements", []) or []
+    tot = report.get("totals", {}) or {}
+    now = report.get("generatedAt", "") or datetime.now().isoformat(
+        timespec="seconds")
+
+    stats = f"""<div class="stats">
+      <div class="stat-card"><div class="label">Items Tracked</div>
+        <div class="value" style="color:#74b9ff">{tot.get('items', 0)}</div></div>
+      <div class="stat-card"><div class="label">On Destination</div>
+        <div class="value">{tot.get('restored', 0)}</div></div>
+      <div class="stat-card"><div class="label">NOT Migrated</div>
+        <div class="value accent">{tot.get('missing', 0)}</div></div>
+      <div class="stat-card"><div class="label">Created</div>
+        <div class="value">{tot.get('created', 0)}</div></div>
+      <div class="stat-card"><div class="label">Already Existed</div>
+        <div class="value" style="color:#74b9ff">{tot.get('exists', 0)}</div></div>
+      <div class="stat-card"><div class="label">Failed</div>
+        <div class="value accent">{tot.get('failed', 0)}</div></div>
+      <div class="stat-card"><div class="label">Skipped</div>
+        <div class="value warn">{tot.get('skipped', 0)}</div></div>
+      <div class="stat-card"><div class="label">Manual Action</div>
+        <div class="value warn">{tot.get('manual', 0)}</div></div>
+      <div class="stat-card"><div class="label">Inherited / Empty</div>
+        <div class="value" style="color:#74b9ff">{tot.get('info', 0)}</div></div>
+    </div>"""
+
+    info_rows = "".join(
+        f'<tr><td style="color:#888; padding:4px 16px 4px 0; border:none;">'
+        f'{_esc(k)}</td><td style="color:#e0e0e0; border:none;">'
+        f'{_esc(v)}</td></tr>'
+        for k, v in (
+            ("Source Console", meta.get("source_url") or "—"),
+            ("Destination Console", meta.get("dest_url") or "—"),
+            ("Started", (meta.get("start_time") or "")[:19].replace("T", " ")),
+            ("Finished", (meta.get("end_time") or "")[:19].replace("T", " ")),
+            ("Duration", meta.get("elapsed") or "—"),
+            ("Nodes restored", f"{meta.get('restored_count', '—')} of "
+                               f"{meta.get('total_nodes', '—')}"),
+        ))
+    info = f"""<div style="background:#1a1a2e; border:1px solid #2d2d44;
+      border-radius:12px; padding:20px 28px; margin-bottom:8px;">
+      <table style="border:none; background:transparent;">{info_rows}</table>
+    </div>"""
+
+    # ── Tab buttons ──
+    btns = ['<button class="tab-btn active" data-target="p-summary" '
+            'onclick="s1tab(\'p-summary\')">📋 Summary</button>']
+    for i, el in enumerate(elements):
+        cls = "tab-btn" + (" clean" if not el["missing"] else "")
+        badge = (f'<span class="n">{el["missing"]} missing</span>'
+                 if el["missing"] else '<span class="n">✓</span>')
+        btns.append(
+            f'<button class="{cls}" data-target="p-{i}" '
+            f'onclick="s1tab(\'p-{i}\')">{_esc(el["title"])}{badge}</button>')
+    tabs_html = f'<div class="tabs">{"".join(btns)}</div>'
+
+    # ── Summary panel ──
+    sum_rows = ""
+    for el in elements:
+        c = el["counts"]
+        miss_cls = "badge-red" if el["missing"] else "badge-green"
+        sum_rows += (
+            f'<tr><td>{_esc(el["title"])}</td>'
+            f'<td>{el["total"]}</td>'
+            f'<td style="color:#00b894">{el["restored"]}</td>'
+            f'<td><span class="badge {miss_cls}">{el["missing"]}</span></td>'
+            f'<td>{c.get("created", 0)}</td>'
+            f'<td>{c.get("exists", 0)}</td>'
+            f'<td style="color:#e94560">{c.get("failed", 0)}</td>'
+            f'<td style="color:#fdcb6e">{c.get("skipped", 0)}</td>'
+            f'<td style="color:#fdcb6e">{c.get("manual", 0)}</td>'
+            f'<td style="color:#e94560">{c.get("not attempted", 0)}</td>'
+            f'<td style="color:#74b9ff">{el["info"]}</td>'
+            f'</tr>')
+    summary_panel = f"""<div class="panel active" id="p-summary">
+      {info}
+      <h2 class="sec">Per-element reconciliation</h2>
+      <p class="hint">"In backup" is every item this scope actually owned.
+        Anything that is not <b>created</b> or <b>already existed</b> is
+        <b>not on the destination</b> — open that element's tab for the exact
+        item names and the reason. <b>Inherited / empty</b> is counted
+        separately: those items belong to another scope (and are restored
+        there) or the backup simply held none.</p>
+      <table><thead><tr>
+        <th>Element</th><th>In backup</th><th>On destination</th>
+        <th>Missing</th><th>Created</th><th>Existed</th><th>Failed</th>
+        <th>Skipped</th><th>Manual</th><th>Not attempted</th>
+        <th>Inherited / empty</th>
+      </tr></thead><tbody>{sum_rows or '<tr><td colspan="11">No items recorded.</td></tr>'}</tbody></table>
+    </div>"""
+
+    # ── One panel per element ──
+    panels = [summary_panel]
+    for i, el in enumerate(elements):
+        rows_html = ""
+        for r in el["rows"]:
+            st = str(r.get("status") or "")
+            cls = _GAP_STATUS_CLASS.get(st, "badge-blue")
+            rows_html += (
+                f'<tr>'
+                f'<td style="color:#aaa">{_esc(r.get("node"))}</td>'
+                f'<td style="color:#888">{_esc(r.get("scope"))}</td>'
+                f'<td class="wrap" style="color:#fff; '
+                f'font-family:Consolas,monospace; font-size:12px;">'
+                f'{_esc(r.get("item"))}</td>'
+                f'<td style="color:#888">{_esc(r.get("kind"))}</td>'
+                f'<td><span class="badge {cls}">{_esc(st)}</span></td>'
+                f'<td class="err">{_esc(r.get("reason"))}</td>'
+                f'</tr>')
+        head = (f'<h2 class="sec">{_esc(el["title"])} — '
+                f'{el["restored"]} of {el["total"]} on destination, '
+                f'<span style="color:'
+                f'{"#e94560" if el["missing"] else "#00b894"}">'
+                f'{el["missing"]} missing</span></h2>')
+        panels.append(
+            f'<div class="panel" id="p-{i}">{head}'
+            f'<table><thead><tr><th>Scope Path</th><th>Level</th>'
+            f'<th>Item</th><th>Type</th><th>Status</th>'
+            f'<th>Reason / Error</th></tr></thead>'
+            f'<tbody>{rows_html}</tbody></table></div>')
+
+    title = meta.get("customer") or meta.get("dest_console") or ""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Migration Gap Report — S1 Command Center</title>
+<style>{_CSS}{_GAP_CSS}</style></head><body>
+<div class="header">
+  <h1>🧩 Migration Gap Report</h1>
+  <div class="subtitle">Exactly what was restored and what was not{
+      f' &bull; {_esc(title)}' if title else ''}</div>
+  <div class="meta">Generated {now[:19].replace('T', ' ')} &bull;
+    {tot.get('items', 0)} items &bull; {tot.get('missing', 0)} not migrated</div>
+</div>
+{stats}
+{tabs_html}
+{''.join(panels)}
+<div class="footer">S1 Command Center &bull; Made by Ran Jacobi</div>
+<script>{_GAP_JS}</script>
+</body></html>"""
+
+
+_GAP_SHEET_BAD = re.compile(r"[\[\]:*?/\\]")
+
+
+def _sheet_name(title: str, used: set) -> str:
+    name = _GAP_SHEET_BAD.sub("-", str(title or "Sheet")).strip() or "Sheet"
+    name = name[:31]
+    base, n = name, 2
+    while name.lower() in used:
+        suffix = f" ({n})"
+        name = base[:31 - len(suffix)] + suffix
+        n += 1
+    used.add(name.lower())
+    return name
+
+
+def generate_gap_excel(path: str, report: dict):
+    """Write the gap report as a workbook: Summary + one sheet per element."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    report = report or {}
+    meta = report.get("meta", {}) or {}
+    elements = report.get("elements", []) or []
+    tot = report.get("totals", {}) or {}
+
+    ink = "1A1A2E"
+    head_fill = PatternFill("solid", start_color=ink, end_color=ink)
+    head_font = Font(name=_XL_FONT, size=10, bold=True, color="FFFFFF")
+    body_font = Font(name=_XL_FONT, size=10, color="2C2C3A")
+    row_border = Border(bottom=Side(style="thin", color="E3E3EC"))
+    status_style = {
+        "created": ("E3F7EC", "1B7F4F"),
+        "exists": ("E2F0FD", "13599C"),
+        "failed": ("FDEAE7", "B02020"),
+        "skipped": ("FFF6DC", "9C6F00"),
+        "manual": ("FFF0DC", "A85B00"),
+        "not attempted": ("FDEAE7", "B02020"),
+        "inherited": ("EFEFF4", "55556A"),
+        "empty": ("EFEFF4", "55556A"),
+    }
+
+    wb = Workbook()
+    s = wb.active
+    s.title = "Summary"
+    s.sheet_view.showGridLines = False
+    for col, width in (("A", 3), ("B", 34), ("C", 12), ("D", 15), ("E", 11),
+                       ("F", 11), ("G", 11), ("H", 11), ("I", 11), ("J", 15),
+                       ("K", 15), ("L", 17)):
+        s.column_dimensions[col].width = width
+
+    t = s.cell(row=2, column=2, value="Migration Gap Report")
+    t.font = Font(name=_XL_FONT, size=18, bold=True, color=ink)
+    sub = s.cell(row=3, column=2,
+                 value="What was restored to the destination — and what was not")
+    sub.font = Font(name=_XL_FONT, size=10, color="8A8A9A")
+
+    r = 5
+    for label, value in (
+        ("Source console", meta.get("source_url") or "—"),
+        ("Destination console", meta.get("dest_url") or "—"),
+        ("Generated", (report.get("generatedAt") or "")[:19].replace("T", " ")),
+        ("Duration", meta.get("elapsed") or "—"),
+        ("Items tracked", tot.get("items", 0)),
+        ("On destination", tot.get("restored", 0)),
+        ("NOT migrated", tot.get("missing", 0)),
+    ):
+        lc = s.cell(row=r, column=2, value=label)
+        lc.font = Font(name=_XL_FONT, size=10, color="8A8A9A")
+        vc = s.cell(row=r, column=3, value=value)
+        vc.font = Font(name=_XL_FONT, size=10, bold=True,
+                       color="B02020" if (label == "NOT migrated"
+                                          and tot.get("missing", 0)) else ink)
+        r += 1
+
+    r += 1
+    headers = ["Element", "In backup", "On destination", "Missing", "Created",
+               "Existed", "Failed", "Skipped", "Manual", "Not attempted",
+               "Inherited / empty"]
+    for j, h in enumerate(headers, 2):
+        c = s.cell(row=r, column=j, value=h)
+        c.font = head_font
+        c.fill = head_fill
+        c.alignment = Alignment(horizontal="left", wrap_text=True)
+    r += 1
+    for el in elements:
+        c = el["counts"]
+        vals = [el["title"], el["total"], el["restored"], el["missing"],
+                c.get("created", 0), c.get("exists", 0), c.get("failed", 0),
+                c.get("skipped", 0), c.get("manual", 0),
+                c.get("not attempted", 0), el["info"]]
+        for j, v in enumerate(vals, 2):
+            cell = s.cell(row=r, column=j, value=_xl_safe(v))
+            cell.font = body_font
+            cell.border = row_border
+            if j == 5 and el["missing"]:
+                cell.font = Font(name=_XL_FONT, size=10, bold=True,
+                                 color="B02020")
+                cell.fill = PatternFill("solid", start_color="FDEAE7",
+                                        end_color="FDEAE7")
+        r += 1
+
+    # ── One sheet per element ──
+    cols = [("Scope Path", "node", 40), ("Level", "scope", 10),
+            ("Item", "item", 52), ("Type", "kind", 16),
+            ("Status", "status", 14), ("Reason / Error", "reason", 70)]
+    used = {"summary"}
+    for el in elements:
+        ws = wb.create_sheet(_sheet_name(el["title"], used))
+        ws.sheet_view.showGridLines = False
+        last = get_column_letter(len(cols))
+        ws.merge_cells(f"A1:{last}1")
+        tc = ws.cell(row=1, column=1,
+                     value=f"{el['title']} — {el['restored']} of "
+                           f"{el['total']} on destination, "
+                           f"{el['missing']} missing")
+        tc.font = Font(name=_XL_FONT, size=13, bold=True,
+                       color="B02020" if el["missing"] else ink)
+        for j, (title, _k, width) in enumerate(cols, 1):
+            c = ws.cell(row=3, column=j, value=title)
+            c.font = head_font
+            c.fill = head_fill
+            c.alignment = Alignment(horizontal="left", vertical="center")
+            ws.column_dimensions[get_column_letter(j)].width = width
+        for i, row in enumerate(el["rows"]):
+            excel_row = i + 4
+            for j, (_t, key, _w) in enumerate(cols, 1):
+                c = ws.cell(row=excel_row, column=j,
+                            value=_xl_safe(row.get(key, "")))
+                c.font = body_font
+                c.border = row_border
+                c.alignment = Alignment(horizontal="left", vertical="top",
+                                        wrap_text=(key == "reason"))
+                if key == "status":
+                    sty = status_style.get(str(row.get("status") or ""))
+                    if sty:
+                        c.fill = PatternFill("solid", start_color=sty[0],
+                                             end_color=sty[0])
+                        c.font = Font(name=_XL_FONT, size=10, bold=True,
+                                      color=sty[1])
+        ws.freeze_panes = "A4"
+        if el["rows"]:
+            ws.auto_filter.ref = f"A3:{last}{3 + len(el['rows'])}"
+
+    wb.save(path)
+
+
+def gap_report_rows(report: dict) -> list:
+    """Flatten a gap report back to plain rows (for the JSON export)."""
+    out = []
+    for el in (report or {}).get("elements", []):
+        for r in el.get("rows", []):
+            out.append({"element": el["title"], **r})
+    return out
+
+
+# (header, row key)
+GAP_CSV_COLUMNS = [
+    ("Element", "element"),
+    ("Scope Path", "node"),
+    ("Level", "scope"),
+    ("Item", "item"),
+    ("Type", "kind"),
+    ("Status", "status"),
+    ("Restored", "restored"),
+    ("Reason / Error", "reason"),
+]
+
+
+def gap_csv_rows(report: dict) -> list:
+    """Flat rows for the CSV export.
+
+    A CSV has no tabs, so the element becomes a column (filter/pivot on it)
+    and the rows keep the tab order: element by element, everything that did
+    NOT reach the destination first. `Restored` is a plain yes/no/n-a so the
+    sheet can be filtered without knowing the status vocabulary."""
+    out = []
+    for el in (report or {}).get("elements", []):
+        for r in el.get("rows", []):
+            status = str(r.get("status") or "")
+            if status in GAP_RESTORED_STATUSES:
+                restored = "yes"
+            elif status in GAP_MISSING_STATUSES:
+                restored = "NO"
+            else:
+                restored = "n/a"
+            out.append({
+                "element": el["title"],
+                "node": r.get("node", ""),
+                "scope": r.get("scope", ""),
+                "item": r.get("item", ""),
+                "kind": r.get("kind", ""),
+                "status": status,
+                "restored": restored,
+                "reason": r.get("reason", ""),
+            })
+    return out
+
+
+def write_gap_csv(path: str, report: dict) -> int:
+    """Write the gap report as one flat CSV. Returns the row count."""
+    rows = gap_csv_rows(report)
+    # utf-8-sig: Excel on Windows reads a plain utf-8 CSV as cp1252 and
+    # mangles every non-ASCII rule name; the BOM makes it open correctly.
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([h for h, _k in GAP_CSV_COLUMNS])
+        for r in rows:
+            w.writerow([r.get(k, "") for _h, k in GAP_CSV_COLUMNS])
+    return len(rows)
+
+
+def export_gap_csv(report: dict, default_name: str = ""):
+    """Save dialog + flat CSV of every item the last restore touched."""
+    if not (report or {}).get("elements"):
+        messagebox.showwarning(
+            "Nothing to Report",
+            "No per-item restore data yet — run a restore first.")
+        return None
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    path = filedialog.asksaveasfilename(
+        title="Export Migration Gap Report (CSV)",
+        initialfile=default_name or f"s1-migration-gaps-{ts}",
+        defaultextension=".csv",
+        filetypes=[("CSV (comma separated)", "*.csv")])
+    if not path:
+        return None
+    try:
+        n = write_gap_csv(path, report)
+        tot = report.get("totals", {})
+        cli_log(f"Gap report CSV exported → {os.path.basename(path)} "
+                f"({n} row(s), {tot.get('missing', 0)} not migrated)",
+                "success")
+        cli_log(f"File saved to: {path}", "info")
+        return path
+    except Exception as e:
+        cli_log(f"Gap report CSV export error: {e}", "error")
+        messagebox.showerror("Export Error", str(e))
+        return None
+
+
+def export_gap_report(report: dict, default_name: str = ""):
+    """Save dialog + write the gap report as Excel (tabs), HTML (tabs) or
+    JSON. Returns the path written, or None if the user cancelled."""
+    if not (report or {}).get("elements"):
+        messagebox.showwarning(
+            "Nothing to Report",
+            "No per-item restore data yet — run a restore first.")
+        return None
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    path = filedialog.asksaveasfilename(
+        title="Export Migration Gap Report",
+        initialfile=default_name or f"s1-migration-gaps-{ts}",
+        defaultextension=".xlsx",
+        filetypes=[
+            ("Excel Workbook (one tab per element)", "*.xlsx"),
+            ("HTML Report (tabbed)", "*.html"),
+            ("CSV (flat, one row per item)", "*.csv"),
+            ("JSON Data", "*.json"),
+        ])
+    if not path:
+        return None
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".xlsx":
+            generate_gap_excel(path, report)
+        elif ext == ".csv":
+            write_gap_csv(path, report)
+        elif ext == ".json":
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2, default=str)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(generate_gap_html(report))
+        tot = report.get("totals", {})
+        cli_log(f"Gap report exported → {os.path.basename(path)} "
+                f"({tot.get('missing', 0)} item(s) not migrated)", "success")
+        cli_log(f"File saved to: {path}", "info")
+        return path
+    except Exception as e:
+        cli_log(f"Gap report export error: {e}", "error")
+        messagebox.showerror("Export Error", str(e))
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════

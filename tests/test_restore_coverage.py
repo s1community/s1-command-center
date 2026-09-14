@@ -82,6 +82,24 @@ def test_endpoint_tags_restore_uses_the_tag_manager_api():
     assert "create_endpoint_tag" in src
 
 
+def test_inherited_config_skip_is_not_limited_to_groups():
+    # 38 of the 141 rejected firewall-config writes were SITES; the skip
+    # only ever looked at groups (Beijer Ref, 2026-09-02).
+    src = _restore_source()
+    assert 'ntype == "group" and _scope_inherits_config' not in src
+    assert src.count('_scope_inherits_config(node') == 3, (
+        "firewall, network-quarantine and device-control configs all need "
+        "the inherited-source skip")
+
+
+def test_nq_rule_restore_filters_inherited_rules():
+    # NQ rules come from the firewall-control API, which returns the parent
+    # scopes' rules at every level. Without the filter an account rule is
+    # re-created under every site — the bug already fixed for firewall and
+    # device-control rules.
+    assert "_nq_rules_for_scope" in _restore_source()
+
+
 def test_tag_restore_filters_inherited_tags():
     # /tags returns inherited tags at every level; restoring them re-creates
     # parent tags at each child scope.
@@ -148,7 +166,11 @@ def test_api_paths_that_do_not_exist_are_not_used():
     for bogus in ("/agents-policy/auto-upgrade-policies",
                   "/log-collection-rules",
                   "/reports/scheduled",
-                  "/notification-webhooks"):
+                  "/notification-webhooks",
+                  # Landeshauptstadt Muenchen, 2026-09: nq-config and
+                  # nq-rules were "ERR 404" on all 109 nodes.
+                  "/network-quarantine-control",
+                  "/network-quarantine-control/configuration"):
         # Quoted only — these paths are named in comments on purpose, to
         # stop someone "restoring" them.
         assert f'"{bogus}"' not in src and f"'{bogus}'" not in src, (
@@ -163,6 +185,15 @@ def test_real_api_paths_are_used():
     assert "/report-tasks" in sched
     aup = inspect.getsource(s1_api.S1API.get_auto_upgrade_policies)
     assert "/upgrade-policy/policies" in aup
+    # Network Quarantine hangs off firewall-control, it is not a resource
+    # of its own. Read AND write, or the backup captures nothing and the
+    # restore writes nowhere.
+    for fn in (s1_api.S1API.get_nq_rules, s1_api.S1API.create_nq_rule):
+        assert '"/firewall-control/network-quarantine"' in \
+            inspect.getsource(fn), fn.__name__
+    for fn in (s1_api.S1API.get_nq_config, s1_api.S1API.set_nq_config):
+        assert "/firewall-control/network-quarantine/configuration" in \
+            inspect.getsource(fn), fn.__name__
 
 
 def test_auto_upgrade_create_uses_the_singular_path():
@@ -189,6 +220,25 @@ def test_webhooks_are_declared_unsupported():
     assert hasattr(s1_api.S1API, "WEBHOOKS_UNSUPPORTED")
     assert not hasattr(s1_api.S1API, "get_webhooks")
     assert not hasattr(s1_api.S1API, "create_webhook")
+
+
+def test_gateways_are_declared_unsupported():
+    # /gateways 404'd on all 13 account+site nodes of the Landeshauptstadt
+    # Muenchen backup and no backup has ever held a gateway object. Same
+    # treatment as webhooks: say there is no API instead of calling one.
+    assert hasattr(s1_api.S1API, "GATEWAYS_UNSUPPORTED")
+    assert not hasattr(s1_api.S1API, "get_gateways")
+    assert '"/gateways"' not in inspect.getsource(s1_api)
+
+
+def test_backup_failures_record_the_reason_not_just_ERR():
+    # The exported backup log is all a customer sends. LHM's said
+    # "upgrade-pol: ERR" on 109 nodes and nothing else — undiagnosable.
+    src = inspect.getsource(BackupPage._read_node)
+    assert ', "ERR"))' not in src, (
+        "a bare ERR row hides the status code and the console's message")
+    assert ', "n/a"))' not in src
+    assert "_err_detail(e)" in src
 
 
 def test_missing_route_is_not_reported_as_not_applicable():

@@ -5,6 +5,7 @@ import copy
 import customtkinter as ctk
 import json
 import os
+import re as _re
 import unicodedata
 from collections import Counter
 from tkinter import filedialog, messagebox
@@ -113,7 +114,8 @@ ELEMENT_HELP = {
                       "users are migrated; SSO/SCIM users auto-provision on "
                       "login. Each created user is sent an invitation email "
                       "by SentinelOne (account level only).",
-    "gateways": "Management proxy / gateway configurations",
+    "gateways": "Management proxy / gateway configurations (no API — "
+                "listed for manual setup on the destination)",
     "marketplace_apps": "Inventory of installed Singularity Marketplace apps "
                        "(read-only — re-install manually on destination as "
                        "each app requires its own OAuth / credentials)",
@@ -688,6 +690,42 @@ def _build_role_payload(role_def: dict, template=None) -> dict:
     return data
 
 
+# S1 names the fields it doesn't know in the rejection itself, in one of
+# two shapes:
+#   "data: dict_values(['pages']): Unknown field (code 4000010)"
+#   "data: pages: Unknown field"
+_UNKNOWN_FIELD_RES = (
+    _re.compile(r"dict_values\(\[([^\]]*)\]\)\s*:\s*unknown field",
+                _re.IGNORECASE),
+    _re.compile(r"data:\s*([\w, ]+?)\s*:\s*unknown field", _re.IGNORECASE),
+)
+
+
+def _strip_unknown_fields(payload: dict, err_text: str):
+    """Drop the fields an "Unknown field" rejection names, for one retry.
+
+    The destination's own role template (GET /rbac/role) comes back with a
+    `pages` permission tree that POST /rbac/role then refuses — every
+    custom role of the Beijer Ref account died on
+    "data: dict_values(['pages']): Unknown field" (2026-09-02). Rather than
+    guess what that console calls the field instead, re-send without the
+    part it rejected: a role with no permissions is visible and fixable,
+    an absent role is neither. Only fields actually present are reported
+    as dropped, so a no-op retry never happens.
+    """
+    named = []
+    for rx in _UNKNOWN_FIELD_RES:
+        for m in rx.finditer(err_text or ""):
+            for part in m.group(1).split(","):
+                field = part.strip().strip("'\"")
+                if field and field not in named:
+                    named.append(field)
+    dropped = [f for f in named if f in (payload or {})]
+    if not dropped:
+        return payload, []
+    return ({k: v for k, v in payload.items() if k not in dropped}, dropped)
+
+
 def _build_service_user_payload(src: dict, dest_account_id: str,
                                 dest_sites: dict, dest_roles: dict) -> dict:
     """Build the create `data` for POST /service-users.
@@ -782,17 +820,59 @@ def _scope_inherits_config(node: dict, cfg) -> bool:
     inherits is unnecessary AND rejected by S1 with:
       "Cannot change firewall settings while inheriting settings from
        parent (code 4000010)".
-    Two signals, either of which means "inherited":
-      * the source group node carries `inherits: true` (it inherits all
-        config from its parent group/site), or
-      * the config object itself names an `inheritedFrom` scope.
+
+    The two module families answer the question with different fields, and
+    getting that wrong cost Beijer Ref 141 of those errors in one run
+    (2026-09-02 — 103 groups + 38 sites):
+
+      * Firewall (and Network Quarantine, which lives under the same API)
+        report `inheritSettings`. Their `inherits` field is true on EVERY
+        scope, including the ones holding a genuine override, so it says
+        nothing about settings and must not be used here.
+      * Device Control has no `inheritSettings`; it reports `inherits`
+        together with an `inheritedFrom` naming the parent level.
+
+    The node's own `group.inherits` is NOT a signal: it is the group's
+    POLICY inheritance. Reading it as config inheritance silently dropped
+    the firewall overrides of 4 Beijer groups that had `group.inherits`
+    true and `inheritSettings` false.
     """
-    grp = node.get("group") or {}
-    if grp.get("inherits") is True:
+    if not isinstance(cfg, dict):
+        return False
+    if "inheritSettings" in cfg:
+        return cfg.get("inheritSettings") is True
+    if cfg.get("inheritedFrom"):
         return True
-    if isinstance(cfg, dict) and cfg.get("inheritedFrom"):
-        return True
-    return False
+    return cfg.get("inherits") is True
+
+
+# POST /report-tasks validates fields as non-null that GET /report-tasks
+# hands back as null. Every one of Beijer Ref's 159 scheduled reports was
+# rejected on 2026-09-02 with some combination of
+#   "data: day: Field may not be null., recipients: Field may not be null.,
+#    isTrend: Field may not be null."
+# Only fields whose default cannot change WHAT the report says are filled
+# in here. `fromDate` / `toDate` define the report's data window, so they
+# are deliberately left alone: inventing a window would produce a report
+# that looks migrated and covers the wrong period.
+_SCHED_REPORT_DEFAULTS = {
+    "recipients": [],   # the source task had no e-mail targets either
+    "isTrend": False,   # trend comparison off
+    "day": 1,           # only reached when the source carries no day at
+                        # all, i.e. the schedule doesn't use one
+}
+
+
+def _sched_report_payload(rep: dict):
+    """Create-payload for one scheduled report, plus the names of the
+    fields that had to be defaulted so the run can say so out loud."""
+    data = _clean_for_restore(rep)
+    filled = []
+    for key, default in _SCHED_REPORT_DEFAULTS.items():
+        if data.get(key) is None:
+            data[key] = default
+            filled.append(key)
+    return data, filled
 
 
 def _clean_sso_for_restore(obj: dict) -> dict:
@@ -826,8 +906,6 @@ _SSO_SP_BOUND = {
 # structured explanation the GUI can show the operator.
 # Order matters — the first match wins, so put the more specific patterns
 # above the generic ones.
-import re as _re
-
 _ERROR_RULES = [
     {
         "match": _re.compile(r"hash .* already exists|already exists.*hash"),
@@ -1038,6 +1116,66 @@ _ERROR_RULES = [
                 "own default. No data is lost: a null field means the "
                 "feature was off on the source. Re-run the restore.",
         "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"(fromdate|todate).*field may not be null",
+                             _re.IGNORECASE),
+        "what": "Scheduled report has no data window",
+        "why":  "POST /report-tasks refuses a null `fromDate` / `toDate`, "
+                "but the source console returned the report task without "
+                "them. Those two fields decide WHICH period the report "
+                "covers, so the migrator will not invent a value — a "
+                "report that silently covers the wrong dates is worse "
+                "than one that is visibly missing.",
+        "fix":  "Re-create these few reports by hand on the destination "
+                "(Reports → Scheduled → Add), picking the same date range "
+                "as the source. Every other scheduled report migrates "
+                "normally.",
+        "severity": "warning",
+    },
+    {
+        "match": _re.compile(r"\[ep-tags\].*(5000010|internal server error|"
+                             r"server could not process|→ 5\d\d)|"
+                             r"post /tag-manager.*→ 5\d\d",
+                             _re.IGNORECASE),
+        "what": "The console errored creating unified endpoint tags",
+        "why":  "POST /tag-manager answered 500 for every key/value "
+                "endpoint tag in the run (Beijer Ref, 2026-09-02 — 150 of "
+                "150, at account, site and group scope alike). The route "
+                "and the tag object are the ones the console itself "
+                "reports through GET /agents/tags, and a 500 is the "
+                "console failing on the request rather than rejecting it, "
+                "so only the console can say which part it choked on.",
+        "fix":  "Operations → Inventory → Tags → 'Diagnose endpoint tags' "
+                "writes one throwaway tag per candidate request shape and "
+                "reads each one back, so it names the shape THIS console "
+                "actually stores. Run it against the destination and send "
+                "the summary with this error.\n"
+                "Until then the key/value tags have to be re-created by "
+                "hand (Endpoints → Tag Manager). Named firewall / "
+                "network-quarantine / device-inventory tags are a "
+                "different API and migrate normally.",
+        "severity": "error",
+    },
+    {
+        "match": _re.compile(r"\[overrides\].*(5000010|internal server error|"
+                             r"server could not process|→ 5\d\d)",
+                             _re.IGNORECASE),
+        "what": "The console errored creating a config override",
+        "why":  "POST /config-override answered 500. The payload sent is "
+                "the source override with its identifiers, timestamps and "
+                "source-tenant scope objects removed, plus the `scope` "
+                "string the API requires — nothing in it is invented. A "
+                "500 means the destination failed on it, not that it was "
+                "refused.",
+        "fix":  "1) Re-run: the override create is idempotent-safe, an "
+                "override that already exists is reported as such.\n"
+                "2) If the same override fails again, re-create it by "
+                "hand on the destination (Policy → Config Overrides) — "
+                "the Gap Report names every one that failed.\n"
+                "3) Send the failing override's name and this error to "
+                "SentinelOne Support; a 5xx needs a server-side log.",
+        "severity": "error",
     },
     {
         "match": _re.compile(r"put /settings/sso.*→ 5\d\d|"
@@ -1433,6 +1571,27 @@ def _rules_for_scope(rules: list, ntype: str) -> list:
     1:1 with the node type."""
     return [r for r in (rules or [])
             if str(r.get("scope", "")).lower() == ntype]
+
+
+def _nq_rules_for_scope(rules: list, ntype: str) -> list:
+    """Network-Quarantine variant of _rules_for_scope.
+
+    NQ rules are served by the firewall-control API
+    (/firewall-control/network-quarantine) and are returned at every level
+    exactly like firewall rules, so they need the same own-scope filter or
+    an account rule is re-created under every site.
+
+    They are kept when the rule carries NO `scope` field: until the route
+    was corrected the rules were never captured at all, so the shape is
+    unverified and dropping an unlabelled rule would trade one silent loss
+    for another."""
+    want = "global" if ntype in ("global", "tenant") else ntype
+    out = []
+    for r in rules or []:
+        s = str(r.get("scope", "")).lower()
+        if not s or s == want or (want == "global" and s == "tenant"):
+            out.append(r)
+    return out
 
 
 def _star_rules_for_scope(rules: list, ntype: str) -> list:
@@ -2762,12 +2921,11 @@ class BackupPage(ctk.CTkFrame):
             """Build compact summary from _read_node results."""
             parts = []
             for name, val in results:
-                if val == "n/a" or val == 0:
+                if val == 0 or (isinstance(val, str)
+                                and val.startswith(("n/a", "ERR"))):
                     continue
                 elif val == "ok":
                     parts.append(name)
-                elif val == "ERR":
-                    pass
                 elif isinstance(val, int) and val > 0:
                     parts.append(f"{name}:{val}")
             return ", ".join(parts) if parts else "empty"
@@ -3007,20 +3165,29 @@ class BackupPage(ctk.CTkFrame):
                 return result
             except Exception as e:
                 sc = getattr(e, "status_code", 0)
+                # Every failure row carries its status and the console's own
+                # words. A bare "ERR" / "n/a" is undiagnosable from the
+                # exported log, which is all a customer sends: LHM's
+                # 2026-09-03 backup failed `upgrade-pol` on all 109 nodes
+                # and the log said nothing beyond "ERR" — the reason only
+                # ever reached the live OUTPUT console.
+                why = _err_detail(e)[:120]
                 if sc == 403:
-                    # Genuinely unavailable to this token — not our problem.
-                    results.append((label, "n/a"))
+                    # Genuinely unavailable to this token — not our problem,
+                    # but say which permission the console refused.
+                    results.append((label, f"n/a (403: {why})"))
                 elif sc == 404:
                     # The route does not exist. That is a defect in THIS
                     # tool, not a property of the console, and lumping it in
                     # with 403 as "n/a" is what hid four missing elements for
                     # a whole migration (Beijer Ref, 2026-08). Make it loud.
-                    results.append((label, "ERR 404"))
+                    results.append((label, f"ERR 404: {why}"))
                     cli_log(f"Backup of {label} failed: endpoint not found "
                             f"({e}). This is a bug in the migration tool — "
                             f"please report it.", "error")
                 else:
-                    results.append((label, f"ERR"))
+                    results.append(
+                        (label, f"ERR {sc}: {why}" if sc else f"ERR: {why}"))
                     cli_log(f"Backup of {label} failed: {e}", "error")
                 return None
 
@@ -3030,7 +3197,7 @@ class BackupPage(ctk.CTkFrame):
                 data["policy"] = api.get_policy(scope_type, scope_id)
                 results.append(("policy", "ok"))
             except Exception as e:
-                results.append(("policy", "ERR"))
+                results.append(("policy", f"ERR: {_err_detail(e)[:120]}"))
                 cli_log(f"Backup of policy failed: {e}", "error")
 
         if "exclusions" in elements:
@@ -3051,7 +3218,8 @@ class BackupPage(ctk.CTkFrame):
                 data["unified_exclusions"] = items
                 results.append(("unified_exclusions", len(items)))
             except Exception as e:
-                results.append(("unified_exclusions", "ERR"))
+                results.append(("unified_exclusions",
+                                f"ERR: {_err_detail(e)[:120]}"))
                 cli_log(f"Backup of unified_exclusions failed: {e}", "error")
 
         if "blocklist" in elements:
@@ -3212,7 +3380,8 @@ class BackupPage(ctk.CTkFrame):
                         settings[sname] = getter(scope)
                         results.append((f"set-{sname[:4]}", "ok"))
                     except Exception as e:
-                        results.append((f"set-{sname[:4]}", "n/a"))
+                        results.append((f"set-{sname[:4]}",
+                                        f"n/a ({_err_detail(e)[:120]})"))
                         cli_log(f"Backup of {sname} settings skipped: {e}",
                                 "warning")
             if "settings_notifications" in elements:
@@ -3257,8 +3426,11 @@ class BackupPage(ctk.CTkFrame):
                    params={"accountIds": scope_id}, max_items=500)
 
         # ── Gateways ──
+        # No gateway route exists (see S1API.GATEWAYS_UNSUPPORTED). Say so
+        # instead of calling one that 404s at every scope and logging it as
+        # a tool bug on every node of every run.
         if "gateways" in elements and scope_type in ("account", "site"):
-            _fetch("gateways", "gateways", api.get_gateways, scope)
+            results.append(("gateways", "no API"))
 
         # Store results for ProgressTable summary
         self._last_results = results
@@ -4198,6 +4370,26 @@ class RestorePage(ctk.CTkFrame):
                   "masked — safe to attach to a ticket or share. The original "
                   "backup is untouched."
                   ).pack(side="left", padx=(0, 12))
+        self._gap_btn = ctk.CTkButton(
+            review_row, text="🧩  Gap Report", height=34, width=145,
+            fg_color=WARN, hover_color=WARN_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._export_gap_report, state="disabled")
+        self._gap_btn.pack(side="left", padx=(0, 4))
+        self._gap_csv_btn = ctk.CTkButton(
+            review_row, text="⬇  CSV", height=34, width=90,
+            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+            font=(UI_FONT, 12, "bold"),
+            command=self._export_gap_csv, state="disabled")
+        self._gap_csv_btn.pack(side="left", padx=(0, 4))
+        _help_btn(review_row,
+                  "Item-by-item reconciliation of the last restore, one tab "
+                  "per element (Exclusions, Blocklist, Firewall Rules, …). "
+                  "Each tab lists every item that WAS restored and every item "
+                  "that was NOT — by name, with the reason. Export as Excel "
+                  "(one worksheet per element), tabbed HTML or JSON — or "
+                  "⬇ CSV for one flat, filterable row per item."
+                  ).pack(side="left", padx=(0, 12))
         self._rollback_btn = ctk.CTkButton(
             review_row, text="↩  Rollback", height=34, width=120,
             fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
@@ -4251,6 +4443,7 @@ class RestorePage(ctk.CTkFrame):
         self._timer_running = False
         self._timer_start = 0.0
         self._operation_log = []
+        self._item_ledger = []  # flat per-ITEM outcome ledger (Gap Report)
         self._cancelled = False
         self._skip_element = False
         self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
@@ -4986,7 +5179,7 @@ class RestorePage(ctk.CTkFrame):
         self.app.set_busy(running, allow=(
             self._start_btn, self._auto_btn, self._resume_btn,
             self._stop_btn, self._skip_btn, self._export_btn,
-            self._explain_btn))
+            self._explain_btn, self._gap_btn, self._gap_csv_btn))
         if running:
             self._start_btn.configure(state="disabled")
             self._auto_btn.configure(state="disabled")
@@ -4995,6 +5188,8 @@ class RestorePage(ctk.CTkFrame):
             self._skip_btn.configure(state="normal", text=_SKIP_DEFAULT)
             self._export_btn.configure(state="disabled")
             self._explain_btn.configure(state="disabled")
+            self._gap_btn.configure(state="disabled")
+            self._gap_csv_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
                                         text_color=INFO)
         else:
@@ -5009,6 +5204,10 @@ class RestorePage(ctk.CTkFrame):
                 for n in getattr(self, "_report_nodes", []))
             self._explain_btn.configure(
                 state="normal" if has_failures else "disabled")
+            gap_state = ("normal" if getattr(self, "_item_ledger", [])
+                         else "disabled")
+            self._gap_btn.configure(state=gap_state)
+            self._gap_csv_btn.configure(state=gap_state)
             # enable Resume if the run was incomplete (cancelled / had errors)
             cp = getattr(self, "_checkpoint", {})
             has_remaining = any(
@@ -5175,6 +5374,10 @@ class RestorePage(ctk.CTkFrame):
         # the "Explain Errors" issues report instead of only the verbose log.
         self._resolve_issues: dict = {}
         self._report_nodes = []   # structured per-node report data
+        # One row per ITEM the restore touched — the counts in the results
+        # table ('43 new') can't answer "which 2 of my 45 exclusions are
+        # missing?". The Gap Report groups these into per-element tabs.
+        self._item_ledger = []
         self._report_meta = {     # report metadata
             "source_url": "",
             "dest_url": api.base_url,
@@ -5346,6 +5549,10 @@ class RestorePage(ctk.CTkFrame):
         elements = meta.get("elements", []) or []
         elapsed = meta.get("elapsed", "?")
         clean = total_failed == 0
+        # Everything the run touched but did NOT put on the destination —
+        # failures, scope skips, inventory-only and un-migratable settings.
+        gap = self._build_gap_report()
+        not_migrated = gap.get("totals", {}).get("missing", 0)
 
         def _fmt_ts(iso: str) -> str:
             if not iso:
@@ -5388,6 +5595,10 @@ class RestorePage(ctk.CTkFrame):
             ("Failures",
              "None 🎉" if clean
              else f"{total_failed} item(s) across {error_nodes} node(s)"),
+            ("Not migrated",
+             "Nothing — everything landed" if not not_migrated
+             else f"{not_migrated} item(s) — open the Gap Report for the "
+                  f"exact list"),
             ("Started", _fmt_ts(meta.get("start_time", ""))),
             ("Finished", _fmt_ts(meta.get("end_time", ""))),
         ]
@@ -5438,6 +5649,17 @@ class RestorePage(ctk.CTkFrame):
             btns, text="📄  Export Log", width=130, height=38,
             fg_color=BRAND, hover_color=BRAND_HOVER,
             command=self._export).pack(side="right", padx=(8, 0))
+        if getattr(self, "_item_ledger", []):
+            ctk.CTkButton(
+                btns, text="⬇ CSV", width=80, height=38,
+                fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
+                command=self._export_gap_csv).pack(side="right", padx=(8, 0))
+            ctk.CTkButton(
+                btns, text="🧩  Gap Report", width=140, height=38,
+                fg_color=WARN if not_migrated else NEUTRAL,
+                hover_color=WARN_HOVER if not_migrated else NEUTRAL_HOVER,
+                command=self._export_gap_report).pack(
+                side="right", padx=(8, 0))
         if total_failed:
             ctk.CTkButton(
                 btns, text="🛟  Explain Errors", width=150, height=38,
@@ -5575,6 +5797,10 @@ class RestorePage(ctk.CTkFrame):
                 ui(lambda n=nid, s=state: pt.set_skipped(n, s))
                 skipped += 1
                 self._checkpoint[i] = "skipped"
+                self._ledger_add(
+                    npath, ntype, "(node)", npath, "skipped",
+                    f"source {ntype} is {state} — nothing from this scope "
+                    f"was restored")
                 continue
 
             # ── level + name filter ──
@@ -5633,6 +5859,10 @@ class RestorePage(ctk.CTkFrame):
                 ui(lambda n=nid, r=reason: pt.set_error(n, r))
                 skipped += 1
                 self._checkpoint[i] = "error"
+                self._ledger_add(
+                    npath, ntype, "(node)", npath, "failed",
+                    f"destination {ntype} could not be resolved/created "
+                    f"({reason}) — NOTHING from this scope was restored")
                 continue
 
             # ── Diff-panel: snapshot destination BEFORE we write to it ──
@@ -5767,6 +5997,21 @@ class RestorePage(ctk.CTkFrame):
             # site rename the API rejected) in the issues report.
             failed_items.extend(self._resolve_issues.pop(npath, []))
 
+            def _rec(element, item, status, reason="", kind="", name=None):
+                """Record ONE item's outcome for the Migration Gap Report.
+
+                Counts alone ('43 new') never told the operator WHICH two of
+                45 exclusions are missing, so every create/skip path writes a
+                named row here. `status` is one of the export_utils
+                GAP_STATUSES: created / exists / failed / skipped / manual /
+                not attempted."""
+                if name is None:
+                    name = (_item_id(item, element)
+                            if isinstance(item, dict)
+                            else str(item or element))
+                self._ledger_add(npath, ntype, element, name, status,
+                                 reason, kind)
+
             # _is_exists_error / _err_detail / _item_id are now module-level
             # helpers (defined near _scope) — hoisted out of this 3k-line
             # method so they can be unit-tested in isolation.
@@ -5778,9 +6023,12 @@ class RestorePage(ctk.CTkFrame):
                 try:
                     fn(*a, **kw)
                     results.append((label, "ok"))
+                    _rec(label, None, "created", name=label)
                 except Exception as exc:
                     if _is_exists_error(exc):
                         results.append((label, "exists"))
+                        _rec(label, None, "exists",
+                             "already present on the destination", name=label)
                     else:
                         detail = _err_detail(exc)
                         results.append((label, f"ERR: {detail}"))
@@ -5789,6 +6037,7 @@ class RestorePage(ctk.CTkFrame):
                             "name": label,
                             "error": str(detail)[:120],
                         })
+                        _rec(label, None, "failed", detail, name=label)
                         self._operation_log.append(
                             f"    ✗ {label}: {exc}")
                 # A single API call can't be interrupted mid-flight, so a Skip
@@ -5818,6 +6067,11 @@ class RestorePage(ctk.CTkFrame):
                         self._operation_log.append(
                             f"    ⏭ {label}: skipped {skipped_remaining} "
                             f"remaining item(s) by user request")
+                        why = ("run cancelled before this item"
+                               if self._cancelled
+                               else "element skipped by operator")
+                        for left in item_list[idx - 1:]:
+                            _rec(label, left, "skipped", why)
                         self._skip_element = False
                         ui(lambda: self._skip_btn.configure(state="normal"))
                         break
@@ -5827,9 +6081,12 @@ class RestorePage(ctk.CTkFrame):
                     try:
                         fn(item)
                         ok += 1
+                        _rec(label, item, "created")
                     except Exception as exc:
                         if _is_exists_error(exc):
                             skip += 1
+                            _rec(label, item, "exists",
+                                 "already present on the destination")
                         else:
                             fail += 1
                             # Persist the full error so the classifier sees
@@ -5842,6 +6099,7 @@ class RestorePage(ctk.CTkFrame):
                                 "name": _item_id(item, label),
                                 "error": full_err[:500],
                             })
+                            _rec(label, item, "failed", full_err)
                 total = ok + skip + fail
                 if total:
                     parts = []
@@ -5905,10 +6163,15 @@ class RestorePage(ctk.CTkFrame):
                         "while inheriting", "marking scope", "decoupled"))
                     if not inheriting:
                         raise
+                    # Firewall / NQ express "has its own settings" as
+                    # inheritSettings=false; Device Control as
+                    # inherits=false. Try both, and the pair.
                     for breaker in ({"inheritedFrom": None},
                                     {"inherits": False},
+                                    {"inheritSettings": False},
                                     {"inheritedFrom": None,
-                                     "inherits": False}):
+                                     "inherits": False,
+                                     "inheritSettings": False}):
                         try:
                             resp = setter(scope, {**cfg_data, **breaker})
                             self._operation_log.append(
@@ -5931,6 +6194,12 @@ class RestorePage(ctk.CTkFrame):
                 backup never captured them. Always leave a row, and say
                 whether the backup even holds the data."""
                 results.append((label, "0" if captured else "0 (not in backup)"))
+                _rec(label, None, "empty" if captured else "not attempted",
+                     "the backup holds no items of this type for this scope"
+                     if captured else
+                     "NOT CAPTURED by the backup — nothing to restore "
+                     "(re-run the backup with a build that supports it)",
+                     name=f"({label} — nothing restored)")
 
             # ── Policy ──
             if "policy" in elements and data.get("policy"):
@@ -5963,39 +6232,52 @@ class RestorePage(ctk.CTkFrame):
                 self._set_skip_label("excl")
                 e_ok = e_skip = e_fail = 0
                 e_last_err = ""
-                for etype, items in data["exclusions"].items():
+                # Flattened (type, item) so an interrupted run can name every
+                # exclusion it never got to, instead of only counting them.
+                _excl_queue = [(etype, item)
+                               for etype, items in data["exclusions"].items()
+                               for item in (items or [])]
+                for _e_idx, (etype, item) in enumerate(_excl_queue):
                     if self._skip_element or self._cancelled:
+                        _why = ("run cancelled before this item"
+                                if self._cancelled
+                                else "element skipped by operator")
+                        for _et, _left in _excl_queue[_e_idx:]:
+                            _rec("excl", _left, "skipped", _why, kind=_et)
                         break
-                    for item in (items or []):
-                        if self._skip_element or self._cancelled:
-                            break
-                        try:
-                            payload = _whitelist(item, _EXCL_FIELDS)
-                            # Scrub invisible bidi/zero-width chars that
-                            # the destination validator rejects. Apply
-                            # to free-text fields only — the type-enum
-                            # fields are already controlled.
-                            for f in ("value", "description"):
-                                if isinstance(payload.get(f), str):
-                                    payload[f] = _strip_non_printable(
-                                        payload[f])
-                            api.create_exclusion(scope, payload)
-                            e_ok += 1
-                        except Exception as exc:
-                            if _is_exists_error(exc):
-                                e_skip += 1
-                            else:
-                                e_fail += 1
-                                # Keep full detail in the failure record so
-                                # the error-classifier can match on it; the
-                                # console line gets the short version.
-                                full_err = _err_detail(exc)
-                                e_last_err = full_err[:80]
-                                failed_items.append({
-                                    "element": f"excl/{etype}",
-                                    "name": item.get("value", "?")[:80],
-                                    "error": full_err[:500],
-                                })
+                    try:
+                        payload = _whitelist(item, _EXCL_FIELDS)
+                        # Scrub invisible bidi/zero-width chars that
+                        # the destination validator rejects. Apply
+                        # to free-text fields only — the type-enum
+                        # fields are already controlled.
+                        for f in ("value", "description"):
+                            if isinstance(payload.get(f), str):
+                                payload[f] = _strip_non_printable(
+                                    payload[f])
+                        api.create_exclusion(scope, payload)
+                        e_ok += 1
+                        _rec("excl", item, "created", kind=etype)
+                    except Exception as exc:
+                        if _is_exists_error(exc):
+                            e_skip += 1
+                            _rec("excl", item, "exists",
+                                 "already present on the destination",
+                                 kind=etype)
+                        else:
+                            e_fail += 1
+                            # Keep full detail in the failure record so
+                            # the error-classifier can match on it; the
+                            # console line gets the short version.
+                            full_err = _err_detail(exc)
+                            e_last_err = full_err[:80]
+                            failed_items.append({
+                                "element": f"excl/{etype}",
+                                "name": str(item.get("value", "?"))[:80],
+                                "error": full_err[:500],
+                            })
+                            _rec("excl", item, "failed", full_err,
+                                 kind=etype)
                 _skip_reset("excl")
                 _summarize("excl", e_ok, e_skip, e_fail, e_last_err)
 
@@ -6045,9 +6327,12 @@ class RestorePage(ctk.CTkFrame):
                             payload["modeType"] = item["modeType"]
                         api.create_unified_exclusion(ue_filter, payload)
                         u_ok += 1
+                        _rec("unified-excl", item, "created")
                     except Exception as exc:
                         if _is_exists_error(exc):
                             u_skip += 1
+                            _rec("unified-excl", item, "exists",
+                                 "already present on the destination")
                         else:
                             u_fail += 1
                             full_err = _err_detail(exc)
@@ -6059,6 +6344,14 @@ class RestorePage(ctk.CTkFrame):
                                          or item.get("value", "?"))[:80],
                                 "error": full_err[:500],
                             })
+                            _rec("unified-excl", item, "failed", full_err)
+                if self._skip_element or self._cancelled:
+                    _u_done = u_ok + u_skip + u_fail
+                    for _left in data["unified_exclusions"][_u_done:]:
+                        _rec("unified-excl", _left, "skipped",
+                             "run cancelled before this item"
+                             if self._cancelled
+                             else "element skipped by operator")
                 _skip_reset("unified-excl")
                 _summarize("unified-excl", u_ok, u_skip, u_fail, u_last_err)
 
@@ -6075,11 +6368,17 @@ class RestorePage(ctk.CTkFrame):
             fw = data.get("firewall", {})
             if "firewall_config" in elements and (fw.get("config") or data.get("firewall_config")):
                 fw_cfg = fw.get("config") or data.get("firewall_config")
-                if ntype == "group" and _scope_inherits_config(node, fw_cfg):
+                if ntype != "global" and _scope_inherits_config(node, fw_cfg):
                     self._operation_log.append(
-                        "  ↻ fw-config skipped at group scope — source group "
-                        "inherits from parent (destination already inherits)")
+                        f"  ↻ fw-config skipped at {ntype} scope — source "
+                        f"{ntype} inherits its firewall settings from its "
+                        f"parent (destination inherits them too)")
                     results.append(("fw-cfg", "inherited"))
+                    _rec("fw-cfg", None, "inherited",
+                         f"source {ntype} inherits its firewall settings "
+                         f"from the parent scope — the destination inherits "
+                         f"them too, so nothing needed writing",
+                         name="fw-cfg")
                 else:
                     _r("fw-cfg", _set_cfg_decoupled,
                        api.set_firewall_config, fw_cfg)
@@ -6091,8 +6390,17 @@ class RestorePage(ctk.CTkFrame):
                 # restores (e.g. the Account level is unchecked, yet the
                 # inherited account firewall rules still get re-created at
                 # the site). Mirrors the Device Control scope filter below.
+                _fw_all = fw_r
                 _fw_inherited = len(fw_r)
                 fw_r = _rules_for_scope(fw_r, ntype)
+                _fw_kept = {id(r) for r in fw_r}
+                for _r_drop in _fw_all:
+                    if id(_r_drop) not in _fw_kept:
+                        _rec("fw-rules", _r_drop, "inherited",
+                             f"rule belongs to "
+                             f"'{_r_drop.get('scope', '?')}' scope, not this "
+                             f"{ntype} — it is inherited here and is "
+                             f"restored with its own scope")
                 if not fw_r:
                     log(f"  fw-rules: 0 rules at {ntype} scope "
                         f"({_fw_inherited} inherited rules skipped)")
@@ -6128,9 +6436,12 @@ class RestorePage(ctk.CTkFrame):
                         if new_id:
                             new_fw_ids.append(new_id)
                         fw_ok += 1
+                        _rec("fw-rules", rule, "created")
                     except Exception as exc:
                         if _is_exists_error(exc):
                             fw_skip += 1
+                            _rec("fw-rules", rule, "exists",
+                                 "already present on the destination")
                             continue
                         # Cross-console location IDs never match. When
                         # S1 says `Invalid locations for this scope`,
@@ -6157,6 +6468,11 @@ class RestorePage(ctk.CTkFrame):
                                     new_fw_ids.append(new_id)
                                 fw_ok += 1
                                 fw_loc_stripped += 1
+                                _rec("fw-rules", rule, "created",
+                                     "created WITHOUT its original location "
+                                     "binding (source location IDs do not "
+                                     "exist on this destination) — re-attach "
+                                     "the location manually")
                                 continue
                             except Exception as exc2:
                                 exc = exc2  # fall through to fail branch
@@ -6168,6 +6484,13 @@ class RestorePage(ctk.CTkFrame):
                             "name": rule.get("name", "?")[:80],
                             "error": full_err[:500],
                         })
+                        _rec("fw-rules", rule, "failed", full_err)
+                if self._skip_element or self._cancelled:
+                    for _left in sorted_fw[fw_ok + fw_skip + fw_fail:]:
+                        _rec("fw-rules", _left, "skipped",
+                             "run cancelled before this rule"
+                             if self._cancelled
+                             else "element skipped by operator")
                 if fw_loc_stripped:
                     self._operation_log.append(
                         f"    ⚠ fw-rules: {fw_loc_stripped} rule(s) "
@@ -6185,17 +6508,38 @@ class RestorePage(ctk.CTkFrame):
             # ── NQ ──
             nq = data.get("networkQuarantine", {})
             if "nq_config" in elements and nq.get("config"):
-                if ntype == "group" and _scope_inherits_config(node, nq["config"]):
+                if ntype != "global" and _scope_inherits_config(node, nq["config"]):
                     self._operation_log.append(
-                        "  ↻ nq-config skipped at group scope — source group "
-                        "inherits from parent (destination already inherits)")
+                        f"  ↻ nq-config skipped at {ntype} scope — source "
+                        f"{ntype} inherits its network-quarantine settings "
+                        f"from its parent (destination inherits them too)")
                     results.append(("nq-cfg", "inherited"))
+                    _rec("nq-cfg", None, "inherited",
+                         f"source {ntype} inherits its network-quarantine "
+                         f"settings from the parent scope — the destination "
+                         f"inherits them too", name="nq-cfg")
                 else:
                     _r("nq-cfg", _set_cfg_decoupled,
                        api.set_nq_config, nq["config"])
             if "nq_rules" in elements and nq.get("rules"):
-                _r_bulk("nq-rules", nq["rules"],
-                        lambda rule: api.create_nq_rule(scope, _clean_for_restore(rule)))
+                # Same inherited-rule trap as firewall rules: the API hands
+                # back the parent scopes' rules at every level.
+                _nq_all = nq["rules"]
+                _nq_own = _nq_rules_for_scope(_nq_all, ntype)
+                _nq_kept = {id(r) for r in _nq_own}
+                for _nq_drop in _nq_all:
+                    if id(_nq_drop) not in _nq_kept:
+                        _rec("nq-rules", _nq_drop, "inherited",
+                             f"rule belongs to "
+                             f"'{_nq_drop.get('scope', '?')}' scope, not "
+                             f"this {ntype} — it is inherited here and is "
+                             f"restored with its own scope")
+                if _nq_own:
+                    _r_bulk("nq-rules", _nq_own,
+                            lambda rule: api.create_nq_rule(
+                                scope, _clean_for_restore(rule)))
+                else:
+                    _nothing("nq-rules")
             elif "nq_rules" in elements:
                 _nothing("nq-rules", "rules" in nq)
 
@@ -6203,11 +6547,16 @@ class RestorePage(ctk.CTkFrame):
             dc = data.get("deviceControl", {})
             if "device_control_config" in elements and (dc.get("config") or data.get("device_control_config")):
                 dc_cfg = dc.get("config") or data.get("device_control_config")
-                if ntype == "group" and _scope_inherits_config(node, dc_cfg):
+                if ntype != "global" and _scope_inherits_config(node, dc_cfg):
                     self._operation_log.append(
-                        "  ↻ dc-config skipped at group scope — source group "
-                        "inherits from parent (destination already inherits)")
+                        f"  ↻ dc-config skipped at {ntype} scope — source "
+                        f"{ntype} inherits its device-control settings from "
+                        f"its parent (destination inherits them too)")
                     results.append(("dc-cfg", "inherited"))
+                    _rec("dc-cfg", None, "inherited",
+                         f"source {ntype} inherits its device-control "
+                         f"settings from the parent scope — the destination "
+                         f"inherits them too", name="dc-cfg")
                 else:
                     _r("dc-cfg", _set_cfg_decoupled,
                        api.set_device_control_config, dc_cfg)
@@ -6218,6 +6567,14 @@ class RestorePage(ctk.CTkFrame):
                 # filter account-scoped rules appear inside site/group nodes and
                 # would be incorrectly re-created (or silently fail) at the wrong scope.
                 dc_r_scoped = _rules_for_scope(dc_r, ntype)
+                _dc_kept = {id(r) for r in dc_r_scoped}
+                for _r_drop in dc_r:
+                    if id(_r_drop) not in _dc_kept:
+                        _rec("dc-rules", _r_drop, "inherited",
+                             f"rule belongs to "
+                             f"'{_r_drop.get('scope', '?')}' scope, not this "
+                             f"{ntype} — it is inherited here and is "
+                             f"restored with its own scope")
                 if not dc_r_scoped:
                     log(f"  dc-rules: 0 rules at {ntype} scope "
                         f"({len(dc_r)} inherited rules skipped)")
@@ -6239,9 +6596,12 @@ class RestorePage(ctk.CTkFrame):
                             if new_id:
                                 new_dc_ids.append(new_id)
                             dc_ok += 1
+                            _rec("dc-rules", rule, "created")
                         except Exception as exc:
                             if _is_exists_error(exc):
                                 dc_skip += 1
+                                _rec("dc-rules", rule, "exists",
+                                     "already present on the destination")
                             else:
                                 dc_fail += 1
                                 full_err = _err_detail(exc)
@@ -6254,6 +6614,13 @@ class RestorePage(ctk.CTkFrame):
                                     "name": str(rname)[:80],
                                     "error": full_err[:500],
                                 })
+                                _rec("dc-rules", rule, "failed", full_err)
+                    if self._skip_element or self._cancelled:
+                        for _left in sorted_dc[dc_ok + dc_skip + dc_fail:]:
+                            _rec("dc-rules", _left, "skipped",
+                                 "run cancelled before this rule"
+                                 if self._cancelled
+                                 else "element skipped by operator")
                     _skip_reset("dc-rules")
                     parts = []
                     if dc_ok:   parts.append(f"{dc_ok} new")
@@ -6293,10 +6660,21 @@ class RestorePage(ctk.CTkFrame):
                 missing without any error (Joshua Tooley, 2026-08)."""
                 items = items or []
                 own = _tags_for_scope(items, ntype)
+                _own_ids = {id(t) for t in own}
+                for _t in items:
+                    if id(_t) not in _own_ids:
+                        _rec(label, _t, "inherited",
+                             f"tag is owned by another scope and only "
+                             f"inherited at this {ntype} — it is restored "
+                             f"with the scope that owns it")
                 if not own:
                     if items:
                         log(f"  {label}: 0 tags at {ntype} scope "
                             f"({len(items)} inherited skipped)")
+                    else:
+                        _rec(label, None, "empty",
+                             "no tags of this type in the backup for this "
+                             "scope", name=f"({label} — nothing restored)")
                     results.append((label, "0"))
                     return
                 _r_bulk(label, own, lambda t: _create_tag(t, tag_type))
@@ -6320,6 +6698,12 @@ class RestorePage(ctk.CTkFrame):
                 # through the Tag Manager API.
                 ep_tags = cfg.get("endpointTags") or []
                 own_ep = _endpoint_tags_for_scope(ep_tags, ntype)
+                _own_ep_ids = {id(t) for t in own_ep}
+                for _t in ep_tags:
+                    if id(_t) not in _own_ep_ids:
+                        _rec("ep-tags", _t, "inherited",
+                             f"endpoint tag is owned by another scope and "
+                             f"only inherited at this {ntype}")
                 if own_ep:
                     _r_bulk("ep-tags", own_ep,
                             lambda t: api.create_endpoint_tag(
@@ -6328,6 +6712,11 @@ class RestorePage(ctk.CTkFrame):
                     if ep_tags:
                         log(f"  ep-tags: 0 tags at {ntype} scope "
                             f"({len(ep_tags)} inherited skipped)")
+                    else:
+                        _rec("ep-tags", None, "empty",
+                             "no key/value endpoint tags in the backup for "
+                             "this scope",
+                             name="(ep-tags — nothing restored)")
                     results.append(("ep-tags", "0"))
 
             # ── STAR ──
@@ -6339,8 +6728,16 @@ class RestorePage(ctk.CTkFrame):
                 # every child site (reported by DJ Wilhelm, 2026-07). Mirrors
                 # the firewall/device-control scope filters above, and also
                 # repairs OLD backups that captured the inherited rules.
+                _star_all = star
                 _star_inherited = len(star)
                 star = _star_rules_for_scope(star, ntype)
+                _star_kept = {id(r) for r in star}
+                for _s_drop in _star_all:
+                    if id(_s_drop) not in _star_kept:
+                        _rec("star", _s_drop, "inherited",
+                             f"rule is owned by another scope and only "
+                             f"inherited at this {ntype} — restoring it here "
+                             f"would duplicate it at every child scope")
                 if not star:
                     log(f"  star: 0 rules at {ntype} scope "
                         f"({_star_inherited} inherited rules skipped)")
@@ -6371,8 +6768,18 @@ class RestorePage(ctk.CTkFrame):
                 # Repair OLD backups, which captured the descendant overrides
                 # the API returns at every level. Without this an account
                 # restore re-creates its groups' overrides at account scope.
+                _ovr_all = ovr
                 _ovr_seen = len(ovr)
                 ovr = _overrides_for_scope(ovr, ntype)
+                _ovr_kept = {id(o) for o in ovr}
+                for _o_drop in _ovr_all:
+                    if id(_o_drop) not in _ovr_kept:
+                        _rec("overrides", _o_drop, "inherited",
+                             f"override belongs to "
+                             f"'{_o_drop.get('scope', '?')}' scope, not this "
+                             f"{ntype} — it is restored with the node that "
+                             f"owns it (if that scope is part of this "
+                             f"migration)")
                 _ovr_skipped = _ovr_seen - len(ovr)
                 if _ovr_skipped:
                     # Log partial skips too, not just the all-dropped case:
@@ -6464,12 +6871,18 @@ class RestorePage(ctk.CTkFrame):
                     api.set_smtp_settings(scope,
                                           _clean_for_restore(stg["smtp"]))
                     results.append(("set-smtp", "ok"))
+                    _rec("set-smtp", None, "created", name="SMTP settings")
                 except Exception as exc:
                     detail = _err_detail(exc).lower()
                     if "password" in detail and "missing" in detail:
                         results.append(("set-smtp",
                                         "skipped (password is write-only"
                                         " — re-enter manually)"))
+                        _rec("set-smtp", None, "manual",
+                             "the API never returns the SMTP password, so the "
+                             "destination rejects the write — re-enter the "
+                             "relay password in Settings → SMTP",
+                             name="SMTP settings")
                         self._operation_log.append(
                             "    ℹ SMTP: password not migrated (API "
                             "never returns it). Re-enter in destination "
@@ -6482,6 +6895,8 @@ class RestorePage(ctk.CTkFrame):
                             "name": "set-smtp",
                             "error": _err_detail(exc)[:500],
                         })
+                        _rec("set-smtp", None, "failed", _err_detail(exc),
+                             name="SMTP settings")
 
             # ── SSO (handled separately) ──
             # SSO is tenant-specific and the most failure-prone setting: the
@@ -6514,9 +6929,15 @@ class RestorePage(ctk.CTkFrame):
                 try:
                     _set_sso(stg["sso"])
                     results.append(("set-sso", "ok"))
+                    _rec("set-sso", None, "created", name="SSO/SAML settings")
                 except Exception as exc:
                     detail = _err_detail(exc)
                     results.append(("set-sso", "skipped"))
+                    _rec("set-sso", None, "manual",
+                         f"destination rejected the source tenant's SAML "
+                         f"config ({detail[:200]}); the destination's own SSO "
+                         f"was left untouched — configure SSO manually",
+                         name="SSO/SAML settings")
                     self._operation_log.append(
                         f"  ⊘ SSO not migrated — destination rejected it "
                         f"({detail[:100]}). Keeping the destination's own "
@@ -6538,14 +6959,36 @@ class RestorePage(ctk.CTkFrame):
                         break
                     batch.append(ioc)
                     if len(batch) >= 100:
-                        try: api.upsert_threat_intel(scope, batch); ok += len(batch)
-                        except Exception: fail += len(batch)
+                        try:
+                            api.upsert_threat_intel(scope, batch)
+                            ok += len(batch)
+                            _rec("threat-intel", None, "created",
+                                 name=f"{len(batch)} indicator(s) — batch "
+                                      f"ending {_item_id(batch[-1], 'ioc')}")
+                        except Exception as _ti_exc:
+                            fail += len(batch)
+                            for _ioc in batch:
+                                _rec("threat-intel", _ioc, "failed",
+                                     _err_detail(_ti_exc))
                         batch = []
                 # Flush the final partial batch only if we weren't asked to
                 # skip/stop mid-stream (an interrupted run leaves it unsent).
                 if batch and not (self._skip_element or self._cancelled):
-                    try: api.upsert_threat_intel(scope, batch); ok += len(batch)
-                    except Exception: fail += len(batch)
+                    try:
+                        api.upsert_threat_intel(scope, batch)
+                        ok += len(batch)
+                        _rec("threat-intel", None, "created",
+                             name=f"{len(batch)} indicator(s) — final batch")
+                    except Exception as _ti_exc:
+                        fail += len(batch)
+                        for _ioc in batch:
+                            _rec("threat-intel", _ioc, "failed",
+                                 _err_detail(_ti_exc))
+                elif batch:
+                    for _ioc in batch:
+                        _rec("threat-intel", _ioc, "skipped",
+                             "run cancelled/skipped before this batch was "
+                             "sent")
                 _skip_reset("threat-intel")
                 results.append(("threat-intel", f"{ok}/{ok+fail}"))
 
@@ -6572,6 +7015,17 @@ class RestorePage(ctk.CTkFrame):
             # identifiers, so re-posting it returns "At least one identifier
             # must be defined". Skip both.
             locs = data.get("locations") or []
+
+            def _skip_group_locations(items):
+                self._operation_log.append(
+                    "  ↻ Locations skipped at group scope "
+                    "(S1 locations are site/account-only)")
+                for loc in items:
+                    _rec("locations", loc, "inherited",
+                         "SentinelOne locations exist only at site/account "
+                         "scope — this group's locations are restored with "
+                         "its parent site")
+
             if "locations" in elements and locs and ntype != "group":
                 def _has_identifier(loc: dict) -> bool:
                     # S1 location identifiers: IP / range, MAC, DNS suffix,
@@ -6586,6 +7040,12 @@ class RestorePage(ctk.CTkFrame):
                     return False
 
                 real_locs = [l for l in locs if _has_identifier(l)]
+                for _l in locs:
+                    if not _has_identifier(_l):
+                        _rec("locations", _l, "skipped",
+                             "auto-created location with no identifiers "
+                             "(e.g. 'Fallback') — SentinelOne creates it on "
+                             "the destination by itself")
                 skipped = len(locs) - len(real_locs)
                 if skipped:
                     self._operation_log.append(
@@ -6596,10 +7056,8 @@ class RestorePage(ctk.CTkFrame):
                             lambda l: api.create_location(
                                 scope, _clean_for_restore(l)))
             elif "locations" in elements and locs and ntype == "group":
-                # Quiet skip — locations don't exist at group scope on S1.
-                self._operation_log.append(
-                    f"  ↻ Locations skipped at group scope "
-                    f"(S1 locations are site/account-only)")
+                # Quiet skip — locations are site/account-only on S1.
+                _skip_group_locations(locs)
             elif "locations" in elements and ntype != "group":
                 _nothing("locations", "locations" in data)
 
@@ -6608,13 +7066,27 @@ class RestorePage(ctk.CTkFrame):
             # these have to be recreated by hand on the destination.
             if "webhooks" in elements:
                 results.append(("webhooks", "manual"))
+            if "webhooks" in elements and ntype != "group":
+                _rec("webhooks", None, "manual",
+                     "the SentinelOne v2.1 API exposes no webhook endpoint — "
+                     "webhooks cannot be read or written by any tool and must "
+                     "be re-created by hand on the destination",
+                     name="(all webhooks at this scope)")
 
             # ── Scheduled reports ──
             sched = data.get("scheduledReports") or []
             if "scheduled_reports" in elements and sched:
-                _r_bulk("sched-rep", sched,
-                        lambda r: api.create_scheduled_report(
-                            scope, _clean_for_restore(r)))
+                def _create_sched_report(rep):
+                    payload, filled = _sched_report_payload(rep)
+                    if filled:
+                        self._operation_log.append(
+                            f"    ↳ sched-rep '{rep.get('name', '?')}': "
+                            f"{', '.join(filled)} null on the source but "
+                            f"rejected as null by the create API — sent as "
+                            f"{', '.join(f'{k}={_SCHED_REPORT_DEFAULTS[k]!r}' for k in filled)}")
+                    return api.create_scheduled_report(scope, payload)
+
+                _r_bulk("sched-rep", sched, _create_sched_report)
             elif "scheduled_reports" in elements:
                 _nothing("sched-rep", "scheduledReports" in data)
 
@@ -6629,6 +7101,13 @@ class RestorePage(ctk.CTkFrame):
                     f"  ℹ Marketplace apps to re-install manually "
                     f"({len(mkt)}): {names}{more}")
                 results.append(("mkt-apps", f"{len(mkt)} listed"))
+                for _app in mkt:
+                    _rec("mkt-apps", _app, "manual",
+                         "marketplace applications carry per-tenant "
+                         "credentials and cannot be created through the API — "
+                         "re-install and re-authorise on the destination",
+                         name=(_app.get("name")
+                               or _app.get("applicationName") or "?"))
 
             # ── Remote Scripts library (inventory, log only) ──
             # The script body lives in per-tenant cloud storage and is not in
@@ -6644,6 +7123,13 @@ class RestorePage(ctk.CTkFrame):
                     f"  ℹ Remote scripts to re-upload manually "
                     f"({len(scripts)}): {names}{more}")
                 results.append(("scripts", f"{len(scripts)} listed"))
+                for _sc in scripts:
+                    _rec("scripts", _sc, "manual",
+                         "the script body lives in per-tenant cloud storage "
+                         "and is not part of the backup — re-upload the "
+                         "script on the destination",
+                         name=(_sc.get("scriptName")
+                               or _sc.get("name") or "?"))
 
             roles = data.get("roles") or []
             if "roles" in elements and roles and ntype == "account":
@@ -6664,9 +7150,19 @@ class RestorePage(ctk.CTkFrame):
                     # endpoints flag them via `predefined` OR `predefinedRole`.
                     if r.get("predefined") is True or r.get("predefinedRole") is True:
                         skipped_predef += 1
+                        _rec("roles", r, "inherited",
+                             "predefined SentinelOne role — already exists on "
+                             "every console, nothing to create")
                         continue
                     nm = (r.get("name") or "").strip().lower()
-                    if not nm or nm in existing_roles:
+                    if not nm:
+                        _rec("roles", r, "skipped",
+                             "role has no name in the backup")
+                        continue
+                    if nm in existing_roles:
+                        _rec("roles", r, "exists",
+                             "a role with this name already exists on the "
+                             "destination account — left untouched")
                         continue
                     creatable_roles.append(r)
                 if skipped_predef:
@@ -6687,10 +7183,32 @@ class RestorePage(ctk.CTkFrame):
                         self._operation_log.append(
                             f"  ⚠ Role template unavailable ({e}); creating "
                             f"roles with name/description only")
-                    _r_bulk("roles", creatable_roles,
-                            lambda r: api.create_role(
-                                _build_role_payload(r, role_template),
-                                scope_filter))
+
+                    def _create_role(r):
+                        payload = _build_role_payload(r, role_template)
+                        try:
+                            return api.create_role(payload, scope_filter)
+                        except Exception as exc:
+                            trimmed, dropped = _strip_unknown_fields(
+                                payload, _err_detail(exc))
+                            if not dropped:
+                                raise
+                            resp = api.create_role(trimmed, scope_filter)
+                            self._operation_log.append(
+                                f"    ↳ role '{r.get('name', '?')}': the "
+                                f"destination rejected "
+                                f"{', '.join(dropped)} as an unknown "
+                                f"field, so the role was created WITHOUT "
+                                f"it — set its permissions by hand on the "
+                                f"destination")
+                            cli_log(
+                                f"role '{r.get('name', '?')}' created "
+                                f"without {', '.join(dropped)} — its "
+                                f"permissions need setting by hand",
+                                "warning")
+                            return resp
+
+                    _r_bulk("roles", creatable_roles, _create_role)
 
             # ── Service users (API users) ──
             # These used to be captured for audit only, so a migration that
@@ -6735,9 +7253,14 @@ class RestorePage(ctk.CTkFrame):
                         continue
                     nm = (s.get("name") or "").strip()
                     if not nm:
+                        _rec("svc-users", s, "skipped",
+                             "service user has no name in the backup")
                         continue
                     if nm.lower() in existing_svc:
                         already += 1
+                        _rec("svc-users", s, "exists",
+                             "a service user with this name already exists "
+                             "on the destination — left untouched")
                         continue
                     creatable_svc.append(s)
 
@@ -6802,9 +7325,20 @@ class RestorePage(ctk.CTkFrame):
                     src = str(u.get("source") or u.get("origin") or "").lower()
                     if src and src != "local":
                         skipped_remote += 1  # sso / scim — auto-provisioned
+                        _rec("users", u, "skipped",
+                             f"{src.upper()} user — auto-provisions on first "
+                             f"login once SSO/SCIM works on the destination; "
+                             f"creating it by API is rejected")
                         continue
                     email = (u.get("email") or "").strip()
-                    if not email or email.lower() in existing_emails:
+                    if not email:
+                        _rec("users", u, "skipped",
+                             "user has no email address in the backup")
+                        continue
+                    if email.lower() in existing_emails:
+                        _rec("users", u, "exists",
+                             "a user with this email already exists on the "
+                             "destination account — left untouched")
                         continue
                     migratable.append(u)
 
@@ -6899,14 +7433,40 @@ class RestorePage(ctk.CTkFrame):
             f"Total: {restored} restored, {skipped} skipped (of {total})")
         return restored
 
-    def _record_site_element(self, site_path, label, value):
-        """Fold a post-pass result into the site's already-emitted report row.
+    def _ledger_add(self, node, scope, element, item, status, reason="",
+                    kind=""):
+        """Append one row to the per-item restore ledger.
 
-        The group-ranking pass can only run once every group exists, i.e.
-        after each node has been reported. Without this the outcome lived in
-        the operation log only and never reached the restore report — which
-        is precisely how a 500 on /groups/ranks looked like a clean run
-        (Landeshauptstadt München, 2026-09)."""
+        The restore results table only ever carried counts, so "45 backed
+        up, 43 restored" gave the operator no way to find the missing two.
+        Every create/skip path records a NAMED row here and the Migration
+        Gap Report groups them into one tab per element. `status` must be
+        one of export_utils.GAP_STATUSES."""
+        if not hasattr(self, "_item_ledger"):
+            self._item_ledger = []
+        self._item_ledger.append({
+            "node": str(node or ""),
+            "scope": str(scope or ""),
+            "element": str(element or "other"),
+            "kind": str(kind or ""),
+            "item": str(item or "")[:200],
+            "status": str(status or ""),
+            "reason": str(reason or "")[:500],
+        })
+
+    def _record_site_element(self, site_path, label, value):
+        """Fold a post-pass result into the site's already-emitted report row."""
+
+        # The group-ranking pass can only run once every group exists, i.e.
+        # after each node has been reported. Without this the outcome lived
+        # in the operation log only and never reached the restore report —
+        # which is precisely how a 500 on /groups/ranks looked like a clean
+        # run (Landeshauptstadt München, 2026-09).
+        sval = str(value)
+        self._ledger_add(
+            site_path, "site", label, label,
+            "failed" if sval.startswith("ERR:") else "created",
+            sval if sval.startswith("ERR:") else "")
         want = (site_path or "").rstrip("/")
         for report in reversed(self._report_nodes):
             if report.get("type") != "site":
@@ -7852,6 +8412,54 @@ class RestorePage(ctk.CTkFrame):
             return
         self._generate_restore_report()
 
+    def _build_gap_report(self):
+        """Per-element reconciliation of the last restore run."""
+        from export_utils import build_gap_report
+        return build_gap_report(getattr(self, "_item_ledger", []),
+                                getattr(self, "_report_meta", {}))
+
+    def _gap_default_name(self):
+        cust = (getattr(self, "_report_meta", {}).get("customer")
+                or getattr(self, "_report_meta", {}).get("dest_console") or "")
+        safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(cust)).strip("-")
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        return f"s1-migration-gaps-{safe or 'restore'}-{ts}"
+
+    def _no_ledger(self):
+        """True (and warns) when there is nothing to reconcile yet."""
+        if getattr(self, "_item_ledger", []):
+            return False
+        messagebox.showinfo(
+            "No Restore Data",
+            "Run a restore first — the gap report is built from the "
+            "items the last restore actually touched.")
+        return True
+
+    def _export_gap_report(self):
+        """Save the item-by-item 'what did NOT migrate' document.
+
+        One tab per element (Excel worksheet / HTML tab): every item the
+        restore handled, split into what landed on the destination and what
+        did not — by name, with the reason. Counts alone could never answer
+        "which 2 of my 45 exclusions are missing?"."""
+        from export_utils import export_gap_report
+        if self._no_ledger():
+            return
+        export_gap_report(self._build_gap_report(),
+                          default_name=self._gap_default_name())
+
+    def _export_gap_csv(self):
+        """Same data as the Gap Report, as one flat CSV.
+
+        A CSV has no tabs, so the element becomes a column and every item
+        keeps a yes/NO 'Restored' flag — filter that column to get the
+        missing items on their own."""
+        from export_utils import export_gap_csv
+        if self._no_ledger():
+            return
+        export_gap_csv(self._build_gap_report(),
+                       default_name=self._gap_default_name())
+
     def _show_errors_dialog(self):
         """Open a window that groups every restore failure by error type,
         shows a plain-English explanation, and lets the user copy the
@@ -8329,7 +8937,12 @@ class RestorePage(ctk.CTkFrame):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
         else:
-            report = {"meta": meta, "nodes": nodes, "log": log}
+            # `items` is the per-ITEM ledger that backs the Gap Report — the
+            # only place the exact names of everything that did NOT migrate
+            # are recorded. Ship it with the JSON so a support ticket can be
+            # triaged without asking for a second file.
+            report = {"meta": meta, "nodes": nodes, "log": log,
+                      "items": getattr(self, "_item_ledger", [])}
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, default=str)
         cli_log(f"Restore report exported → {os.path.basename(path)}",

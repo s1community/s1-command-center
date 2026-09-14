@@ -222,7 +222,7 @@ Navigate to **Restore to Dest**:
 | Service Users | ✅ | ✅ | API service accounts |
 | Log Collection Rules | ✅ | ✅ | Log collection configuration |
 | Auto-upgrade Policies | ✅ | ✅ | Agent upgrade policies |
-| Gateways | ✅ | ✅ | Gateway configurations |
+| Gateways | ⛔ | ⛔ | **No API** — `/gateways` 404s at every scope; re-configure management proxies by hand |
 | Group Ranking | ✅ | ✅ | Group priority order per site |
 
 ### Error Handling

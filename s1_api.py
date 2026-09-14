@@ -353,11 +353,19 @@ class S1API:
     def get_saved_filters(self, scope: dict) -> list[dict]:
         return self.get_all("/filters", params=scope)
 
+    # Network Quarantine is a branch of firewall-control, not a resource of
+    # its own: /firewall-control/network-quarantine[/configuration]. The
+    # invented /network-quarantine-control path 404'd on every node, and the
+    # backup recorded that as a missing element (Landeshauptstadt Muenchen,
+    # 2026-09 — 109/109 nodes). Same class as the four paths fixed in 2.2.8.
     def get_nq_rules(self, scope: dict) -> list[dict]:
-        return self.get_all("/network-quarantine-control", params=scope)
+        return self.get_all("/firewall-control/network-quarantine",
+                            params=scope)
 
     def get_nq_config(self, scope: dict) -> dict:
-        return self.get_data("/network-quarantine-control/configuration", params=scope)
+        return self.get_data(
+            "/firewall-control/network-quarantine/configuration",
+            params=scope)
 
     def get_locations(self, scope: dict) -> list[dict]:
         return self.get_all("/locations", params=scope)
@@ -709,17 +717,26 @@ class S1API:
     # ── NQ control: create/set ─────────────────────────────────────────
 
     def create_nq_rule(self, scope: dict, data: dict) -> dict:
-        return self._post("/network-quarantine-control", body={
+        return self._post("/firewall-control/network-quarantine", body={
             "filter": scope, "data": data})
 
     def set_nq_config(self, scope: dict, data: dict) -> dict:
-        return self._put("/network-quarantine-control/configuration", body={
-            "filter": scope, "data": data})
+        return self._put(
+            "/firewall-control/network-quarantine/configuration", body={
+                "filter": scope, "data": data})
 
-    # ── locations: create ──────────────────────────────────────────────
+    # ── management gateways / proxies ──────────────────────────────────
+    # `/gateways` was invented like `/notification-webhooks` before it: it
+    # answers 404 at every scope (Landeshauptstadt Muenchen, 2026-09-03 —
+    # 1 account + 12 sites, every one "ERR 404"), no backup has ever held
+    # a gateway object, and gateways were never restored in the first
+    # place. Saying so beats calling a route that cannot work and
+    # reporting the failure as if the console had none.
 
-    def get_gateways(self, scope: dict) -> list[dict]:
-        return self.get_all("/gateways", params=scope)
+    GATEWAYS_UNSUPPORTED = (
+        "SentinelOne's v2.1 API exposes no gateway endpoint — management "
+        "gateways/proxies are environment-specific and must be configured "
+        "manually on the destination console")
 
     # ── restore: write config to a node ────────────────────────────────
 

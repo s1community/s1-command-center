@@ -34,12 +34,12 @@ faithfully — see notes).
 | 23 | **SMTP Settings** | ✅ | ✅ | Account, Site, Global | Email relay settings |
 | 24 | **Syslog Settings** | ✅ | ✅ | Account, Site, Global | Syslog forwarding |
 | 25 | **AD Settings** | ✅ | ✅ | Account, Site, Global | Active Directory integration |
-| 26 | **Webhooks** | ✅ | ✅ | Account, Site, Global | Notification webhook endpoints |
+| 26 | **Webhooks** | ⛔ | ⛔ | Account, Site, Global | **No API** — no endpoint in the v2.1 spec exposes webhooks; the run reports them for manual re-creation |
 | 27 | **Scheduled Reports** | ✅ | ✅ | Account, Site, Global | Saved/scheduled console reports |
 | 28 | **Roles** | ✅ | ✅ | Account | RBAC custom role definitions |
 | 29 | **Service Users** | ✅ | ✅ | Account | API service accounts |
 | 30 | **Console Users** | ✅ | ✅ | Account | Locally-created users only (SSO/SCIM auto-provision); invitation email sent |
-| 31 | **Gateways** | ✅ | ✅ | Account, Site | Management proxy configurations |
+| 31 | **Gateways** | ⛔ | ⛔ | Account, Site | **No API** — `/gateways` answers 404 at every scope; management proxies are environment-specific and set up by hand |
 | 32 | **Marketplace Apps** | ✅ | 📋 | Account, Global | **Inventory only** — re-install manually (each needs its own OAuth/credentials) |
 | 33 | **Remote Scripts** | ✅ | 📋 | Account, Global | **Inventory only** — script body lives in cloud storage, not in the API payload; listed for manual re-upload |
 
@@ -49,6 +49,7 @@ faithfully — see notes).
 |:------:|---------|
 | ✅ | Re-created on the destination via the API |
 | 📋 | **Inventory only** — backed up and listed in the restore log for manual re-creation (the API cannot faithfully re-create it) |
+| ⛔ | **No API** — SentinelOne exposes no endpoint for it, so it can be neither captured nor written; the run says so instead of reporting an empty result |
 
 ## Scope Legend
 

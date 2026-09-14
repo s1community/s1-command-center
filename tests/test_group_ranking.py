@@ -67,10 +67,12 @@ class Runner:
     _record_site_element = RestorePage._record_site_element
     _apply_group_ranks = RestorePage._apply_group_ranks
     _rerank_groups = RestorePage._rerank_groups
+    _ledger_add = RestorePage._ledger_add
 
     def __init__(self, report_nodes=None):
         self._operation_log = []
         self._report_nodes = report_nodes if report_nodes is not None else []
+        self._item_ledger = []
 
 
 def _site_report(path="Acme/Berlin", summary="star: 0"):
