@@ -25,6 +25,8 @@ from pages import (
     _sched_report_payload,
     _SCHED_REPORT_DEFAULTS,
     _strip_unknown_fields,
+    _excl_key,
+    _ue_rename_payload,
     _nq_rules_for_scope,
     _star_rules_for_scope,
     _tags_for_scope,
@@ -132,6 +134,62 @@ def test_rules_for_scope_drops_missing_scope_and_handles_empty():
     assert _rules_for_scope([{"name": "x"}], "site") == []
     assert _rules_for_scope(None, "site") == []
     assert _rules_for_scope([], "account") == []
+
+
+# ── _excl_key ─────────────────────────────────────────────────────
+# Legacy and unified exclusions are two views of one object; only the
+# unified view has the name the console displays.
+
+def test_excl_key_matches_the_legacy_and_unified_view_of_one_exclusion():
+    legacy = {"type": "path", "osType": "windows", "value": "C:\\a.exe",
+              "description": "ticket 42"}
+    unified = {"type": "path", "osType": "windows", "value": "C:\\a.exe",
+               "exclusionName": "Vendor agent", "threatType": "EDR"}
+    assert _excl_key(legacy) == _excl_key(unified)
+
+
+def test_excl_key_separates_different_exclusions():
+    base = {"type": "path", "osType": "windows", "value": "C:\\a.exe"}
+    assert _excl_key(base) != _excl_key(dict(base, value="C:\\b.exe"))
+    assert _excl_key(base) != _excl_key(dict(base, osType="linux"))
+    assert _excl_key(base) != _excl_key(dict(base, type="white_hash"))
+
+
+def test_excl_key_handles_structured_values_and_junk():
+    # Unified exclusions can carry a structured value; it still has to
+    # produce a stable, hashable key.
+    a = _excl_key({"type": "path", "value": {"b": 2, "a": 1}})
+    b = _excl_key({"type": "path", "value": {"a": 1, "b": 2}})
+    assert a == b and isinstance(hash(a), int)
+    assert _excl_key(None) == () and _excl_key({}) == ("", "", "")
+
+
+# ── _ue_rename_payload ──────────────────────────────────────────
+
+def test_rename_payload_changes_nothing_but_the_name():
+    dest = {"id": "7", "type": "path", "osType": "windows",
+            "modeType": "suppression", "threatType": "EDR",
+            "reason": "performance", "value": "C:\\a.exe"}
+    out = _ue_rename_payload(dest, "Vendor agent", {"reason": "other"})
+    assert out["exclusionName"] == "Vendor agent"
+    assert out["id"] == "7" and out["reason"] == "performance"
+    assert out["type"] == "path" and out["threatType"] == "EDR"
+
+
+def test_rename_payload_fills_the_required_fields_the_console_nulls():
+    # `reason` comes back null on most exclusions but the edit schema
+    # requires it, so it falls back to the source and then to 'other'.
+    dest = {"id": "7", "type": "path", "osType": "windows",
+            "modeType": "suppression", "threatType": "EDR",
+            "reason": None}
+    assert _ue_rename_payload(dest, "n", {"reason": "performance"})[
+        "reason"] == "performance"
+    assert _ue_rename_payload(dest, "n")["reason"] == "other"
+
+
+def test_rename_payload_refuses_an_item_it_cannot_address():
+    assert _ue_rename_payload({"type": "path"}, "n") == {}
+    assert _ue_rename_payload(None, "n") == {}
 
 
 # ── _strip_unknown_fields ───────────────────────────────────────────

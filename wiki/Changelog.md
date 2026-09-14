@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.3.1 — 2026-09-14
+
+### Bug Fixes
+- **Exclusion names did not survive the migration** — reported by DGS S.p.A. through case #01714638: *"the number of exclusions in the target console is correct, however for some of the migrated ones we do not see the Exclusion Name"*. The count was right and the names were gone, which is exactly what the restore order produced. `GET /exclusions` and `GET /unified-exclusions` return the **same objects** — on the Beijer Ref backup, 1525 legacy and 1526 unified, every legacy item matching a unified one on type + osType + value — but only the unified one carries `exclusionName`; the legacy create schema has no field for a name at all (`actions, description, inject, mode, osType, pathExclusionType, source, type, value`). Both elements ship ticked, and the legacy pass ran **first**, so every exclusion was created nameless, the unified create that followed was answered *"already exists"*, and the 513 of 1525 that had a name lost it silently. Unified now runs first and the legacy pass only creates what unified did not land — it remains the fallback for backups and destinations without unified exclusions, including when the unified create is refused outright.
+- **Exclusions already sitting on the destination without a name are now named** — a re-run could never have repaired the tenants this already hit: the create is answered *"already exists"* and changes nothing. When the source names an exclusion the destination holds unnamed, the name is now applied with `PUT /unified-exclusions` (the only call that can), copying every other field from the destination's own copy so nothing else can change. A name somebody set on the destination is never overwritten, and a refused rename is logged against the item instead of failing it.
+
 ## v2.3.0 — 2026-09-14
 
 Everything here comes from one restore report: **beijerrefab, 2026-09-02** — 252 nodes, 611 failures, 466 of them (76%) from four causes that had nothing to do with the customer's data.

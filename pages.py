@@ -1559,6 +1559,67 @@ def _whitelist(obj: dict, allowed: set) -> dict:
     return {k: v for k, v in obj.items() if k in allowed and v is not None}
 
 
+def _excl_key(item: dict) -> tuple:
+    """Identity of an exclusion, comparable across BOTH exclusion APIs.
+
+    `GET /exclusions` and `GET /unified-exclusions` return the *same*
+    objects — on the Beijer Ref backup, 1525 legacy exclusions and 1526
+    unified ones, and every single legacy item matched a unified one on
+    (type, osType, value). The unified copy additionally carries
+    `exclusionName`, which the legacy resource has no field for at all
+    (its create schema is actions / description / inject / mode / osType /
+    pathExclusionType / source / type / value).
+
+    So the two elements are two views of one set, and this key is what
+    lets the restore avoid creating each exclusion through both.
+    """
+    if not isinstance(item, dict):
+        return ()
+    value = item.get("value")
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, sort_keys=True)
+    return (str(item.get("type") or "").strip().lower(),
+            str(item.get("osType") or "").strip().lower(),
+            str(value or "").strip())
+
+
+# `PUT /unified-exclusions` makes these mandatory on every edit, name
+# change or not.
+_UE_UPDATE_REQUIRED = ("id", "modeType", "osType", "reason",
+                      "threatType", "type")
+
+
+def _ue_rename_payload(dest_item: dict, name: str, src_item=None) -> dict:
+    """Build the `PUT /unified-exclusions` data that only sets the name.
+
+    Every other field is copied from the DESTINATION's own copy of the
+    exclusion, so the write cannot change anything except
+    `exclusionName`. The schema makes id / modeType / osType / reason /
+    threatType / type mandatory even when they are not being changed,
+    and the console returns `reason` as null on most exclusions (1012 of
+    1526 in the Beijer Ref backup) — a required field that comes back
+    null falls back to the source's value and then to the same "other"
+    the create path already sends, because the API will not take null.
+
+    Returns {} when the destination item has no id, since there is then
+    nothing to address.
+    """
+    dest_item = dest_item or {}
+    src_item = src_item or {}
+    if not dest_item.get("id"):
+        return {}
+    data = {"id": str(dest_item["id"]), "exclusionName": name}
+    for field in _UE_UPDATE_REQUIRED:
+        if field == "id":
+            continue
+        value = dest_item.get(field) or src_item.get(field)
+        if not value and field == "reason":
+            value = "other"
+        if value is not None:
+            data[field] = value
+    return data
+
+
 def _rules_for_scope(rules: list, ntype: str) -> list:
     """Keep only rules whose OWN scope matches this node's type.
 
@@ -6124,7 +6185,7 @@ class RestorePage(ctk.CTkFrame):
                     self._operation_log.append(
                         f"    ⏭ {label}: skipped remaining by user request")
 
-            def _summarize(result_key, ok, skip, fail, last_err):
+            def _summarize(result_key, ok, skip, fail, last_err, extra=""):
                 """Shared 'N new, N exist, N err' summary row + last-error log
                 for the custom bulk blocks (exclusions / unified exclusions /
                 firewall rules) that build their own payloads and so can't go
@@ -6133,6 +6194,7 @@ class RestorePage(ctk.CTkFrame):
                 if ok: parts.append(f"{ok} new")
                 if skip: parts.append(f"{skip} exist")
                 if fail: parts.append(f"{fail} err")
+                if extra: parts.append(extra)
                 if parts:
                     results.append((result_key, ", ".join(parts)))
                 if last_err:
@@ -6227,10 +6289,168 @@ class RestorePage(ctk.CTkFrame):
                         raise
                 _r("policy", _restore_policy, data["policy"])
 
-            # ── Exclusions ──
+            # ── Unified Exclusions ──
+            # This MUST stay ahead of the legacy /exclusions pass below.
+            # The two resources return the SAME exclusions — on the Beijer
+            # Ref backup, 1525 legacy and 1526 unified, and every single
+            # legacy item matched a unified one on type+osType+value — but
+            # only the unified object carries `exclusionName`, a field the
+            # legacy create schema does not have at all. Restoring legacy
+            # first therefore puts a NAMELESS copy on the destination, the
+            # unified create that follows is answered "already exists", and
+            # the name is lost: 513 of those 1525 had one. DGS S.p.A.
+            # reported precisely that (case #01714638, 2026-09-11) — "the
+            # number of exclusions in the target console is correct,
+            # however for some of the migrated ones we do not see the
+            # Exclusion Name".
+            _ue_handled = set()
+            if "unified_exclusions" in elements and data.get("unified_exclusions"):
+                self._set_skip_label("unified-excl")
+                u_ok = u_skip = u_fail = 0
+                u_last_err = ""
+                # Build the unified-exclusion filter with scopeLevel
+                _ue_scope_map = {
+                    "global": ("global", ""),
+                    "account": ("account", dest_id or ""),
+                    "site": ("site", dest_id or ""),
+                    "group": ("group", dest_id or ""),
+                }
+                _ue_sl, _ue_slid = _ue_scope_map.get(ntype, ("site", dest_id or ""))
+                ue_filter = dict(scope)
+                ue_filter["scopeLevel"] = _ue_sl
+                if _ue_slid:
+                    ue_filter["scopeLevelId"] = _ue_slid
+
+                _ue_dest_index = {}
+                _ue_dest_read = False
+                _ue_renamed = 0
+
+                def _ue_apply_name(src_item):
+                    """Name an exclusion the destination already holds.
+
+                    A create is answered "already exists" and changes
+                    nothing, so an exclusion that reached the destination
+                    nameless — through the legacy API, an earlier
+                    migration, or by hand — would stay nameless forever.
+                    Only an empty name is ever filled in, so an operator's
+                    own naming on the destination is never overwritten.
+                    """
+                    nonlocal _ue_dest_read, _ue_renamed
+                    src_name = str(
+                        src_item.get("exclusionName") or "").strip()
+                    if not src_name:
+                        return False
+                    if not _ue_dest_read:
+                        _ue_dest_read = True
+                        try:
+                            for _d in (api.get_unified_exclusions(scope)
+                                       or []):
+                                _ue_dest_index.setdefault(_excl_key(_d), _d)
+                        except Exception as _exc:
+                            self._operation_log.append(
+                                f"    ⚠ unified-excl: could not read the "
+                                f"destination's exclusions to restore "
+                                f"names ({_err_detail(_exc)[:80]})")
+                    dest_item = _ue_dest_index.get(_excl_key(src_item))
+                    if not dest_item or str(
+                            dest_item.get("exclusionName") or "").strip():
+                        return False
+                    payload = _ue_rename_payload(
+                        dest_item,
+                        _strip_non_printable(
+                            src_name)[:_EXCL_NAME_MAX_LEN],
+                        src_item)
+                    if not payload:
+                        return False
+                    try:
+                        api.update_unified_exclusion(ue_filter, payload)
+                    except Exception as _exc:
+                        self._operation_log.append(
+                            f"    ⚠ unified-excl: '{src_name[:40]}' is on "
+                            f"the destination without its name and the "
+                            f"rename was refused "
+                            f"({_err_detail(_exc)[:80]})")
+                        return False
+                    _ue_renamed += 1
+                    return True
+
+                for item in data["unified_exclusions"]:
+                    if self._skip_element or self._cancelled:
+                        break
+                    try:
+                        payload = _whitelist(item, _UNIFIED_EXCL_FIELDS)
+                        # Map common field-name variants
+                        if not payload.get("exclusionName"):
+                            payload["exclusionName"] = (
+                                item.get("name")
+                                or item.get("exclusionName")
+                                or item.get("value", "Migrated exclusion")
+                            )
+                        for f in ("value", "description", "exclusionName", "note"):
+                            if isinstance(payload.get(f), str):
+                                payload[f] = _strip_non_printable(payload[f])
+                        # Truncate exclusion name to API limit (255 chars)
+                        if isinstance(payload.get("exclusionName"), str) \
+                                and len(payload["exclusionName"]) > _EXCL_NAME_MAX_LEN:
+                            payload["exclusionName"] = \
+                                payload["exclusionName"][:_EXCL_NAME_MAX_LEN]
+                        # Supply required defaults the API mandates
+                        if not payload.get("reason"):
+                            payload["reason"] = item.get("reason") or "other"
+                        if not payload.get("recommendation"):
+                            payload["recommendation"] = item.get("recommendation") or "NONE"
+                        if not payload.get("modeType") and item.get("modeType"):
+                            payload["modeType"] = item["modeType"]
+                        api.create_unified_exclusion(ue_filter, payload)
+                        u_ok += 1
+                        _ue_handled.add(_excl_key(item))
+                        _rec("unified-excl", item, "created")
+                    except Exception as exc:
+                        if _is_exists_error(exc):
+                            u_skip += 1
+                            _ue_handled.add(_excl_key(item))
+                            _rec("unified-excl", item, "exists",
+                                 "already present on the destination"
+                                 + (" — its exclusion name was missing and "
+                                    "has been applied"
+                                    if _ue_apply_name(item) else ""))
+                        else:
+                            u_fail += 1
+                            full_err = _err_detail(exc)
+                            u_last_err = full_err[:80]
+                            failed_items.append({
+                                "element": "unified_excl",
+                                "name": (item.get("exclusionName")
+                                         or item.get("name")
+                                         or item.get("value", "?"))[:80],
+                                "error": full_err[:500],
+                            })
+                            _rec("unified-excl", item, "failed", full_err)
+                if self._skip_element or self._cancelled:
+                    _u_done = u_ok + u_skip + u_fail
+                    for _left in data["unified_exclusions"][_u_done:]:
+                        _rec("unified-excl", _left, "skipped",
+                             "run cancelled before this item"
+                             if self._cancelled
+                             else "element skipped by operator")
+                if _ue_renamed:
+                    self._operation_log.append(
+                        f"  ✎ unified-excl: named {_ue_renamed} exclusion(s) "
+                        f"that were already on the destination without a "
+                        f"name")
+                _skip_reset("unified-excl")
+                _summarize("unified-excl", u_ok, u_skip, u_fail, u_last_err,
+                           extra=(f"{_ue_renamed} named"
+                                  if _ue_renamed else ""))
+
+            # ── Exclusions (legacy) ──
+            # Only the items the unified pass above did NOT land are
+            # created here: a legacy create cannot carry the name, so it
+            # is the fallback for consoles/backups without unified
+            # exclusions, never a second write on top of a named one.
             if "exclusions" in elements and data.get("exclusions"):
                 self._set_skip_label("excl")
-                e_ok = e_skip = e_fail = 0
+                e_ok = e_skip = e_fail = e_unified = 0
                 e_last_err = ""
                 # Flattened (type, item) so an interrupted run can name every
                 # exclusion it never got to, instead of only counting them.
@@ -6245,6 +6465,9 @@ class RestorePage(ctk.CTkFrame):
                         for _et, _left in _excl_queue[_e_idx:]:
                             _rec("excl", _left, "skipped", _why, kind=_et)
                         break
+                    if _excl_key(item) in _ue_handled:
+                        e_unified += 1
+                        continue
                     try:
                         payload = _whitelist(item, _EXCL_FIELDS)
                         # Scrub invisible bidi/zero-width chars that
@@ -6278,82 +6501,22 @@ class RestorePage(ctk.CTkFrame):
                             })
                             _rec("excl", item, "failed", full_err,
                                  kind=etype)
+                if e_unified:
+                    self._operation_log.append(
+                        f"  ↻ excl: {e_unified} exclusion(s) already "
+                        f"restored as Unified Exclusions, which carry the "
+                        f"exclusion name — not re-created through the "
+                        f"legacy API, which has no name field")
+                    _rec("excl", None, "inherited",
+                         "restored through the Unified Exclusions API on "
+                         "this node — the legacy /exclusions API has no "
+                         "exclusion-name field, so creating them there "
+                         "too would leave them unnamed",
+                         name=f"({e_unified} restored as Unified Exclusions)")
                 _skip_reset("excl")
-                _summarize("excl", e_ok, e_skip, e_fail, e_last_err)
-
-            # ── Unified Exclusions ──
-            if "unified_exclusions" in elements and data.get("unified_exclusions"):
-                self._set_skip_label("unified-excl")
-                u_ok = u_skip = u_fail = 0
-                u_last_err = ""
-                # Build the unified-exclusion filter with scopeLevel
-                _ue_scope_map = {
-                    "global": ("global", ""),
-                    "account": ("account", dest_id or ""),
-                    "site": ("site", dest_id or ""),
-                    "group": ("group", dest_id or ""),
-                }
-                _ue_sl, _ue_slid = _ue_scope_map.get(ntype, ("site", dest_id or ""))
-                ue_filter = dict(scope)
-                ue_filter["scopeLevel"] = _ue_sl
-                if _ue_slid:
-                    ue_filter["scopeLevelId"] = _ue_slid
-                for item in data["unified_exclusions"]:
-                    if self._skip_element or self._cancelled:
-                        break
-                    try:
-                        payload = _whitelist(item, _UNIFIED_EXCL_FIELDS)
-                        # Map common field-name variants
-                        if not payload.get("exclusionName"):
-                            payload["exclusionName"] = (
-                                item.get("name")
-                                or item.get("exclusionName")
-                                or item.get("value", "Migrated exclusion")
-                            )
-                        for f in ("value", "description", "exclusionName", "note"):
-                            if isinstance(payload.get(f), str):
-                                payload[f] = _strip_non_printable(payload[f])
-                        # Truncate exclusion name to API limit (255 chars)
-                        if isinstance(payload.get("exclusionName"), str) \
-                                and len(payload["exclusionName"]) > _EXCL_NAME_MAX_LEN:
-                            payload["exclusionName"] = \
-                                payload["exclusionName"][:_EXCL_NAME_MAX_LEN]
-                        # Supply required defaults the API mandates
-                        if not payload.get("reason"):
-                            payload["reason"] = item.get("reason") or "other"
-                        if not payload.get("recommendation"):
-                            payload["recommendation"] = item.get("recommendation") or "NONE"
-                        if not payload.get("modeType") and item.get("modeType"):
-                            payload["modeType"] = item["modeType"]
-                        api.create_unified_exclusion(ue_filter, payload)
-                        u_ok += 1
-                        _rec("unified-excl", item, "created")
-                    except Exception as exc:
-                        if _is_exists_error(exc):
-                            u_skip += 1
-                            _rec("unified-excl", item, "exists",
-                                 "already present on the destination")
-                        else:
-                            u_fail += 1
-                            full_err = _err_detail(exc)
-                            u_last_err = full_err[:80]
-                            failed_items.append({
-                                "element": "unified_excl",
-                                "name": (item.get("exclusionName")
-                                         or item.get("name")
-                                         or item.get("value", "?"))[:80],
-                                "error": full_err[:500],
-                            })
-                            _rec("unified-excl", item, "failed", full_err)
-                if self._skip_element or self._cancelled:
-                    _u_done = u_ok + u_skip + u_fail
-                    for _left in data["unified_exclusions"][_u_done:]:
-                        _rec("unified-excl", _left, "skipped",
-                             "run cancelled before this item"
-                             if self._cancelled
-                             else "element skipped by operator")
-                _skip_reset("unified-excl")
-                _summarize("unified-excl", u_ok, u_skip, u_fail, u_last_err)
+                _summarize("excl", e_ok, e_skip, e_fail, e_last_err,
+                           extra=(f"{e_unified} via unified"
+                                  if e_unified else ""))
 
             # ── Blocklist ──
             bl = data.get("restrictions") or data.get("blocklist") or []

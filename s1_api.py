@@ -751,6 +751,14 @@ class S1API:
     def create_unified_exclusion(self, scope: dict, data: dict) -> dict:
         return self._post("/unified-exclusions", body={"filter": scope, "data": data})
 
+    # `PUT /unified-exclusions` edits one existing exclusion: `data` must
+    # carry its `id` plus the always-required id/modeType/osType/reason/
+    # threatType/type, and `filter` needs the scopeLevel. It is the only
+    # way to put a name on an exclusion that is already on the console —
+    # the create answers "already exists" and changes nothing.
+    def update_unified_exclusion(self, scope: dict, data: dict) -> dict:
+        return self._put("/unified-exclusions", body={"filter": scope, "data": data})
+
     def create_restriction(self, scope: dict, data: dict) -> dict:
         return self._post("/restrictions", body={"filter": scope, "data": data})
 

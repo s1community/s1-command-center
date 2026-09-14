@@ -10,8 +10,8 @@ faithfully — see notes).
 | # | Element | Backup | Restore | Scope | Notes |
 |---|---------|:------:|:-------:|-------|-------|
 | 1 | **Policy** | ✅ | ✅ | All | Full policy configuration |
-| 2 | **Exclusions** | ✅ | ✅ | All | Legacy 5 types: hash, path, file type, certificate, browser |
-| 3 | **Unified Exclusions** | ✅ | ✅ | All | v2.1 unified + tag-based exclusions |
+| 2 | **Exclusions** | ✅ | ✅ | All | Legacy 5 types: hash, path, file type, certificate, browser. Same objects as #3 — restored only where Unified Exclusions did not land them, because the legacy API has no exclusion-name field |
+| 3 | **Unified Exclusions** | ✅ | ✅ | All | v2.1 unified + tag-based exclusions. **Restored first**: this is the only resource carrying the console's *Exclusion Name*, and a nameless copy already on the destination is renamed rather than left as-is |
 | 4 | **Blocklist** | ✅ | ✅ | All | SHA1/SHA256 hash restrictions |
 | 5 | **Firewall Rules** | ✅ | ✅ | All | Rule ordering preserved; location bindings auto-stripped on conflict |
 | 6 | **Firewall Config** | ✅ | ✅ | All | Enabled, inheritance, location-aware |

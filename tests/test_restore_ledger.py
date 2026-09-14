@@ -111,12 +111,14 @@ def _backup():
     }]
 
 
+_SITE_ONLY = {"global": False, "accounts": False,
+              "sites": True, "groups": False}
+
+
 def _run(elements=("exclusions", "blocklist", "locations")):
     runner = Runner()
     api = FakeAPI()
-    runner._run_restore(api, _backup(), list(elements),
-                        levels={"global": False, "accounts": False,
-                                "sites": True, "groups": False})
+    runner._run_restore(api, _backup(), list(elements), levels=_SITE_ONLY)
     return runner, api
 
 
@@ -169,6 +171,166 @@ def test_element_with_nothing_in_the_backup_still_gets_a_row():
 def test_unselected_elements_produce_no_rows():
     runner, _api = _run(elements=("exclusions",))
     assert {r["element"] for r in runner._item_ledger} == {"excl"}
+
+
+# ── Exclusion names — DGS S.p.A., case #01714638 ───────────────────
+# "The number of exclusions in the target console is correct, however for
+# some of the migrated ones we do not see the Exclusion Name." The name
+# lives ONLY on the unified resource; the legacy /exclusions create has no
+# field for it. Both elements ship selected by default and every backup
+# holds the same exclusions under both, so whichever runs first decides
+# whether the name survives.
+
+EXCL_VALUE = "C:\\tools\\agent.exe"
+
+
+class NameAPI(FakeAPI):
+    """FakeAPI that also records what the unified endpoint was sent.
+
+    `on_destination` is what GET /unified-exclusions returns, i.e. what a
+    previous migration already left on the target console.
+    """
+
+    def __init__(self, on_destination=()):
+        super().__init__()
+        self.unified = []
+        self.updated = []
+        self.on_destination = list(on_destination)
+
+    def create_unified_exclusion(self, _filter, payload):
+        if any(d.get("value") == payload.get("value")
+               for d in self.on_destination):
+            raise S1APIError("POST /unified-exclusions → 400",
+                             status_code=400,
+                             detail="Exclusion already exists")
+        self.unified.append(payload)
+        return {"data": {"id": "u"}}
+
+    def get_unified_exclusions(self, _scope):
+        return list(self.on_destination)
+
+    def update_unified_exclusion(self, _filter, payload):
+        self.updated.append(payload)
+        return {"data": {"id": payload.get("id")}}
+
+
+def _both_views_backup(with_unified=True):
+    """One exclusion as a real backup holds it: in BOTH element lists."""
+    legacy = {"value": EXCL_VALUE, "osType": "windows", "type": "path"}
+    data = {"exclusions": {"path": [legacy]}}
+    if with_unified:
+        data["unified_exclusions"] = [
+            dict(legacy, exclusionName="Vendor agent",
+                 modeType="suppression", threatType="EDR")]
+    return [{"type": "site", "path": "Acme/Berlin",
+             "site": {"name": "Berlin"}, "data": data}]
+
+
+def _run_both(with_unified=True, api=None):
+    runner = Runner()
+    api = api or NameAPI()
+    runner._run_restore(api, _both_views_backup(with_unified),
+                        ["exclusions", "unified_exclusions"],
+                        levels=_SITE_ONLY)
+    return runner, api
+
+
+def test_the_exclusion_name_reaches_the_destination():
+    _runner, api = _run_both()
+    assert [p.get("exclusionName") for p in api.unified] == ["Vendor agent"]
+
+
+def test_the_same_exclusion_is_not_created_through_both_apis():
+    # A legacy create carries no name, so a second write of an exclusion
+    # the unified pass already landed can only produce the nameless copy
+    # the customer reported.
+    _runner, api = _run_both()
+    assert api.created == [], \
+        "legacy /exclusions must not re-create a unified exclusion"
+
+
+def test_the_skipped_legacy_items_are_explained_not_counted_as_missing():
+    runner, _api = _run_both()
+    rows = [r for r in runner._item_ledger if r["element"] == "excl"]
+    assert len(rows) == 1 and rows[0]["status"] == "inherited"
+    assert "Unified Exclusions" in rows[0]["reason"]
+    tab = {e["key"]: e for e in
+           build_gap_report(runner._item_ledger)["elements"]}["excl"]
+    assert tab["missing"] == 0
+
+
+def test_legacy_still_runs_when_the_backup_has_no_unified_exclusions():
+    _runner, api = _run_both(with_unified=False)
+    assert api.created == [EXCL_VALUE]
+
+
+# An already-migrated tenant is the harder half of the same bug: the
+# nameless copies are on the destination, so a re-run's create is just
+# answered "already exists" and nothing changes. PUT /unified-exclusions
+# is the only call that can name them.
+
+def _already_migrated(name_on_dest=None):
+    dest = {"id": "dest-7", "value": EXCL_VALUE, "osType": "windows",
+            "type": "path", "modeType": "suppression",
+            "threatType": "EDR", "reason": None}
+    if name_on_dest is not None:
+        dest["exclusionName"] = name_on_dest
+    return NameAPI(on_destination=[dest])
+
+
+def test_a_nameless_exclusion_already_on_the_destination_gets_its_name():
+    _runner, api = _run_both(api=_already_migrated())
+    assert len(api.updated) == 1
+    sent = api.updated[0]
+    assert sent["exclusionName"] == "Vendor agent"
+    assert sent["id"] == "dest-7"
+    # The edit schema demands these even when only the name changes, and
+    # the console hands `reason` back as null.
+    for field in ("modeType", "osType", "reason", "threatType", "type"):
+        assert sent.get(field), f"{field} must be sent on an update"
+
+
+def test_a_name_set_on_the_destination_is_never_overwritten():
+    _runner, api = _run_both(api=_already_migrated("Named by the customer"))
+    assert api.updated == []
+
+
+def test_the_applied_name_is_reported_against_the_item():
+    runner, _api = _run_both(api=_already_migrated())
+    row = next(r for r in runner._item_ledger
+               if r["element"] == "unified-excl")
+    assert row["status"] == "exists"
+    assert "name" in row["reason"]
+
+
+def test_a_refused_rename_does_not_fail_the_item():
+    api = _already_migrated()
+
+    def _refuse(_filter, _payload):
+        raise S1APIError("PUT /unified-exclusions → 403", status_code=403,
+                         detail="Exclusions.edit permission required")
+
+    api.update_unified_exclusion = _refuse
+    runner, _api = _run_both(api=api)
+    row = next(r for r in runner._item_ledger
+               if r["element"] == "unified-excl")
+    assert row["status"] == "exists"
+    assert any("rename was refused" in line
+               for line in runner._operation_log)
+
+
+def test_legacy_still_runs_when_the_unified_create_fails():
+    # Older destinations have no unified-exclusions resource. Skipping the
+    # legacy write on their behalf would migrate nothing at all.
+    api = NameAPI()
+
+    def _unsupported(_filter, _payload):
+        raise S1APIError("POST /unified-exclusions → 404", status_code=404,
+                         detail="Not found")
+
+    api.create_unified_exclusion = _unsupported
+    _runner, api = _run_both(api=api)
+    assert api.created == [EXCL_VALUE]
 
 
 def test_cancelling_names_every_item_it_never_reached():

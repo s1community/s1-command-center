@@ -199,7 +199,7 @@ Navigate to **Restore to Dest**:
 | Element | Backup | Restore | Notes |
 |---------|:------:|:-------:|-------|
 | Policy | ✅ | ✅ | Full policy configuration |
-| Exclusions | ✅ | ✅ | All types: hash, path, file type, certificate, browser |
+| Exclusions | ✅ | ✅ | All types: hash, path, file type, certificate, browser. Restored through the Unified Exclusions API first — it is the only one that carries the console's *Exclusion Name* |
 | Blocklist | ✅ | ✅ | SHA1 and SHA256 hashes |
 | Firewall Config | ✅ | ✅ | Global firewall settings |
 | Firewall Rules | ✅ | ✅ | With rule ordering preserved |
