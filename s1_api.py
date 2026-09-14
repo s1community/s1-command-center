@@ -383,14 +383,27 @@ class S1API:
         """GET /config-override — list overrides matching the scope filter."""
         return self.get_all("/config-override", params=scope)
 
-    def create_config_override(self, scope: dict, data: dict) -> dict:
-        """POST /config-override — create a new override on the destination
-        scope. S1 requires the scope filter embedded in the body alongside
-        the override data.
+    def create_config_override(self, data: dict) -> dict:
+        """POST /config-override — create one override. Body is `data` ONLY.
+
+        This resource does not take a scope `filter`. The target scope
+        travels INSIDE `data`, as `scope` ("site" / "group") plus a nested
+        reference to the scope object: `{"site": {"id": …}}` /
+        `{"group": {"id": …}}`. Sending the usual envelope filter is what
+        produced Landeshauptstadt München's 16 rejected overrides on
+        2026-08-24 — `filter: siteIds: Unknown field` at every site and
+        `filter: groupIds: Unknown field` at every group (code 4000010) —
+        because that filter selects AGENTS, not scopes, and knows none of
+        those keys.
+
+        Confirmed against the svalabs Ansible collection's
+        `sva.sentinelone.config_overrides` module, which creates site- and
+        group-level overrides with `{'data': <object>}` and no filter at
+        all.
+
         Requires Policy Override.create. Use support-actions/config to get
         the complete syntax (Global / Support users only)."""
-        return self._post("/config-override", body={
-            "filter": scope, "data": data})
+        return self._post("/config-override", body={"data": data})
 
     def update_config_override(self, override_id: str, data: dict) -> dict:
         """PUT /config-override/{id} — change the value of one override."""

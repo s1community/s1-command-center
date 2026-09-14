@@ -259,3 +259,13 @@ def test_config_override_restore_filters_other_scopes():
     assert "_override_payload" in src
     # The old code force-stamped the node type onto every override.
     assert 'body["scope"] = ntype' not in src
+
+
+def test_config_override_create_passes_no_scope_filter():
+    # POST /config-override has no scope filter — passing one rejected
+    # every site and group override with "filter: <key>: Unknown field".
+    # The destination scope goes into the body instead.
+    src = _restore_source()
+    assert "api.create_config_override(body)" in src
+    assert "api.create_config_override(scope" not in src
+    assert "_override_payload(o, ntype, dest_id or \"\")" in src

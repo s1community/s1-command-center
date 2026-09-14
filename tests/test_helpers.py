@@ -650,6 +650,42 @@ def test_override_payload_does_not_mutate_input():
     assert ovr == {"name": "n", "scope": "group", "group": {"id": "G1"}}
 
 
+def test_override_payload_binds_the_destination_site():
+    # POST /config-override carries no scope filter: the destination site
+    # has to be named inside the body, or the override binds to nothing.
+    ovr = {"name": "n", "scope": "site", "site": {"id": "SRC", "name": "s"}}
+    body = _override_payload(ovr, "site", "DEST-SITE")
+    assert body["scope"] == "site"
+    assert body["site"] == {"id": "DEST-SITE"}
+
+
+def test_override_payload_binds_the_destination_group():
+    ovr = {"name": "n", "scope": "group", "group": {"id": "SRC", "name": "g"}}
+    body = _override_payload(ovr, "group", "DEST-GROUP")
+    assert body["group"] == {"id": "DEST-GROUP"}
+    assert "site" not in body and "account" not in body
+
+
+def test_override_payload_stringifies_a_numeric_destination_id():
+    body = _override_payload({"name": "n", "scope": "site"}, "site", 12345)
+    assert body["site"] == {"id": "12345"}
+
+
+def test_override_payload_never_binds_another_scopes_id():
+    # A group override handed to the account node keeps its own scope and
+    # must NOT be stamped with the account's id.
+    body = _override_payload({"name": "n", "scope": "group"},
+                             "account", "DEST-ACCOUNT")
+    assert body["scope"] == "group"
+    assert "group" not in body and "account" not in body
+
+
+def test_override_payload_leaves_global_unbound():
+    body = _override_payload({"name": "n", "scope": "tenant"}, "global", "")
+    assert body["scope"] == "global"
+    assert not any(k in body for k in ("account", "site", "group"))
+
+
 def test_endpoint_tags_for_scope_handles_empty():
     assert _endpoint_tags_for_scope(None, "site") == []
 
@@ -889,6 +925,24 @@ def test_endpoint_tag_5xx_points_at_the_diagnostic_that_settles_it():
 def test_override_5xx_is_not_swallowed_by_the_generic_5xx_rule():
     out = explain_error("overrides", _SERVER_5XX, 500)
     assert "config override" in out["what"].lower()
+
+
+def test_override_scope_filter_rejection_is_explained_for_every_key():
+    # LHM 2026-08-24: siteIds at each site, groupIds at each group.
+    for key in ("accountIds", "siteIds", "groupIds"):
+        detail = (f"Validation Error :: filter: {key}: Unknown field. "
+                  f"(code 4000010)")
+        out = explain_error("overrides", detail, 400)
+        assert "config override" in out["what"].lower()
+        assert "no scope filter" in out["why"].lower()
+
+
+def test_group_scope_filter_rejection_elsewhere_still_reads_as_inheritance():
+    # The same console message for Locations means something else: that
+    # element simply doesn't exist at group scope.
+    detail = "Validation Error :: filter: groupIds: Unknown field."
+    out = explain_error("locations", detail, 400)
+    assert "group scope" in out["what"].lower()
 
 
 def test_other_elements_still_get_the_generic_5xx_explanation():

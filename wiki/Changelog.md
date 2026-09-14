@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.3.2 — 2026-09-14
+
+### Bug Fixes
+- **Every config override was rejected, at every scope** — the Landeshauptstadt München restore (2026-08-24, 109 nodes) failed all 28 of them: 12 with `filter: siteIds: Unknown field`, 4 with `filter: groupIds: Unknown field`, and 12 at the account with `Internal server error (code 5000010)`. One cause behind all three. **`POST /config-override` takes no scope filter at all** — the `filter` on that endpoint selects *agents*, so every scope key we could put in it (`accountIds`, `siteIds`, `groupIds`) is an unknown field. The scope belongs inside the override body: `scope` plus a nested `{"site": {"id": …}}` / `{"group": {"id": …}}` reference naming the destination. v2.2.7 removed the source console's nested scope objects from that body, correctly — they carried the source tenant's ids, which is what the destination was 500ing on — but the filter was the only thing left binding the override to anything, and the filter was never valid. The create now sends `data` alone, with the **resolved destination** site/group id in it. An override is only ever bound to the node that owns it, so the account pass cannot stamp its id onto a group override the descendant query returned. Verified field-for-field against a known-good implementation of this endpoint rather than guessed at.
+- **The error explainer described the wrong problem** — `filter: accountIds: Unknown field` had its own entry saying the scope travels in the body (right) and that the restore retries without the rejected key (which could only ever have created the override at the wrong scope, silently). It now covers all three keys, is scoped to config overrides so it cannot steal the Locations case — where the same message genuinely means "this element doesn't exist at group scope" — and the 500 entry names the source-id cause instead of implying a server fault.
+
+### Tests
+- 12 new: the destination site/group id is bound per scope, a numeric id is stringified, a group override handed to the account node is never stamped with the account's id, global stays unbound, the API call carries no `filter`, both explainer paths, and a source guard so `create_config_override(scope, …)` cannot come back. 440 total.
+
 ## v2.3.1 — 2026-09-14
 
 ### Bug Fixes

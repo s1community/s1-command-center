@@ -557,3 +557,20 @@ def test_reorder_groups_surfaces_the_last_error_when_no_shape_works():
         api.reorder_groups("site-1", ["7", "8"])
     assert ei.value.status_code == 400
     assert "ids: Unknown field" in ei.value.detail
+
+
+# ── config overrides ─────────────────────────────────────────────────────
+# Every site and group override of the Landeshauptstadt München migration
+# was rejected with `filter: siteIds: Unknown field` / `filter: groupIds:
+# Unknown field` — POST /config-override takes no scope filter at all.
+
+def test_create_config_override_sends_data_only():
+    api = _client([FakeResp(200, {"data": {"id": "1"}})])
+    body = {"name": "VSS", "scope": "group", "group": {"id": "G-dest"},
+            "config": {"vssConfig": {}}}
+    api.create_config_override(body)
+    method, url, _params, sent = api.session.calls[0]
+    assert method == "POST"
+    assert url.endswith("/config-override")
+    assert sent == {"data": body}
+    assert "filter" not in sent

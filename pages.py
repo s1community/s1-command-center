@@ -1162,14 +1162,16 @@ _ERROR_RULES = [
                              r"server could not process|→ 5\d\d)",
                              _re.IGNORECASE),
         "what": "The console errored creating a config override",
-        "why":  "POST /config-override answered 500. The payload sent is "
-                "the source override with its identifiers, timestamps and "
-                "source-tenant scope objects removed, plus the `scope` "
-                "string the API requires — nothing in it is invented. A "
-                "500 means the destination failed on it, not that it was "
-                "refused.",
-        "fix":  "1) Re-run: the override create is idempotent-safe, an "
-                "override that already exists is reported as such.\n"
+        "why":  "POST /config-override answered 500. Older builds sent the "
+                "override still carrying the SOURCE console's scope "
+                "objects, and the destination 500s trying to resolve a "
+                "site/group id that does not exist there. The current "
+                "build binds the override to the resolved DESTINATION "
+                "site/group instead, so a 500 now means the destination "
+                "failed on the payload, not that it was refused.",
+        "fix":  "1) Update to the current build and re-run: the override "
+                "create is idempotent-safe, an override that already "
+                "exists is reported as such.\n"
                 "2) If the same override fails again, re-create it by "
                 "hand on the destination (Policy → Config Overrides) — "
                 "the Gap Report names every one that failed.\n"
@@ -1214,17 +1216,21 @@ _ERROR_RULES = [
         "severity": "warning",
     },
     {
-        "match": _re.compile(r"filter:\s*accountids:\s*unknown field"),
-        "what": "Config override filter rejected accountIds",
-        "why":  "The POST /config-override endpoint's scope filter does not "
-                "accept `accountIds` for account-scoped overrides (code "
-                "4000010). The scope is conveyed in the override body "
-                "instead.",
-        "fix":  "Update to the current build — the restore now retries the "
-                "override create with the rejected filter key removed, then "
-                "re-run. If it still fails, the override may need to be "
-                "recreated manually (Policy Override.create permission and "
-                "Global/Support scope are required).",
+        "match": _re.compile(r"\[overrides\].*filter:\s*"
+                             r"(accountids|siteids|groupids):\s*"
+                             r"unknown field"),
+        "what": "Config override create rejected the scope filter",
+        "why":  "POST /config-override takes no scope filter at all — the "
+                "`filter` on that endpoint selects AGENTS, so accountIds, "
+                "siteIds and groupIds are each rejected as 'Unknown field' "
+                "(code 4000010). The target scope belongs inside the "
+                "override body: `scope` plus a nested reference to the "
+                "destination site/group.",
+        "fix":  "Update to the current build — the restore now sends the "
+                "override with no filter and binds it to the destination "
+                "site/group inside the body, then re-run. If it still "
+                "fails, recreate the override by hand: this endpoint needs "
+                "Policy Override.create and a Global/Support user.",
         "severity": "warning",
     },
     {
@@ -1759,22 +1765,36 @@ def _overrides_for_scope(overrides: list, ntype: str) -> list:
 _OVERRIDE_SOURCE_REFS = ("account", "site", "group")
 
 
-def _override_payload(ovr: dict, ntype: str) -> dict:
+def _override_payload(ovr: dict, ntype: str, dest_id: str = "") -> dict:
     """Create-ready POST /config-override `data` block for one override.
 
-    S1 requires `data.scope` (a string like "site" / "account" / "group" /
-    "global") even though the wrapping `filter` already names the scope, and
-    `_clean_for_restore` strips the source's `scope` — so it has to be put
-    back. Use the override's OWN scope rather than the node being restored:
-    stamping the node type turned a group-scoped override into an
-    account-scoped one whenever the account query returned it."""
+    POST /config-override takes NO scope filter — `data` carries the whole
+    binding: `scope` (a string like "site" / "group" / "account" /
+    "global") plus a nested reference naming the scope object,
+    `{"site": {"id": …}}` / `{"group": {"id": …}}`. So this has to undo two
+    things `_clean_for_restore` does:
+
+    * put `scope` back — using the override's OWN scope, not the node being
+      restored, since stamping the node type turned a group-scoped override
+      into an account-scoped one whenever the account query returned it;
+    * replace the SOURCE console's nested account/site/group {id, name}
+      objects with the DESTINATION id. Dropping them outright stopped
+      source ids leaking into the destination POST, but left the override
+      bound to nothing.
+
+    `dest_id` is the destination id of the node being restored; it is only
+    stamped when the override belongs to that node's own scope, which
+    `_overrides_for_scope` has already guaranteed."""
     body = _clean_for_restore(ovr or {})
     for ref in _OVERRIDE_SOURCE_REFS:
         body.pop(ref, None)
     sc = str((ovr or {}).get("scope", "")).strip().lower()
     if sc == "tenant":
         sc = "global"
-    body["scope"] = sc or ntype
+    sc = sc or ntype
+    body["scope"] = sc
+    if dest_id and sc == ntype and sc in _OVERRIDE_SOURCE_REFS:
+        body[sc] = {"id": str(dest_id)}
     return body
 
 
@@ -6953,61 +6973,35 @@ class RestorePage(ctk.CTkFrame):
                         f"({_ovr_skipped} belonging to another scope "
                         f"skipped)")
             if "config_overrides" in elements and ovr:
-                # NOTE: S1 requires `data.scope` (a string like "site" /
-                # "account" / "group" / "global") even though the wrapping
-                # `filter` already names the scope. `_clean_for_restore`
-                # strips the source's `scope` field, so `_override_payload`
-                # re-injects the override's OWN scope. Without this the API
-                # rejects every create with "data: scope: Missing data for
-                # required field." See restore-error bundle (v1.2.0).
+                # NOTE: this create takes NO scope filter — `data` carries
+                # both `scope` (which `_clean_for_restore` strips, so
+                # `_override_payload` re-injects the override's OWN scope)
+                # and the nested destination scope reference that binds the
+                # override to this site/group. See `_override_payload` and
+                # `S1API.create_config_override`.
                 def _build_override(o):
-                    return _override_payload(o, ntype)
+                    return _override_payload(o, ntype, dest_id or "")
 
                 def _create_override(o):
                     body = _build_override(o)
                     try:
-                        return api.create_config_override(scope, body)
+                        return api.create_config_override(body)
                     except Exception as exc:
                         msg = (str(exc) + " "
                                + str(getattr(exc, "detail", ""))).lower()
-                        # The POST /config-override filter does not accept
-                        # `accountIds` ("filter: accountIds: Unknown field").
-                        # The scope binding already travels in `data.scope`,
-                        # so retry once with the rejected key dropped from
-                        # the filter.
-                        if "accountids" in msg and "unknown field" in msg:
-                            alt = {k: v for k, v in scope.items()
-                                   if k != "accountIds"}
-                            return api.create_config_override(alt, body)
-                        # Single-account consoles reject scope="global" and
-                        # filter.tenant.  Map the override to account scope
-                        # and retry with the destination account ID.
-                        if (("global" in msg
-                             and "not a valid choice" in msg)
-                                or ("tenant" in msg
-                                    and "unknown field" in msg)):
-                            body["scope"] = "account"
-                            alt = {k: v for k, v in scope.items()
-                                   if k != "tenant"}
+                        # Single-account consoles have no global scope and
+                        # reject scope="global". Map the override onto the
+                        # destination account and retry once.
+                        if ("global" in msg
+                                and "not a valid choice" in msg):
                             acct_id = getattr(self, "_acct_id", "").strip()
+                            body["scope"] = "account"
                             if acct_id:
-                                alt["accountIds"] = [acct_id]
+                                body["account"] = {"id": acct_id}
                             self._operation_log.append(
                                 f"    ↳ retrying override at account scope "
                                 f"(destination has no global scope)")
-                            try:
-                                return api.create_config_override(alt, body)
-                            except Exception as exc2:
-                                m2 = (str(exc2) + " "
-                                      + str(getattr(exc2, "detail",
-                                                    ""))).lower()
-                                if ("accountids" in m2
-                                        and "unknown field" in m2):
-                                    alt2 = {k: v for k, v in alt.items()
-                                            if k != "accountIds"}
-                                    return api.create_config_override(
-                                        alt2, body)
-                                raise
+                            return api.create_config_override(body)
                         raise
                 _r_bulk("overrides", ovr, _create_override)
             elif "config_overrides" in elements:
