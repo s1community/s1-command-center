@@ -250,6 +250,38 @@ def evaluate_preflight(facts: dict) -> list:
                                 "target account/site not found — it will be "
                                 "created during restore"))
 
+    # Account creation capability ──────────────────────────────────────
+    # POST /accounts requires BOTH Global permissions and an MSSP
+    # deployment. A non-MSSP ("customer") console rejects it with
+    # 403 code 4030010 no matter how privileged the token is, so a backup
+    # that needs new accounts cannot be restored there as-is.
+    missing = facts.get("accounts_to_create")
+    can_create = facts.get("can_create_accounts")
+    if missing:
+        if can_create is False:
+            checks.append(Check(
+                "Account creation", "fail",
+                f"{missing} account(s) in the backup do not exist on the "
+                f"destination, and this console will not create accounts "
+                f"({facts.get('account_create_reason') or 'not permitted'}). "
+                f"Map them onto existing accounts instead."))
+        elif can_create is True:
+            checks.append(Check(
+                "Account creation", "pass",
+                f"{missing} account(s) need creating and the destination "
+                f"allows it"))
+        else:
+            checks.append(Check(
+                "Account creation", "warn",
+                f"{missing} account(s) in the backup do not exist on the "
+                f"destination; could not confirm whether this console "
+                f"allows creating them"))
+    elif can_create is False:
+        checks.append(Check(
+            "Account creation", "info",
+            "destination will not create accounts, but the backup does not "
+            "need any new ones"))
+
     # License headroom ─────────────────────────────────────────────────
     total = facts.get("licenses_total")
     used = facts.get("licenses_used")

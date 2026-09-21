@@ -1132,8 +1132,9 @@ class App(ctk.CTk):
         self._active_lbl.pack(fill="x", padx=14, pady=(0, 6))
 
         # import pages lazily here to avoid circular issues
-        from pages import (BackupPage, RestorePage, AgentMigrationPage,
-                           ValidationPage, MigrationRunbookPage)
+        from pages import (BackupPage, RestorePage, ValidationPage,
+                           MigrationRunbookPage)
+        from agent_migrator import AgentMigratorPage
         from pages_extra import (
             AccountsSitesPage, AgentsPage, ThreatsPage, UsersRolesPage,
             ActivitiesPage, DeepVisibilityPage, ExclusionsBlocklistPage,
@@ -1154,7 +1155,7 @@ class App(ctk.CTk):
             ("Migration Runbook", MigrationRunbookPage),
             ("Backup Source", BackupPage),
             ("Restore to Dest", RestorePage),
-            ("Agent Migration", AgentMigrationPage),
+            ("Agent Migration", AgentMigratorPage),
             ("Migration Validation", ValidationPage),
         ]
         if is_admin:

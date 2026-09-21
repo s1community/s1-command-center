@@ -147,6 +147,72 @@ Elements are restored in this sequence for each node:
 15. Roles & service users
 16. **Group ranking** (last)
 
+### Step 4 — Migrate the Agents
+
+Everything above moves *configuration*. This moves the **endpoints
+themselves**, so that each source group's agents land in the same-named
+group on the destination and inherit that group's policy.
+
+> **Validate first (section 4).** Agents check in to whatever scope they
+> are moved into, so it is much cheaper to fix the destination's
+> structure before they arrive than afterwards.
+
+Navigate to **Agent Migration** — three steps, each unlocking the next:
+
+**1 · Read destination** — walks the destination's accounts, sites and
+groups and saves them, with their registration tokens, to a JSON map
+file. Any site shown as `MISSING` has no token; create one on the
+console and read it again.
+
+> You don't need to know any ids. **Choose…** beside the account and
+> site fields gives you a list to tick; leaving a field blank means
+> *everything*. The site list is narrowed to whichever accounts you
+> picked.
+>
+> On a large console the list shows the first 50 and says so — the
+> console does the searching, so type part of a name to find the rest
+> rather than scrolling. Anything you tick stays ticked while you keep
+> searching, and the footer tells you how many are ticked but currently
+> out of view. **All** and **None** apply only to what is on screen, so
+> they can never silently select scopes you filtered away.
+
+**2 · Match scopes** — walks the SOURCE and lists every account, site and
+group beside the destination scope it pairs with. **Nothing is sent.**
+Read this list before going further: it is the answer to "did it find my
+scopes, and where is each one going?". Anything that cannot migrate says
+why:
+
+| Reason | What to do |
+|---|---|
+| *group / site / account not on destination* | The name differs between the consoles. Click **Fix name** on the row to point the map entry at the source's spelling. |
+| *no registration token* | Neither the destination group nor its site has one. Create a token on the destination, then read the destination again. |
+| *already migrated* | Nothing to do — those agents are on the destination already. |
+| *cannot read agents* | The source token cannot list that group's agents; check `Agents.view`. |
+
+The result is cached, so reopening the app does not re-walk the console.
+The plan's age is shown with a **Match again** button.
+
+**3 · Migrate** — the red button names how many agents it is about to
+move. Each machine is reported as it goes, with the console's own reason
+when one doesn't make it; the **Failed** filter isolates those. Groups
+are sent with their own token, in batches of 1,000.
+
+### What to Expect After the Move
+
+| Result | Meaning |
+|---|---|
+| **moved** | Confirmed on the destination console. |
+| **pending** | The console accepted it, but the agent hasn't checked in yet — it moves on its next connection. Offline machines sit here. |
+| **failed** | The console rejected it, or reports the migration as failed. The row carries the reason. |
+
+`move-to-console` only replies with a count, so the page reads each agent
+back to produce the per-machine result above. Turning **Confirm each
+agent** off halves the API calls, but then "moved" means only that the
+console accepted the request.
+
+Re-run the **Status report** (under *ALSO*) later to confirm that the
+pending agents arrived.
+
 ---
 
 ## 4. Post-Migration Validation

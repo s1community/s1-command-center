@@ -3,6 +3,7 @@
 These functions decide what gets sent to a destination console during a
 migration, so they are the highest-value pure logic to lock down with tests.
 """
+import json
 import os
 import sys
 
@@ -17,6 +18,7 @@ from pages import (
     _build_role_payload,
     _role_scope_filter,
     _overlay_role_permissions,
+    _find_permission_list,
     explain_error,
     _is_exists_error,
     _FW_RULE_FIELDS,
@@ -35,6 +37,11 @@ from pages import (
     _endpoint_tags_for_scope,
     _overrides_for_scope,
     _override_payload,
+    _bundle_payload,
+    _account_licenses_payload,
+    _account_create_attempts,
+    _failure_counts,
+    _account_in_list,
 )
 
 
@@ -884,6 +891,32 @@ def test_build_role_payload_fallback_without_template():
     assert out == {"name": "DJW-Viewer", "description": "Read-only"}
 
 
+# S1 answers a role that grants nothing with
+# "You must have at least one permission configured (code 4000010)".
+# Both routes to a permission-less payload must be detectable so the
+# restore can refuse to send one (DJ Wilhelm, 2.3.2).
+
+def test_template_less_role_payload_has_no_permission_tree():
+    out = _build_role_payload(_source_role(), None)
+    assert _find_permission_list(out) is None
+
+
+def test_templated_role_payload_does_have_a_permission_tree():
+    out = _build_role_payload(_source_role(), _dest_template())
+    assert _find_permission_list(out) is not None
+
+
+def test_stripping_the_permission_tree_leaves_nothing_to_grant():
+    payload = _build_role_payload(_source_role(), _dest_template())
+    key = "roles" if "roles" in payload else "pages"
+    trimmed, dropped = _strip_unknown_fields(
+        payload,
+        "Validation Error :: data: dict_values(['%s']): "
+        "Unknown field (code 4000010)" % key)
+    assert dropped == [key]
+    assert _find_permission_list(trimmed) is None
+
+
 def test_role_scope_filter_prefers_site_then_account():
     assert _role_scope_filter("A1") == {"accountIds": ["A1"]}
     assert _role_scope_filter("A1", "S1") == {"siteIds": ["S1"]}
@@ -987,3 +1020,193 @@ def test_is_exists_error_false_for_real_failure():
 
 def test_is_exists_error_false_for_plain_400():
     assert not _is_exists_error(_Err("POST /x → 400", 400, "validation failed"))
+
+
+# ── account create payloads ────────────────────────────────────────────
+
+# Shape of one account as GET /accounts returns it (real Flextronics grab).
+_SRC_ACCOUNT = {
+    "id": "225494730938493804",
+    "name": "Flextronics",
+    "accountType": "Paid",
+    "state": "active",
+    "unlimitedExpiration": True,
+    "expiration": None,
+    "totalLicenses": 1750,
+    "licenses": {
+        "bundles": [{
+            "displayName": "Endpoint Security - Complete",
+            "majorVersion": 1,
+            "minorVersion": 34,
+            "name": "complete",
+            "surfaces": [{"count": -1, "name": "Total Agents"}],
+            "totalSurfaces": -1,
+        }],
+        "modules": [{"displayName": "Remote Script Orchestration",
+                     "majorVersion": 1, "name": "rso"}],
+        "settings": [{"displayName": "90 Days",
+                      "groupName": "dv_retention",
+                      "setting": "90 Days",
+                      "settingGroup": "dv_retention",
+                      "settingGroupDisplayName": "Deep Visibility Retention"}],
+    },
+}
+
+
+def test_bundle_payload_drops_read_only_fields_and_keeps_surfaces():
+    out = _bundle_payload(_SRC_ACCOUNT["licenses"]["bundles"][0])
+    assert out == {"name": "complete", "majorVersion": 1,
+                   "surfaces": [{"name": "Total Agents", "count": -1}]}
+
+
+def test_bundle_payload_invents_surfaces_when_the_source_has_none():
+    # THE BUG: a bundle sent as {"name": ...} alone is rejected with
+    # "licenses: bundles: 0: surfaces: Missing data for required field".
+    out = _bundle_payload({"name": "complete"})
+    assert out["surfaces"] == [{"name": "Total Agents", "count": -1}]
+
+
+def test_licenses_payload_reduces_modules_and_settings():
+    out = _account_licenses_payload(_SRC_ACCOUNT["licenses"])
+    assert out["modules"] == [{"name": "rso"}]
+    assert out["settings"] == [{"groupName": "dv_retention",
+                                "setting": "90 Days"}]
+
+
+def test_licenses_payload_bundles_only_keeps_the_core_sku():
+    lic = {"bundles": [{"name": "complete",
+                        "surfaces": [{"name": "Total Agents", "count": 50}]},
+                       {"name": "ranger", "surfaces": []}],
+           "modules": [{"name": "purple_ai"}],
+           "settings": [{"groupName": "dv_retention", "setting": "90 Days"}]}
+    out = _account_licenses_payload(lic, bundles_only=True)
+    assert out == {"bundles": [{"name": "complete",
+                                "surfaces": [{"name": "Total Agents",
+                                              "count": 50}]}]}
+
+
+def test_licenses_payload_tolerates_junk():
+    assert _account_licenses_payload(None) == {}
+    assert _account_licenses_payload({"bundles": ["nonsense", {}]}) == {}
+
+
+def test_every_create_attempt_carries_surfaces_on_every_bundle():
+    # Regression guard for the restore failing on ALL accounts with
+    # "data: licenses: bundles: 0: surfaces: Missing data for required
+    # field. (code 4000010)".
+    attempts = _account_create_attempts(_SRC_ACCOUNT, "Flextronics",
+                                        {"name": "core"})
+    assert attempts
+    for payload in attempts:
+        bundles = payload["licenses"]["bundles"]
+        assert bundles
+        for bundle in bundles:
+            assert bundle.get("surfaces"), payload
+            for surface in bundle["surfaces"]:
+                assert surface["name"] and "count" in surface
+
+
+def test_first_create_attempt_is_the_source_account_verbatim():
+    first = _account_create_attempts(_SRC_ACCOUNT, "Flextronics")[0]
+    assert first["name"] == "Flextronics"
+    assert first["accountType"] == "Paid"
+    assert first["unlimitedExpiration"] is True
+    assert "expiration" not in first          # null expiry is never sent
+    assert first["licenses"]["modules"] == [{"name": "rso"}]
+
+
+def test_create_attempts_degrade_to_bundles_then_to_a_bare_sku():
+    attempts = _account_create_attempts(_SRC_ACCOUNT, "Flextronics")
+    # add-ons dropped once, expiry dropped once, minimal bundle last
+    assert "modules" not in attempts[1]["licenses"]
+    assert "unlimitedExpiration" not in attempts[-1]
+    assert attempts[-1]["licenses"]["bundles"][0]["name"] == "complete"
+    assert len(attempts) == len({json.dumps(a, sort_keys=True)
+                                 for a in attempts})
+
+
+def test_create_attempts_use_the_destination_sku_when_source_has_none():
+    dest_bundle = {"name": "control", "displayName": "Control",
+                   "totalSurfaces": 500,
+                   "surfaces": [{"name": "Total Agents", "count": 500}]}
+    attempts = _account_create_attempts({"name": "A"}, "A", dest_bundle)
+    assert attempts[0]["licenses"]["bundles"] == [
+        {"name": "control", "surfaces": [{"name": "Total Agents",
+                                          "count": 500}]}]
+
+
+def test_create_attempts_never_empty_even_with_no_licence_data():
+    attempts = _account_create_attempts({}, "A")
+    assert len(attempts) == 1
+    assert attempts[0] == {
+        "name": "A",
+        "licenses": {"bundles": [{"name": "complete",
+                                  "surfaces": [{"name": "Total Agents",
+                                                "count": -1}]}]}}
+
+
+def test_create_attempts_do_not_mutate_the_backup_node():
+    before = json.dumps(_SRC_ACCOUNT, sort_keys=True)
+    _account_create_attempts(_SRC_ACCOUNT, "Flextronics", {"name": "core"})
+    assert json.dumps(_SRC_ACCOUNT, sort_keys=True) == before
+
+
+# ── _account_in_list (phantom-create guard) ───────────────────────────
+
+def test_account_present_by_id():
+    accts = [{"id": "111", "name": "X"}, {"id": "222", "name": "Y"}]
+    assert _account_in_list(accts, "222", "anything")
+
+
+def test_account_present_by_name_when_id_differs():
+    # Some consoles surface a freshly-created account only by name at first.
+    accts = [{"id": "999", "name": "Flextronics"}]
+    assert _account_in_list(accts, "000", "Flextronics")
+
+
+def test_account_absent_is_false():
+    accts = [{"id": "111", "name": "X"}]
+    assert not _account_in_list(accts, "222", "Y")
+
+
+def test_account_in_list_handles_empty_and_junk():
+    assert not _account_in_list([], "1", "A")
+    assert not _account_in_list(None, "1", "A")
+    assert not _account_in_list(["nonsense", None, {}], "1", "A")
+
+
+def test_account_id_match_is_string_insensitive():
+    assert _account_in_list([{"id": 222, "name": "Y"}], "222", "Z")
+
+
+# ── _failure_counts (completion summary) ──────────────────────────────
+
+def test_partial_failures_are_not_reported_across_zero_nodes():
+    # A node keeps status "done" unless EVERY element on it failed, so
+    # counting only status=="error" produced "74 item(s) across 0 node(s)".
+    nodes = [{"status": "done", "failed_items": [{"item": "a"},
+                                                 {"item": "b"}]},
+             {"status": "done", "failed_items": []},
+             {"status": "done", "failed_items": [{"item": "c"}]}]
+    assert _failure_counts(nodes) == (3, 2)
+
+
+def test_failure_counts_includes_wholly_failed_nodes():
+    nodes = [{"status": "error"},
+             {"status": "error", "failed_items": [{"item": "a"}]}]
+    assert _failure_counts(nodes) == (1, 2)
+
+
+def test_failure_counts_clean_run_and_empty_input():
+    assert _failure_counts([{"status": "done", "failed_items": []}]) == (0, 0)
+    assert _failure_counts([]) == (0, 0)
+    assert _failure_counts(None) == (0, 0)
+
+
+def test_dated_expiry_is_passed_through_when_not_unlimited():
+    src = {"name": "A", "unlimitedExpiration": False,
+           "expiration": "2027-01-01T00:00:00Z",
+           "licenses": {"bundles": [{"name": "complete"}]}}
+    attempts = _account_create_attempts(src, "A")
+    assert attempts[0]["expiration"] == "2027-01-01T00:00:00Z"
+    assert "expiration" not in attempts[-1]

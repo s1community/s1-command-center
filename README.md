@@ -62,6 +62,20 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Live Progress Table** — Color-coded status for each node
 - **Detailed Error Reporting** — Shows exact API errors for every failed item
 
+### Agent Migration
+Moves the agents themselves between consoles, so each source group's endpoints land in the **same-named** group on the destination, using that group's own registration token. A guided three-step flow — each step unlocks the next.
+
+- **1 · Read destination** — Walks the destination's accounts, sites and groups and saves them with their registration tokens to a map file
+- **2 · Match scopes** — Lists every one of *your* source accounts, sites and groups beside the destination scope it pairs with, so you can see what was found before anything moves. **Nothing is sent.** Anything that can't migrate says why — a name that differs between the consoles, a missing registration token, agents that already moved — and name mismatches get a one-click **Fix name**
+- **3 · Migrate** — Sends the move per group with that group's own token and names **every machine as it goes**, with the console's own reason when one doesn't make it
+- **Per-agent confirmation** — The move endpoint only replies with a count, so each agent is read back afterwards; that's what turns "the console accepted 400" into *moved*, *pending* or *failed* per machine
+- **Pick scopes from a list** — **Choose…** on the account and site fields lets you tick what you want instead of hunting for ids to paste. Built for big consoles: the search runs **on the console**, one bounded page at a time, so a tenant with thousands of sites opens as fast as one with five. Ticks survive searching, and the site list is narrowed to whichever accounts you picked
+- **Live API view** — The actual requests going out (endpoint, filter, batch size, masked token) and what came back
+- **Remembers the plan** — Step 2's result is cached, so reopening the app doesn't re-walk the console; the plan's age is shown with a **Match again** button
+- **No dry-run switch** — Step 2 physically cannot move anything, and step 3's button names the number of agents it is about to move
+- **Scheduling** — Arm a live run for a chosen date and time
+- **Migration status report** — Counts per console-migration status, optional passphrases, decommissioned agents
+
 ### Reports
 - **HTML Restore Report** — Professional dark-themed report with:
   - Summary statistics cards (nodes restored, skipped, errors, elements created)
@@ -106,7 +120,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.2.8 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.5.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -191,6 +205,15 @@ Navigate to **Restore to Dest**:
 3. Set restore scope and filters
 4. Click **▶ Restore Now**
 5. Click **Export Log** for a detailed HTML report
+
+### 4. Move the Agents
+
+Once the destination has the sites and groups, navigate to **Agent Migration**:
+1. **Read destination** — writes a map file of the destination's scopes and their registration tokens
+2. **Match scopes** — lists each source scope beside the destination scope it pairs with. Nothing moves; fix any name mismatches here
+3. **Migrate** — the red button names how many agents it will move. Each machine is reported as it goes, and the **Failed** filter shows any that didn't make it, with the console's reason
+
+> Agents move on their next check-in, so some will sit at *pending*. Re-run the **Status report** later to confirm they arrived.
 
 ## Backup & Restore
 
@@ -356,6 +379,26 @@ Live download analytics for every release, broken down by version and platform:
 Pure static page reading the public GitHub Releases API — no telemetry shipped from the app, no PII collected.
 
 ## Changelog
+
+Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v2.5.0 — 2026-09-21
+#### Added
+- **Agent Migration** — moves the agents themselves, so each source group's endpoints land in the same-named destination group using that group's own registration token. Guided three steps: read the destination, match the scopes (nothing is sent — this step physically cannot move an agent), migrate. Every machine is named as it goes.
+- **Per-agent confirmation** — `move-to-console` replies with a count and nothing else, so each agent is read back afterwards and reported as *moved*, *pending* or *failed* on its own. A rejected batch marks every agent in it failed with the console's own error text.
+- **Scope choosers** — **Choose…** on every account and site field opens a searchable, tickable list. The search runs on the console one bounded page at a time, so a tenant with thousands of sites opens as fast as one with five.
+- **Missing destination accounts are created during restore** — `POST /accounts` requires every licence bundle to carry `surfaces` and rejects the read-only extras `GET /accounts` returns, so the licences block is rebuilt field by field. The account is read back rather than assumed created, and a name held by an expired or deleted account is surfaced as the cause.
+- **Pre-flight checks whether the console will create accounts at all** — account creation needs Global permissions *and* an MSSP deployment; a non-MSSP console refuses it whatever the token. Pre-flight says so up front, and **Diagnose account creation** reports who the token is and what the console answers.
+
+#### Bug Fixes
+- **A large restore looked frozen** — the before/after diff read every element of every node twice (~15,000 calls on a big migration) to fill a panel needing only the node's identity; those snapshots are now identity-only. The node dropdown, which built one Tk menu entry per node, is capped.
+- **A failing account no longer buries its own cause** — it stopped hundreds of child failures from hiding the console's actual words.
+- **An RBAC role that grants nothing is no longer posted** — S1 refuses it outright, so the run reports what really went wrong instead of retrying into a guaranteed failure.
+- **Roles now report when there were none** (DJ Wilhelm) — silence looked identical to RBAC being skipped.
+
+#### Changed
+- Scope listings are cached for the duration of a restore (opt-in, invalidated whenever a scope is created), so resolving hundreds of nodes stops re-fetching the same lists.
+- 584 tests, up from 440.
 
 ### v2.2.8 — 2026-09-02
 #### Bug Fixes

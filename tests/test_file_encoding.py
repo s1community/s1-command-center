@@ -21,6 +21,7 @@ import export_utils  # noqa: E402
 APP_MODULES = [
     "app.py", "pages.py", "pages_extra.py", "export_utils.py",
     "config.py", "migtools.py", "tag_audit.py", "s1_api.py",
+    "agent_migrator.py",
     "scripts/cleanup_duplicate_star_rules.py",
 ]
 

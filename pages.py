@@ -1543,6 +1543,140 @@ _GROUP_CREATE_FIELDS = {
     "name", "description", "inherits", "rank", "policy",
 }
 
+# POST /accounts requires EVERY licence bundle to carry `surfaces`
+# ([{name, count}], count -1 = unlimited). A bundle sent as just
+# {"name": "complete"} is rejected with
+#   "data: licenses: bundles: 0: surfaces: Missing data for required field".
+# GET /accounts also returns read-only extras on each bundle/module
+# (displayName, totalSurfaces, minorVersion) that the create schema
+# rejects, so the licences block is rebuilt field by field.
+_DEFAULT_SURFACE = {"name": "Total Agents", "count": -1}
+
+
+def _bundle_payload(bundle: dict) -> dict:
+    """One `licenses.bundles` entry, create-ready (name + surfaces)."""
+    out = {"name": bundle.get("name")}
+    if bundle.get("majorVersion") is not None:
+        out["majorVersion"] = bundle["majorVersion"]
+    surfaces = [{"name": s.get("name"), "count": s.get("count", -1)}
+                for s in (bundle.get("surfaces") or [])
+                if isinstance(s, dict) and s.get("name")]
+    out["surfaces"] = surfaces or [dict(_DEFAULT_SURFACE)]
+    return out
+
+
+def _account_licenses_payload(licenses: dict,
+                              bundles_only: bool = False) -> dict:
+    """Sanitise an account's `licenses` block for POST /accounts.
+
+    `bundles_only` keeps just the primary (core SKU) bundle and drops the
+    add-on modules and licence settings — the destination tenant may not
+    be entitled to them.
+    """
+    lic = licenses if isinstance(licenses, dict) else {}
+    bundles = [_bundle_payload(b) for b in (lic.get("bundles") or [])
+               if isinstance(b, dict) and b.get("name")]
+    if bundles_only:
+        return {"bundles": bundles[:1]} if bundles else {}
+    out = {}
+    if bundles:
+        out["bundles"] = bundles
+    modules = [{"name": m.get("name")} for m in (lic.get("modules") or [])
+               if isinstance(m, dict) and m.get("name")]
+    if modules:
+        out["modules"] = modules
+    settings = []
+    for s in (lic.get("settings") or []):
+        if not isinstance(s, dict):
+            continue
+        group = s.get("groupName") or s.get("settingGroup")
+        value = s.get("setting") or s.get("displayName")
+        if group and value:
+            settings.append({"groupName": group, "setting": value})
+    if settings:
+        out["settings"] = settings
+    return out
+
+
+def _account_in_list(accts: list, new_id: str, name: str) -> bool:
+    """Is an account with this id (preferred) or name present in `accts`?
+
+    Used to confirm a create actually landed — a matching id OR the exact
+    name both count, since some consoles echo a new id while others only
+    surface the account by name on the next list.
+    """
+    for a in accts or []:
+        if not isinstance(a, dict):
+            continue
+        if new_id and str(a.get("id")) == str(new_id):
+            return True
+        if name and a.get("name") == name:
+            return True
+    return False
+
+
+def _failure_counts(nodes: list) -> tuple:
+    """(failed items, nodes carrying them) across a restore's node reports.
+
+    A node is only marked `status: "error"` when EVERY element on it
+    failed, so counting those alone reports "N item(s) across 0 node(s)"
+    for the common partial-failure run.
+    """
+    items = 0
+    hit_nodes = 0
+    for n in nodes or []:
+        failed = len(n.get("failed_items") or [])
+        items += failed
+        if failed or n.get("status") == "error":
+            hit_nodes += 1
+    return items, hit_nodes
+
+
+def _account_create_attempts(src_acct: dict, name: str,
+                             dest_bundle: Optional[dict] = None) -> list:
+    """POST /accounts payloads for a missing account, best fidelity first.
+
+    The source account's own licences are tried first, then progressively
+    simpler blocks, so a destination that lacks the source's add-on
+    modules or expiry still ends up with the account.
+    """
+    src = src_acct if isinstance(src_acct, dict) else {}
+    base = {"name": name}
+    if src.get("accountType"):
+        base["accountType"] = src["accountType"]
+    expiry = {}
+    if src.get("unlimitedExpiration"):
+        expiry["unlimitedExpiration"] = True
+    elif src.get("expiration"):
+        expiry["expiration"] = src["expiration"]
+
+    src_lic = src.get("licenses") or {}
+    attempts: list = []
+
+    def _add(lic: dict, with_expiry: bool = False):
+        if not lic.get("bundles"):
+            return
+        payload = dict(base)
+        if with_expiry:
+            payload.update(expiry)
+        payload["licenses"] = lic
+        if payload not in attempts:
+            attempts.append(payload)
+
+    _add(_account_licenses_payload(src_lic), with_expiry=True)
+    _add(_account_licenses_payload(src_lic, bundles_only=True),
+         with_expiry=True)
+    _add(_account_licenses_payload(src_lic, bundles_only=True))
+    if isinstance(dest_bundle, dict) and dest_bundle.get("name"):
+        _add({"bundles": [_bundle_payload(dest_bundle)]})
+    sku = ((dest_bundle or {}).get("name")
+           or next((b.get("name") for b in (src_lic.get("bundles") or [])
+                    if isinstance(b, dict) and b.get("name")), "")
+           or "complete")
+    _add({"bundles": [{"name": sku, "surfaces": [dict(_DEFAULT_SURFACE)]}]})
+    return attempts
+
+
 # Named /tags objects (firewall, network-quarantine, device-inventory).
 # `kind`, `affectedScopes` and `linkedRules` are read-only on the source and
 # are rejected by the create endpoint, so they must never be sent.
@@ -2090,7 +2224,7 @@ def _dest_identity_from_data(ntype: str, data: dict) -> dict:
 
 
 def _fetch_dest_snapshot(api, ntype: str, dest_id: str,
-                         reader=None, elements=None) -> dict:
+                         reader=None, elements=None, light=False) -> dict:
     """Snapshot a console for one node — shaped the same as a backup `data`
     dict so `_summarize_node_payload` works on both sides. Errors per-element
     are swallowed; missing keys just produce 0-count rows.
@@ -2099,7 +2233,12 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str,
     backed-up elements is read through the exact same code path backup uses —
     so validation compares everything that migration moves, and can't drift
     from the backup element list. When `reader` is None, only the lightweight
-    subset below is read (used by the restore before/after diff panel)."""
+    subset below is read (used by the restore before/after diff panel).
+
+    When `light` is True, only the cheap identity object is fetched and the
+    ~12 per-scope element GETs are skipped. The restore's live before/after
+    diff snapshots use this: reading every element twice per node was ~15k
+    calls on a large migration, which made the run look frozen."""
     if not dest_id and ntype != "global":
         return {}
     scope = _scope(ntype, dest_id) if ntype != "global" else {"tenant": "true"}
@@ -2127,6 +2266,10 @@ def _fetch_dest_snapshot(api, ntype: str, dest_id: str,
                     break
         except Exception:
             pass
+
+    # Identity-only: skip the heavy per-element reads entirely.
+    if light:
+        return data
 
     # Full, drift-proof read through the shared backup reader.
     if reader is not None:
@@ -4016,12 +4159,22 @@ class DiffPanel(ctk.CTkFrame):
 
     # ── Public API ─────────────────────────────────────────────────────
 
+    # A CTkOptionMenu builds one Tk menu entry per value, so a backup with
+    # hundreds of nodes froze the UI for seconds just populating the dropdown.
+    # Cap what the dropdown holds; `_backup` still carries every node so the
+    # restore loop's programmatic focus() reaches all of them.
+    _MENU_CAP = 200
+
     def set_backup(self, backup: list):
         """Called once when a backup file is loaded into RestorePage."""
         self._backup = backup or []
         self._dest_snaps.clear()
         labels = [self._label_for(i, n)
-                  for i, n in enumerate(self._backup)]
+                  for i, n in enumerate(self._backup[:self._MENU_CAP])]
+        if len(self._backup) > self._MENU_CAP:
+            labels.append(
+                f"… (+{len(self._backup) - self._MENU_CAP} more — "
+                f"navigated automatically during restore)")
         if not labels:
             labels = ["(empty backup)"]
             self._current_idx = None
@@ -4645,18 +4798,42 @@ class RestorePage(ctk.CTkFrame):
         cli_log(f"Auto-loaded: {latest}", "info")
 
     def _load_file(self, fp):
-        """Load a backup JSON file and update the UI."""
+        """Load a backup JSON file and update the UI.
+
+        A big backup froze the app for seconds because the parse, secret
+        scan and integrity walk all ran on the UI thread. The heavy work now
+        runs in a worker thread; only the widget updates happen on the main
+        thread once it's done."""
         self.file_entry.delete(0, "end")
         self.file_entry.insert(0, fp)
-        try:
+        self.info_lbl.configure(text=f"Loading {os.path.basename(fp)}…")
+
+        def do():
             with open(fp, "r", encoding="utf-8") as f:
-                self.backup_data = json.load(f)
-            n = len(self.backup_data)
+                data = json.load(f)
             types = {}
-            for node in self.backup_data:
+            for node in data:
                 t = node.get("type", "?")
                 types[t] = types.get(t, 0) + 1
             summary = ", ".join(f"{v} {k}(s)" for k, v in types.items())
+            nsec = 0
+            try:
+                from export_utils import count_backup_secrets
+                nsec = count_backup_secrets(data)
+            except Exception:
+                pass
+            rep = None
+            try:
+                from migtools import check_backup_integrity
+                rep = check_backup_integrity(data)
+            except Exception:
+                pass
+            return {"data": data, "summary": summary, "nsec": nsec,
+                    "rep": rep, "fp": fp}
+
+        def done(res):
+            self.backup_data = res["data"]
+            n = len(self.backup_data)
             # Populate the diff panel so the operator can browse the
             # backup contents *before* clicking restore.
             if hasattr(self, "diff_panel"):
@@ -4665,21 +4842,15 @@ class RestorePage(ctk.CTkFrame):
                 except Exception:
                     pass
             note = ""
-            try:
-                from export_utils import count_backup_secrets
-                nsec = count_backup_secrets(self.backup_data)
-                if hasattr(self, "_redact_btn"):
-                    self._redact_btn.configure(
-                        state="normal" if nsec else "disabled")
-                if nsec:
-                    note = (f"   ⚠ contains {nsec} secret value(s) — use "
-                            f"'Redacted Copy' before sharing")
-            except Exception:
-                pass
-            # Integrity check — surface a corrupt/incomplete backup up front.
-            try:
-                from migtools import check_backup_integrity
-                rep = check_backup_integrity(self.backup_data)
+            nsec = res["nsec"]
+            if hasattr(self, "_redact_btn"):
+                self._redact_btn.configure(
+                    state="normal" if nsec else "disabled")
+            if nsec:
+                note = (f"   ⚠ contains {nsec} secret value(s) — use "
+                        f"'Redacted Copy' before sharing")
+            rep = res["rep"]
+            if rep is not None:
                 for w in rep["warnings"]:
                     cli_log(f"backup integrity: {w}", "warning")
                 for e in rep["errors"]:
@@ -4688,14 +4859,15 @@ class RestorePage(ctk.CTkFrame):
                     note += "   ❌ integrity errors — see log"
                 elif rep["warnings"]:
                     note += f"   ⚠ {len(rep['warnings'])} integrity warning(s)"
-            except Exception:
-                pass
             self.info_lbl.configure(
-                text=f"Loaded {n} nodes: {summary}  "
-                     f"({os.path.basename(fp)}){note}")
-        except Exception as e:
+                text=f"Loaded {n} nodes: {res['summary']}  "
+                     f"({os.path.basename(res['fp'])}){note}")
+
+        def fail(e):
             self.info_lbl.configure(text=f"Error: {e}")
             self.backup_data = None
+
+        run_async(self, do, done, fail)
 
     def _export_redacted(self):
         """Save a sanitised copy of the loaded backup (secrets masked), safe
@@ -4904,6 +5076,35 @@ class RestorePage(ctk.CTkFrame):
                     facts["dest_scope_exists"] = found
                 except Exception:
                     pass
+            # Which of the backup's accounts are missing on the destination,
+            # and will this console even create them? POST /accounts needs
+            # Global perms AND an MSSP deployment, so this can fail on a
+            # perfectly valid global token.
+            try:
+                want = {(n.get("account") or {}).get("name")
+                        for n in backup if n.get("type") != "global"}
+                want.discard(None)
+                want.discard("")
+                have = {a.get("name") for a in api.get_accounts()}
+                missing = sorted(want - have)
+                facts["accounts_to_create"] = len(missing)
+                if missing:
+                    avail, detail = api.account_name_available(missing[0])
+                    if avail is None:
+                        facts["can_create_accounts"] = (
+                            False if "403" in (detail or "") else None)
+                        facts["account_create_reason"] = detail
+                    else:
+                        # name-available answered, so the token can at least
+                        # read the accounts admin surface. Whether it may
+                        # WRITE is a separate RBAC bit we cannot see, so
+                        # leave it unknown rather than guessing.
+                        facts["can_create_accounts"] = None
+                        facts["account_create_reason"] = (
+                            "token can query account names; Accounts.create "
+                            "cannot be verified without attempting a write")
+            except Exception:
+                pass
             checks = evaluate_preflight(facts)
             return checks, preflight_verdict(checks)
 
@@ -5478,6 +5679,7 @@ class RestorePage(ctk.CTkFrame):
                 break
         self._cancelled = False
         self._skip_element = False
+        self._acct_create_error = None
         self.progress.set(0)
         self._timer_start = _time.time()
         self._timer_running = True
@@ -5535,11 +5737,17 @@ class RestorePage(ctk.CTkFrame):
                 # restore look like it's still snapshotting.
                 self.after(0, lambda: self._status_lbl.configure(
                     text="Restoring…", text_color=INFO))
+            # Cache accounts/sites/groups listings for the whole run — the
+            # resolver checks them against every node and the raw lists
+            # barely change (only when WE create a scope, which invalidates
+            # the matching kind). Disabled again in done()/fail().
+            api.enable_scope_cache()
             return self._run_restore(api, self.backup_data, elements,
                                      levels, scope_filters)
 
         def done(count):
             import time as _t
+            api.disable_scope_cache()
             self._timer_running = False
             self._set_ui_running(False)
             elapsed = _t.time() - self._timer_start
@@ -5579,6 +5787,7 @@ class RestorePage(ctk.CTkFrame):
                     cli_log(f"Completion popup error: {_e}", "warning")
 
         def fail(e):
+            api.disable_scope_cache()
             self._timer_running = False
             self._set_ui_running(False)
             self._timer_lbl.configure(text="✗ failed", text_color=ACCENT)
@@ -5621,8 +5830,7 @@ class RestorePage(ctk.CTkFrame):
         restore finishes (not cancelled)."""
         meta = getattr(self, "_report_meta", {}) or {}
         nodes = getattr(self, "_report_nodes", []) or []
-        total_failed = sum(len(n.get("failed_items", [])) for n in nodes)
-        error_nodes = sum(1 for n in nodes if n.get("status") == "error")
+        total_failed, error_nodes = _failure_counts(nodes)
         restored = meta.get("restored_count", 0)
         total = meta.get("total_nodes", 0)
         customer = (meta.get("customer") or meta.get("dest_console")
@@ -5944,12 +6152,49 @@ class RestorePage(ctk.CTkFrame):
                     npath, ntype, "(node)", npath, "failed",
                     f"destination {ntype} could not be resolved/created "
                     f"({reason}) — NOTHING from this scope was restored")
+                # An account that cannot be created is fatal: every site and
+                # group below it would fail too, producing hundreds of
+                # meaningless errors that bury the real cause. Stop here and
+                # show the console's actual reason.
+                if ntype == "account":
+                    info = getattr(self, "_acct_create_error", None) or {}
+                    detail = info.get("error") or reason
+                    notes = info.get("notes") or []
+                    msg_lines = [
+                        f"Could not create account '{info.get('name') or npath}'"
+                        f" on the destination.",
+                        "",
+                        f"Console said: {detail}",
+                    ]
+                    if notes:
+                        msg_lines += ["", "Diagnosis:"] + \
+                            [f"  • {n}" for n in notes]
+                    msg_lines += [
+                        "",
+                        "'Accounts.create' is an RBAC permission that is not "
+                        "visible on the token. If the console UI can create "
+                        "accounts but this token cannot, the token's user "
+                        "(see 'token identity' above) lacks that permission.",
+                        "",
+                        "Restore stopped — no further nodes were processed.",
+                    ]
+                    full = "\n".join(msg_lines)
+                    for line in full.splitlines():
+                        if line.strip():
+                            self._operation_log.append(f"  {line}")
+                    cli_log(f"RESTORE STOPPED — account '{info.get('name')}' "
+                            f"could not be created: {detail}", "error")
+                    self._cancelled = True
+                    ui(lambda m=full: messagebox.showerror(
+                        "Account creation failed — restore stopped", m))
+                    break
                 continue
 
             # ── Diff-panel: snapshot destination BEFORE we write to it ──
             # Network calls — runs in this worker thread.
             try:
-                snap_before = _fetch_dest_snapshot(api, ntype, dest_id or "")
+                snap_before = _fetch_dest_snapshot(
+                    api, ntype, dest_id or "", light=True)
                 if hasattr(self, "diff_panel"):
                     ui(lambda ii=i, t=ntype, d=snap_before:
                        self.diff_panel.record_dest_snapshot(
@@ -6036,6 +6281,7 @@ class RestorePage(ctk.CTkFrame):
                                             f"(id={s['id']})")
                                     api.update_site(dest_id,
                                                     {"isDefault": True, "name": new_name})
+                                    api.invalidate_scope_cache("sites")
                                     log(f"  Set default + rename → '{new_name}'")
                                     self._operation_log.append(
                                         f"  ✓ Set default + renamed: "
@@ -6047,6 +6293,7 @@ class RestorePage(ctk.CTkFrame):
                                 if sname:
                                     update["name"] = sname
                                 api.update_site(dest_id, update)
+                                api.invalidate_scope_cache("sites")
                                 log(f"  Set default + rename → '{sname}'")
                                 self._operation_log.append(
                                     f"  ✓ Set default + renamed: "
@@ -7343,6 +7590,20 @@ class RestorePage(ctk.CTkFrame):
 
                     def _create_role(r):
                         payload = _build_role_payload(r, role_template)
+                        # S1 refuses a role that grants nothing ("You must
+                        # have at least one permission configured", code
+                        # 4000010). Without the destination template there
+                        # is no permission tree to send, so posting it is a
+                        # guaranteed failure with a misleading error — say
+                        # what actually went wrong instead.
+                        if not _find_permission_list(payload):
+                            raise RuntimeError(
+                                "no permission tree to send — the "
+                                "destination's role template could not be "
+                                "fetched, and S1 rejects a role with no "
+                                "permissions. Create this role by hand on "
+                                "the destination, or re-run once "
+                                "GET /rbac/role works for this account.")
                         try:
                             return api.create_role(payload, scope_filter)
                         except Exception as exc:
@@ -7350,6 +7611,20 @@ class RestorePage(ctk.CTkFrame):
                                 payload, _err_detail(exc))
                             if not dropped:
                                 raise
+                            # Dropping the permission tree to satisfy an
+                            # "Unknown field" rejection leaves a role that
+                            # grants nothing, which S1 refuses outright —
+                            # the retry cannot succeed, so don't pretend.
+                            if not _find_permission_list(trimmed):
+                                raise RuntimeError(
+                                    f"destination rejected "
+                                    f"{', '.join(dropped)} as an unknown "
+                                    f"field, and removing it leaves the "
+                                    f"role with no permissions, which S1 "
+                                    f"also refuses. The destination's role "
+                                    f"schema differs from this backup — "
+                                    f"create the role by hand. Original "
+                                    f"error: {_err_detail(exc)[:200]}")
                             resp = api.create_role(trimmed, scope_filter)
                             self._operation_log.append(
                                 f"    ↳ role '{r.get('name', '?')}': the "
@@ -7366,6 +7641,12 @@ class RestorePage(ctk.CTkFrame):
                             return resp
 
                     _r_bulk("roles", creatable_roles, _create_role)
+            elif "roles" in elements and ntype == "account":
+                # Every other element reports when it has nothing to do;
+                # roles did not, so an account node with no captured roles
+                # produced no log line at all and looked like the restore
+                # had silently skipped RBAC entirely (DJ Wilhelm, 2.3.2).
+                _nothing("roles", "roles" in data)
 
             # ── Service users (API users) ──
             # These used to be captured for audit only, so a migration that
@@ -7560,7 +7841,8 @@ class RestorePage(ctk.CTkFrame):
             # This is the "after" state the operator wants to compare to
             # the backup. Same network cost as the "before" snapshot.
             try:
-                snap_after = _fetch_dest_snapshot(api, ntype, dest_id or "")
+                snap_after = _fetch_dest_snapshot(
+                    api, ntype, dest_id or "", light=True)
                 if hasattr(self, "diff_panel"):
                     ui(lambda ii=i, t=ntype, d=snap_after:
                        self.diff_panel.record_dest_snapshot(
@@ -7803,6 +8085,39 @@ class RestorePage(ctk.CTkFrame):
             self._record_site_element(site_path, "group-ranks",
                                       f"{len(ids)} ordered")
 
+    def _confirm_account_created(self, api, new_id, name, progress=None):
+        """Return True only if an account with `new_id` (or `name`) is really
+        on the destination after a create. POST /accounts can answer 200 and
+        persist nothing; without this check the run reports a phantom account
+        and every site/group under it then fails to find its parent.
+
+        Reads bypass the scope cache (get_account_by_id / a forced refetch)
+        and are polled a few times because creation can take a moment to
+        become visible.
+        """
+        _p = progress or (lambda msg: None)
+        import time as _t
+        # Check immediately, then one short retry to cover the case where the
+        # console needs a moment to surface a genuinely-created account. Kept
+        # brief so a token that CAN'T create accounts fails fast (dozens of
+        # 6s waits in a row is exactly what made the run look frozen).
+        for attempt in range(2):
+            try:
+                if api.get_account_by_id(new_id):
+                    return True
+            except Exception:
+                pass
+            try:
+                api.invalidate_scope_cache("accounts")
+                if _account_in_list(api.get_accounts(), new_id, name):
+                    return True
+            except Exception:
+                pass
+            if attempt == 0:
+                _p(f"verifying account '{name}' exists…")
+                _t.sleep(1.0)
+        return False
+
     def _resolve_dest_id(self, api, node, log, progress=None):
         """Resolve destination ID, auto-creating sites/groups if missing."""
         ntype = node.get("type")
@@ -7841,6 +8156,37 @@ class RestorePage(ctk.CTkFrame):
                         f"expected {dest_acct_id} — verify this is the correct account!")
                 _p(f"found account → id={found['id']}")
                 return found["id"]
+
+            # Not among ACTIVE accounts — but `get_accounts()` filters
+            # states=active, so an expired/deleted account still holding this
+            # name is invisible above. Creating would then be rejected for a
+            # name clash the operator can't see, so surface it explicitly.
+            try:
+                stale = [a for a in api.get_accounts_any_state(name=name)
+                         if a.get("name") == name]
+            except Exception:
+                stale = []
+            if stale:
+                st = stale[0]
+                self._operation_log.append(
+                    f"  ⚠ Account '{name}' already exists in state="
+                    f"{st.get('state')} (id={st.get('id')}) — it is not "
+                    f"active, so it cannot be restored onto and its name "
+                    f"cannot be reused. Reactivate it on the destination, "
+                    f"or rename the backup's account.")
+                cli_log(f"Account '{name}' exists but state="
+                        f"{st.get('state')} — cannot create or restore onto "
+                        f"it", "error")
+                self._acct_create_error = {
+                    "name": name,
+                    "error": (f"an account named '{name}' already exists in "
+                              f"state={st.get('state')} (id={st.get('id')}), "
+                              f"so the name cannot be reused"),
+                    "notes": ["Reactivate that account on the destination, "
+                              "or use Structure Operations → Mangle Rename "
+                              "to give the backup's account a free name."],
+                }
+                return None
 
             # ── Account not found — offer to create it ──
             if not self._auto_create_accounts:
@@ -7903,66 +8249,105 @@ class RestorePage(ctk.CTkFrame):
                         f"  ⊘ Skipped account '{name}' (user declined create)")
                     _p(f"account '{name}' skipped")
                     return None
-            # Build create payload.
-            # S1 requires `licenses` with at least one bundle entry.
-            # Use the DESTINATION's existing SKU — the source's bundle
-            # may not be available on this tenant.
+            # Build create payload. POST /accounts needs a full licences
+            # block — every bundle must carry `surfaces`. Start from the
+            # SOURCE account (that is what is being migrated) and fall
+            # back to the destination's own SKU if those licences aren't
+            # available on this tenant.
             src_acct = node.get("account", {}) or {}
-            create_data = {"name": name}
-            for field in ("accountType",):
-                v = src_acct.get(field)
-                if v:
-                    create_data[field] = v
-            # Detect the primary bundle from an existing destination
-            # account. Only take the first bundle (the core SKU) — add-on
-            # bundles (Purple AI, Ranger, etc.) may not be assignable to
-            # new accounts and cause "not available in your scope" errors.
-            sku_label = "?"
-            primary_bundle = None
+            # Primary bundle (core SKU) of an existing destination
+            # account — add-on bundles may not be assignable to new
+            # accounts and cause "not available in your scope" errors.
+            dest_bundle = None
             try:
-                existing = api.get_accounts()
-                if existing:
-                    dest_lic = existing[0].get("licenses", {})
-                    bundles = dest_lic.get("bundles", [])
-                    if bundles:
-                        primary_bundle = bundles[0]
-                        sku_label = primary_bundle.get("name", "?")
+                for a in (api.get_accounts() or []):
+                    d_bundles = (a.get("licenses") or {}).get("bundles") or []
+                    if d_bundles:
+                        dest_bundle = d_bundles[0]
+                        break
             except Exception:
                 pass
 
-            # Build license payloads: try full bundle first, then
-            # stripped-down fallbacks if the API rejects add-ons/surfaces.
-            attempts = []
-            if primary_bundle:
-                attempts.append({"bundles": [primary_bundle]})
-                # fallback: bundle name only, no surfaces
-                attempts.append({"bundles": [{"name": primary_bundle.get("name")}]})
-            attempts.append({"bundles": [{"name": "Complete"}]})
+            attempts = _account_create_attempts(src_acct, name, dest_bundle)
+            sku_label = ", ".join(
+                b.get("name", "?")
+                for b in attempts[0]["licenses"].get("bundles", [])) or "?"
 
             _p(f"creating account '{name}' (bundle={sku_label})…")
             last_err = ""
-            for lic_payload in attempts:
-                create_data["licenses"] = lic_payload
+            for create_data in attempts:
                 try:
                     resp = api.create_account(create_data)
                     d = resp.get("data", {})
                     new_id = (d.get("id")
                               or (d.get("account", {}).get("id")
                                   if isinstance(d, dict) else None))
+                    # A 2xx is NOT proof the account exists — some tenants
+                    # answer 200 to POST /accounts and persist nothing (the
+                    # console has no matching account afterwards). Confirm it
+                    # is really there before reporting success, and log the
+                    # raw response so a silent no-op is diagnosable.
                     if new_id:
+                        try:
+                            api.invalidate_scope_cache("accounts")
+                        except Exception:
+                            pass
+                        confirmed = self._confirm_account_created(
+                            api, str(new_id), name, _p)
+                        if confirmed:
+                            self._operation_log.append(
+                                f"  ✓ AUTO-CREATED account '{name}' → "
+                                f"id={new_id} (bundle={sku_label})")
+                            _p(f"created account '{name}' → id={new_id}")
+                            return new_id
+                        last_err = (f"POST /accounts returned id={new_id} but "
+                                    f"no such account exists afterwards "
+                                    f"(response={str(resp)[:200]})")
                         self._operation_log.append(
-                            f"  ✓ AUTO-CREATED account '{name}' → id={new_id} "
-                            f"(bundle={sku_label})")
-                        _p(f"created account '{name}' → id={new_id}")
-                        return new_id
+                            f"    ↳ create reported id={new_id} but the "
+                            f"account is NOT on the destination — "
+                            f"treating as failed. Raw: {str(resp)[:200]}")
+                    else:
+                        last_err = (f"POST /accounts returned no id "
+                                    f"(response={str(resp)[:200]})")
+                        self._operation_log.append(
+                            f"    ↳ attempt returned no account id. "
+                            f"Raw: {str(resp)[:200]}")
                 except Exception as exc:
-                    last_err = getattr(exc, "detail", str(exc))
+                    # Full detail — this is the console's own explanation
+                    # (e.g. "Insufficient permissions", "requires MSSP").
+                    # Truncating it was hiding the actual cause.
+                    last_err = getattr(exc, "detail", "") or str(exc)
+                    status = getattr(exc, "status_code", "")
+                    stamp = f"HTTP {status}: " if status else ""
                     self._operation_log.append(
-                        f"    ↳ attempt with {lic_payload} failed: "
-                        f"{str(last_err)[:80]}")
+                        f"    ↳ attempt with "
+                        f"licenses={create_data.get('licenses')} failed: "
+                        f"{stamp}{last_err}")
+                    cli_log(f"create account '{name}' attempt failed: "
+                            f"{stamp}{last_err}", "error")
+                    last_err = f"{stamp}{last_err}"
             self._operation_log.append(
                 f"  ✗ Account '{name}' create failed: {last_err}")
             cli_log(f"Account '{name}' create error: {last_err}", "error")
+            # Explain WHY. POST /accounts needs Global perms AND an MSSP
+            # deployment, and the name must be free in ANY state — an
+            # expired/deleted account still holds its name but is hidden by
+            # the states=active listing the resolver uses.
+            notes = []
+            try:
+                notes = api.diagnose_account_creation(name)
+            except Exception as dexc:
+                notes = [f"diagnosis itself failed: {dexc}"]
+            for note in notes:
+                self._operation_log.append(
+                    f"    ⓘ account-create diagnosis: {note}")
+                cli_log(f"account-create diagnosis: {note}", "warning")
+            self._acct_create_error = {
+                "name": name,
+                "error": str(last_err),
+                "notes": notes,
+            }
             return None
 
         if ntype == "site":
@@ -8128,6 +8513,7 @@ class RestorePage(ctk.CTkFrame):
                             if sname and sname != cand_name:
                                 try:
                                     api.update_site(cand_id, {"name": sname})
+                                    api.invalidate_scope_cache("sites")
                                     self._operation_log.append(
                                         f"  ↻ Mapped + renamed '{cand_name}' "
                                         f"→ '{sname}' (id={cand_id})")
@@ -8185,6 +8571,10 @@ class RestorePage(ctk.CTkFrame):
                               or (d.get("site", {}).get("id")
                                   if isinstance(d, dict) else None))
                     if new_id:
+                        try:
+                            api.invalidate_scope_cache("sites")
+                        except Exception:
+                            pass
                         self._operation_log.append(
                             f"  ✓ AUTO-CREATED site '{sname}' → id={new_id}")
                         if is_scenario_b:
@@ -8463,6 +8853,10 @@ class RestorePage(ctk.CTkFrame):
                 d = resp.get("data", {})
                 new_id = d.get("id")
                 if new_id:
+                    try:
+                        api.invalidate_scope_cache("groups")
+                    except Exception:
+                        pass
                     kind = ("dynamic"
                             if (is_dynamic_source and dest_filter_id)
                             else "static")
@@ -9858,307 +10252,6 @@ class ValidationPage(ctk.CTkFrame):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Agent Migration Page
-# ═══════════════════════════════════════════════════════════════════════
-
-class AgentMigrationPage(ctk.CTkFrame):
-    def __init__(self, master, app, **kw):
-        super().__init__(master, fg_color="transparent", **kw)
-        self.app = app
-        self.agents = []
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
-
-        ctk.CTkLabel(self, text="Agent Migration",
-                     font=(UI_FONT, 22, "bold")).grid(
-            row=0, column=0, sticky="w", padx=20, pady=(20, 2))
-        ctk.CTkLabel(self,
-                     text="Move agents from SOURCE console to DESTINATION using a registration token.",
-                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
-            row=1, column=0, sticky="w", padx=20, pady=(0, 12))
-
-        # config card
-        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
-        card.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
-        card.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(card, text="Agent name filter:",
-                     font=(UI_FONT, 13)).grid(
-            row=0, column=0, padx=12, pady=8, sticky="w")
-        self.name_filter = ctk.CTkEntry(
-            card, placeholder_text="e.g. *WORKSTATION* (blank = all in scope)",
-            height=32)
-        self.name_filter.grid(row=0, column=1, padx=12, pady=8, sticky="ew")
-
-        ctk.CTkLabel(card, text="Dest reg. token:",
-                     font=(UI_FONT, 13)).grid(
-            row=1, column=0, padx=12, pady=8, sticky="w")
-        self.token_entry = ctk.CTkEntry(
-            card, placeholder_text="Target site/group registration token",
-            height=32)
-        self.token_entry.grid(row=1, column=1, padx=12, pady=8, sticky="ew")
-
-        ctk.CTkLabel(card, text="Site scope:",
-                     font=(UI_FONT, 13)).grid(
-            row=2, column=0, padx=12, pady=8, sticky="w")
-        self.site_filter = ctk.CTkEntry(
-            card, placeholder_text="(Optional) Site name on source to scope agents",
-            height=32)
-        self.site_filter.grid(row=2, column=1, padx=12, pady=8, sticky="ew")
-
-        # buttons
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.grid(row=3, column=0, sticky="ew", padx=20, pady=8)
-        ctk.CTkButton(btn_row, text="Preview Agents", height=36,
-                      command=self._preview).pack(side="left", padx=(0, 4))
-        _help_btn(btn_row,
-                  "Fetch agents from SOURCE matching the filters above."
-                  ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Migrate All", height=36,
-                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                      font=(UI_FONT, 13, "bold"),
-                      command=self._migrate).pack(side="left", padx=(0, 4))
-        _help_btn(btn_row,
-                  "Send a move-to-console command for all previewed agents "
-                  "using the destination registration token."
-                  ).pack(side="left", padx=(0, 8))
-        self._verify_btn = ctk.CTkButton(
-            btn_row, text="✓ Verify Move", height=36,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            command=self._verify_migration, state="disabled")
-        self._verify_btn.pack(side="left", padx=(0, 4))
-        _help_btn(btn_row,
-                  "After migrating (give agents a few minutes to re-register), "
-                  "reconcile counts: did the source drop and the destination "
-                  "gain the expected number of agents? Lists any stragglers."
-                  ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Export Report", height=36,
-                      fg_color=BRAND,
-                      command=self._export).pack(side="left", padx=(0, 4))
-        _help_btn(btn_row,
-                  "Export agent list as HTML/Excel/JSON."
-                  ).pack(side="left", padx=(0, 8))
-        self.count_lbl = ctk.CTkLabel(btn_row, text="",
-                                      font=(UI_FONT, 12),
-                                      text_color=TEXT_MUTED)
-        self.count_lbl.pack(side="left", padx=8)
-
-        # agent list
-        self.agent_list = ctk.CTkScrollableFrame(
-            self, fg_color=CARD, corner_radius=12, height=120)
-        self.agent_list.grid(row=4, column=0, sticky="nsew", padx=20, pady=4)
-
-        self.log = _ConsoleProxy(self.app)
-
-    def _read_filters(self):
-        """Read widget values on the main thread (no API calls)."""
-        return {
-            "name": self.name_filter.get().strip(),
-            "site": self.site_filter.get().strip(),
-            "token": self.token_entry.get().strip(),
-        }
-
-    @staticmethod
-    def _resolve_params(api, filters):
-        """Build API params from pre-read filter values (safe for background thread)."""
-        params = {}
-        needle = filters["name"]
-        if needle:
-            clean = needle.replace("*", "")
-            if clean:
-                params["computerName__contains"] = clean
-        site = filters["site"]
-        if site:
-            sites = api.get_sites(params={"name": site})
-            if sites:
-                params["siteIds"] = sites[0]["id"]
-        return params
-
-    def _preview(self):
-        api = self.app.source_api
-        if not api:
-            messagebox.showwarning("No source", "Connect SOURCE first.")
-            return
-        self.log.log("Fetching agents…")
-        filters = self._read_filters()
-
-        def do():
-            return api.get_agents(params=self._resolve_params(api, filters),
-                                  max_items=500)
-
-        def done(agents):
-            self.agents = agents
-            self.count_lbl.configure(text=f"{len(agents)} agents found")
-            for w in self.agent_list.winfo_children():
-                w.destroy()
-            for a in agents[:100]:
-                name = a.get("computerName", "?")
-                aid = a.get("id", "")
-                os_name = a.get("osName", "")
-                row = ctk.CTkFrame(self.agent_list, fg_color="transparent")
-                row.pack(fill="x", pady=1)
-                ctk.CTkLabel(row, text=name,
-                             font=(UI_FONT, 12, "bold")).pack(
-                    side="left", padx=4)
-                ctk.CTkLabel(row, text=f"  {os_name}  id={aid[:12]}…",
-                             font=(UI_FONT, 11),
-                             text_color=TEXT_MUTED).pack(side="left")
-            if len(agents) > 100:
-                ctk.CTkLabel(self.agent_list,
-                             text=f"… and {len(agents)-100} more",
-                             text_color=TEXT_MUTED).pack(pady=4)
-            self.log.log(f"Preview: {len(agents)} agents")
-
-        run_async(self, do, done)
-
-    def _migrate(self):
-        api = self.app.source_api
-        filters = self._read_filters()
-        token = filters["token"]
-        if not api:
-            messagebox.showwarning("No source", "Connect SOURCE first.")
-            return
-        if not token:
-            messagebox.showwarning("Missing", "Enter a registration token.")
-            return
-        if not self.agents:
-            messagebox.showwarning("No agents", "Preview agents first.")
-            return
-        if not messagebox.askyesno(
-                "Confirm Migration",
-                f"Migrate {len(self.agents)} agent(s) to the destination console?"):
-            return
-
-        self.log.log(f"Starting migration of {len(self.agents)} agents…")
-        cli_log(f"Starting agent migration: {len(self.agents)} agents…", "cmd")
-        scope_params = self._resolve_params(api, filters)
-        dst_api = self.app.dest_api
-
-        def do():
-            # Baseline counts BEFORE moving, for later reconciliation.
-            try:
-                src_before = api.get_agent_count(scope_params)
-            except Exception:
-                src_before = None
-            dst_before = None
-            if dst_api is not None:
-                try:
-                    dst_before = dst_api.get_agent_count()
-                except Exception:
-                    dst_before = None
-            ok_count = 0
-            fail_count = 0
-            for i, agent in enumerate(self.agents):
-                name = agent.get("computerName", "?")
-                aid = agent.get("id", "")
-                try:
-                    api.migrate_agent(aid, token)
-                    self.after(0, lambda n=name: self.log.log(f"  ✓ {n}"))
-                    ok_count += 1
-                except Exception as e:
-                    self.after(0, lambda n=name, err=e:
-                               self.log.log(f"  ✗ {n}: {err}"))
-                    fail_count += 1
-            return ok_count, fail_count, src_before, dst_before
-
-        def done(result):
-            ok, fail, src_before, dst_before = result
-            self.log.log(f"Migration done: {ok} OK, {fail} failed")
-            self.app.set_status(f"Migrated {ok} agents")
-            cli_log(f"Migration done: {ok} OK, {fail} failed", "success")
-            self.app.log_audit(
-                "agent_migrate", expected=ok, failed=fail,
-                url=getattr(api, "base_url", ""))
-            # Stash baseline for reconciliation.
-            self._recon = {
-                "expected": ok, "src_before": src_before,
-                "dst_before": dst_before, "scope_params": scope_params,
-                "dst_connected": dst_api is not None}
-            self._verify_btn.configure(
-                state="normal" if src_before is not None else "disabled")
-            messagebox.showinfo(
-                "Done",
-                f"Migrated {ok} agents, {fail} failed.\n\n"
-                f"Give agents a few minutes to re-register on the "
-                f"destination, then click ‘Verify Move’ to reconcile.")
-
-        run_async(self, do, done)
-
-    def _verify_migration(self):
-        """Reconcile agent counts after a migration: did the source drop and
-        the destination gain the expected number of agents?"""
-        recon = getattr(self, "_recon", None)
-        if not recon or recon.get("src_before") is None:
-            messagebox.showinfo("Nothing to verify",
-                                "Run a migration first.")
-            return
-        api = self.app.source_api
-        dst_api = self.app.dest_api
-        if not api:
-            messagebox.showwarning("No source", "Connect SOURCE first.")
-            return
-        self._verify_btn.configure(state="disabled")
-        self.log.log("Reconciling agent counts…")
-
-        def do():
-            from migtools import reconcile_agents
-            src_after = api.get_agent_count(recon["scope_params"])
-            dst_before = recon["dst_before"]
-            dst_after = dst_before
-            if dst_api is not None and dst_before is not None:
-                try:
-                    dst_after = dst_api.get_agent_count()
-                except Exception:
-                    dst_after = dst_before
-            r = reconcile_agents(
-                recon["expected"], recon["src_before"], src_after,
-                dst_before or 0, dst_after or 0)
-            r["_dst_connected"] = recon["dst_connected"] and \
-                dst_before is not None
-            return r
-
-        def done(r):
-            self._verify_btn.configure(state="normal")
-            head = ("✅ Reconciled — counts line up."
-                    if r["reconciled"] else "⚠️ Discrepancy found.")
-            lines = [
-                head, "",
-                f"Expected to move: {r['expected_moved']}",
-                f"Source dropped by: {r['source_drop']}",
-            ]
-            if r.get("_dst_connected"):
-                lines.append(f"Destination gained: {r['dest_gain']}")
-            else:
-                lines.append("Destination not connected — source-side check "
-                             "only (connect the destination console for a "
-                             "full reconciliation).")
-            for issue in r["issues"]:
-                lines.append(f"  • {issue}")
-            self.app.log_audit(
-                "agent_reconcile", reconciled=r["reconciled"],
-                source_drop=r["source_drop"], dest_gain=r["dest_gain"])
-            cli_log("Agent reconciliation: "
-                    + ("OK" if r["reconciled"] else "; ".join(r["issues"])),
-                    "success" if r["reconciled"] else "warning")
-            messagebox.showinfo("Migration Reconciliation", "\n".join(lines))
-
-        def fail(e):
-            self._verify_btn.configure(state="normal")
-            cli_log(f"Reconciliation failed: {e}", "error")
-
-        run_async(self, do, done, fail)
-
-    def _export(self):
-        cols = ["computerName", "osName", "agentVersion", "id"]
-        rows = [{c: a.get(c, "") for c in cols} for a in self.agents]
-        stats = [{"label": "Total Agents", "value": len(rows)}]
-        export_report("Agent Migration", cols, rows, stats=stats)
-
-    def on_show(self):
-        pass
-
-
-# ═══════════════════════════════════════════════════════════════════════
 #  Migration Runbook — guided, ordered workflow
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -10187,6 +10280,15 @@ class MigrationRunbookPage(ctk.CTkFrame):
          "snapshot lets you ↩ Rollback if needed.", None),
         ("Validate the migration", "Migration Validation",
          "Compare SOURCE vs DESTINATION across every element.", "validated"),
+        ("Match the agent scopes", "Agent Migration",
+         "Now the config is in place, move the endpoints. Read the "
+         "destination, then Match scopes — it lists every source account, "
+         "site and group beside the destination scope it pairs with. "
+         "Nothing moves; fix any name mismatches here.", "agents_matched"),
+        ("Migrate the agents", "Agent Migration",
+         "Run step 3. Each machine is reported as it goes; the Failed "
+         "filter carries the console's own reason. Agents that were "
+         "offline move on their next check-in.", "agents_moved"),
         ("Manifest & close ticket", "Migration Validation",
          "Export 🧾 Migration Manifest — the PSO comment is copied to your "
          "clipboard for the ticket-closing workflow.", None),
@@ -10228,6 +10330,10 @@ class MigrationRunbookPage(ctk.CTkFrame):
         if key == "validated":
             vp = self.app.pages.get("Migration Validation")
             return bool(getattr(vp, "_results", None))
+        if key in ("agents_matched", "agents_moved"):
+            ap = self.app.pages.get("Agent Migration")
+            attr = "_plan" if key == "agents_matched" else "_report"
+            return bool(getattr(ap, attr, None))
         return False
 
     def _is_done(self, i, key) -> bool:

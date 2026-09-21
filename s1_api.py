@@ -90,6 +90,15 @@ class S1API:
         self.throttle_events = 0
         self.throttle_wait_s = 0.0
         self.on_throttle = None
+        # Opt-in, caller-scoped cache for the three scope-listing endpoints
+        # (accounts / sites / groups). A restore resolves every one of its
+        # hundreds of nodes against these lists, re-fetching identical data
+        # each time. Off by default so backup/inventory reads always hit the
+        # live console; a restore turns it on for its duration and
+        # invalidates the relevant kind whenever it creates a scope.
+        self._scope_cache_on = False
+        self._scope_cache: dict = {}
+        self._scope_cache_lock = threading.Lock()
 
     def throttle_stats(self) -> dict:
         """Snapshot of rate-limit backoff seen so far on this connection."""
@@ -255,8 +264,56 @@ class S1API:
     def get_my_user(self) -> dict:
         return self.get_data("/private/my-user")
 
+    # ── scope-listing cache (opt-in, caller-scoped) ────────────────────
+
+    def enable_scope_cache(self) -> None:
+        """Start caching accounts/sites/groups list results. Clears first."""
+        with self._scope_cache_lock:
+            self._scope_cache = {}
+            self._scope_cache_on = True
+
+    def disable_scope_cache(self) -> None:
+        """Stop caching and drop everything held."""
+        with self._scope_cache_lock:
+            self._scope_cache_on = False
+            self._scope_cache = {}
+
+    def invalidate_scope_cache(self, kind: Optional[str] = None) -> None:
+        """Drop cached entries. `kind` in {accounts, sites, groups}, or all."""
+        with self._scope_cache_lock:
+            if kind is None:
+                self._scope_cache = {}
+            else:
+                for k in [k for k in self._scope_cache if k[0] == kind]:
+                    del self._scope_cache[k]
+
+    def _scope_cached(self, kind: str, params: Optional[dict], fetch):
+        """Return `fetch()` for a scope listing, memoised by (kind, params).
+
+        Cached values are copied on the way out (fresh list, shared dict
+        refs) so a caller mutating the returned list can't corrupt the
+        cache. Callers only ever read fields off these dicts.
+        """
+        if not self._scope_cache_on:
+            return fetch()
+        key = (kind, tuple(sorted(
+            (str(k), str(v)) for k, v in (params or {}).items())))
+        with self._scope_cache_lock:
+            hit = self._scope_cache.get(key)
+        if hit is not None:
+            return list(hit)
+        val = fetch()
+        with self._scope_cache_lock:
+            if self._scope_cache_on:
+                self._scope_cache[key] = list(val)
+        return list(val)
+
     def get_accounts(self, **kw) -> list[dict]:
-        return self.get_all("/accounts", params={"states": "active", "sortBy": "name", "sortOrder": "asc"}, **kw)
+        params = {"states": "active", "sortBy": "name", "sortOrder": "asc"}
+        if kw:
+            return self.get_all("/accounts", params=params, **kw)
+        return self._scope_cached(
+            "accounts", None, lambda: self.get_all("/accounts", params=params))
 
     def get_account_by_id(self, account_id: str) -> Optional[dict]:
         """Fetch a single account by exact ID. Returns None if not found or inaccessible."""
@@ -264,6 +321,12 @@ class S1API:
         return next((a for a in results if str(a.get("id")) == str(account_id)), None)
 
     def get_sites(self, params: Optional[dict] = None, **kw) -> list[dict]:
+        if kw:
+            return self._get_sites(params)
+        return self._scope_cached(
+            "sites", params, lambda: self._get_sites(params))
+
+    def _get_sites(self, params: Optional[dict] = None) -> list[dict]:
         # S1 Sites API returns nested structure — try multiple formats
         results: list[dict] = []
         q = dict(params or {})
@@ -290,8 +353,47 @@ class S1API:
                 break
         return results
 
+    # ── bounded lookups (for pickers, not for backups) ─────────────────
+    #
+    # `get_accounts`/`get_sites` walk every page. That is right for a
+    # backup and wrong for a chooser: on a console with thousands of
+    # scopes the operator waits for all of them before seeing the first.
+    # These ask the console to do the searching and stop after one page.
+
+    def search_accounts(self, query: str = "", limit: int = 50) -> list[dict]:
+        """At most `limit` active accounts, matched console-side."""
+        n = max(1, min(int(limit), 200))
+        params = {"states": "active", "sortBy": "name", "sortOrder": "asc"}
+        if query:
+            params["query"] = query
+        return self.get_all("/accounts", params=params, limit=n, max_items=n)
+
+    def search_sites(self, query: str = "", account_ids: str = "",
+                     limit: int = 50) -> list[dict]:
+        """At most `limit` sites, matched console-side.
+
+        Single request, no cursor loop — the caller wants a page to show,
+        not the whole estate. Tolerates the same three response shapes as
+        `_get_sites`, since the Sites API nests inconsistently.
+        """
+        q: dict = {"limit": max(1, min(int(limit), 200))}
+        if query:
+            q["query"] = query
+        if account_ids:
+            q["accountIds"] = account_ids
+        body = self._get("/sites", q)
+        data = body.get("data", {})
+        if isinstance(data, dict) and data.get("sites"):
+            return data["sites"]
+        if isinstance(data, list):
+            return data
+        return body.get("sites") or []
+
     def get_groups(self, params: Optional[dict] = None, **kw) -> list[dict]:
-        return self.get_all("/groups", params=params, **kw)
+        if kw:
+            return self.get_all("/groups", params=params, **kw)
+        return self._scope_cached(
+            "groups", params, lambda: self.get_all("/groups", params=params))
 
     def get_agents(self, params: Optional[dict] = None, **kw) -> list[dict]:
         return self.get_all("/agents", params=params, **kw)
@@ -906,6 +1008,19 @@ class S1API:
         return self._post("/agents/actions/move-to-console", body={
             "filter": {"ids": [agent_id]}, "data": {"token": token}})
 
+    def move_agents_to_console(self, agent_ids: list[str], token: str,
+                               extra_filter: Optional[dict] = None) -> dict:
+        """Move a batch of agents to the console owning `token`.
+
+        `extra_filter` narrows the same request further — e.g.
+        `{"groupIds": [...], "consoleMigrationStatusesNin": ["Migrated"]}`
+        so an agent that already moved is never re-sent.
+        """
+        flt = dict(extra_filter or {})
+        flt["ids"] = [str(a) for a in agent_ids]
+        return self._post("/agents/actions/move-to-console", body={
+            "filter": flt, "data": {"token": token}})
+
     def move_agents_to_site(self, agent_ids: list[str], site_id: str) -> dict:
         return self._post("/agents/actions/move-to-site", body={
             "filter": {"ids": agent_ids}, "data": {"targetSiteId": site_id}})
@@ -1065,6 +1180,108 @@ class S1API:
 
     def update_account(self, account_id: str, data: dict) -> dict:
         return self._put(f"/accounts/{account_id}", body={"data": data})
+
+    def get_accounts_any_state(self, name: Optional[str] = None) -> list[dict]:
+        """Accounts in ANY state (active, expired, deleted).
+
+        `get_accounts()` filters `states=active`, so an account that already
+        holds a name but is expired/deleted is invisible to it — the restore
+        then tries to create that name and the console rejects it. This is
+        the lookup to use when a create unexpectedly fails."""
+        params: dict = {"states": "active,expired,deleted"}
+        if name:
+            params["name"] = name
+        return self.get_all("/accounts", params=params)
+
+    def account_name_available(self, name: str) -> tuple:
+        """Documented pre-check for POST /accounts (the API reference says to
+        run "name-available" first). Returns (available, detail) where
+        `available` is True/False, or None when the check itself failed.
+
+        The failure detail is the useful part: 403 means the token lacks
+        `Accounts.create` / Global scope, 404 usually means the console is
+        not an MSSP deployment (where account creation does not exist)."""
+        try:
+            resp = self._get("/private/accounts/name-available",
+                             params={"name": name})
+        except S1APIError as e:
+            return None, f"HTTP {e.status_code}: {e.detail}"
+        data = resp.get("data")
+        if isinstance(data, dict):
+            for key in ("available", "nameAvailable", "isAvailable"):
+                if key in data:
+                    return bool(data[key]), ""
+            return None, f"unrecognised response: {data}"
+        if isinstance(data, bool):
+            return data, ""
+        return None, f"unrecognised response: {resp}"
+
+    def diagnose_account_creation(self, name: str = "") -> list[str]:
+        """Human-readable facts about why account creation is refused.
+
+        `Accounts.create` is an RBAC permission that is NOT visible on the
+        token itself, and it differs between Console Users and Service
+        Users — the console UI can allow creating accounts while an API
+        token for the same tenant is refused. This reports what we can
+        actually observe so the operator can compare the two."""
+        notes: list[str] = []
+        # WHO is this token? The single most useful fact — a Service User
+        # and a Console User have different permissions, and swapping the
+        # token in the UI is easy to get wrong.
+        try:
+            me = self.get_my_user() or {}
+            # The console reports roles under `scopeRoles`, not a flat
+            # `roleName` — read both so this works across shapes.
+            roles = sorted({r.get("roleName") for r in
+                            (me.get("scopeRoles") or [])
+                            if isinstance(r, dict) and r.get("roleName")})
+            role = (", ".join(roles) or me.get("lowestRole")
+                    or me.get("roleName") or me.get("role") or "?")
+            notes.append(
+                f"token identity: {me.get('fullName') or me.get('name') or '?'}"
+                f" <{me.get('email') or 'no email'}>"
+                f", role={role}"
+                f", scope={me.get('scope') or me.get('scopeLevel') or '?'}")
+        except S1APIError as e:
+            notes.append(f"could not identify token user: "
+                         f"HTTP {e.status_code}: {e.detail}")
+        try:
+            accts = self.get_all("/accounts", params={"limit": 100})
+            usage = sorted({str(a.get("usageType")) for a in accts
+                            if isinstance(a, dict) and a.get("usageType")})
+            # NOTE: usageType is a per-ACCOUNT label (customer/mssp/ir), not
+            # the deployment type. It does NOT prove the console can't create
+            # accounts, so it is reported as context only.
+            notes.append(f"visible accounts: {len(accts)}; "
+                         f"per-account usageType(s): {usage or 'not reported'}"
+                         f" (context only — not a deployment flag)")
+        except S1APIError as e:
+            notes.append(
+                f"GET /accounts failed: HTTP {e.status_code}: {e.detail}")
+        if name:
+            avail, detail = self.account_name_available(name)
+            if avail is None:
+                notes.append(f"name-available check failed for '{name}': "
+                             f"{detail}")
+            elif avail:
+                notes.append(f"name '{name}' IS available — the console "
+                             f"accepts this name, so a create failure is not "
+                             f"a name conflict")
+            else:
+                notes.append(f"name '{name}' is NOT available — an account "
+                             f"with this name already exists (possibly in "
+                             f"expired/deleted state)")
+            try:
+                existing = self.get_accounts_any_state(name=name)
+                for a in existing:
+                    if a.get("name") == name:
+                        notes.append(
+                            f"existing account '{name}' found in state="
+                            f"{a.get('state')} (id={a.get('id')})")
+            except S1APIError as e:
+                notes.append(f"all-state account lookup failed: "
+                             f"HTTP {e.status_code}: {e.detail}")
+        return notes
 
     # ── GraphQL core ──────────────────────────────────────────────────
 

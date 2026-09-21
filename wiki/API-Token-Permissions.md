@@ -50,6 +50,27 @@
 > token with only `Tags.create` can restore firewall tags and still leave the
 > destination's endpoint tag list empty.
 
+### Agent Migration
+
+Moving the agents is separate from restoring the configuration, and the
+two consoles need different things.
+
+| Console | Permission | Required For |
+|---------|-----------|-------------|
+| DESTINATION | `Accounts.view`, `Sites.view`, `Groups.view` | Reading the destination's scopes **and their `registrationToken`** into the map file (step 1) |
+| SOURCE | `Agents.view` | Listing each group's agents, and reading them back afterwards to confirm each one moved |
+| SOURCE | `Agents.actions` | Issuing the move itself (`POST /agents/actions/move-to-console`) |
+
+> **A scope with no registration token cannot receive agents.** If the
+> map file shows `MISSING` for a site and its groups, create a token on
+> the destination console and read the destination again — step 2 will
+> otherwise mark everything under it as unable to migrate.
+
+> **`Agents.view` alone looks like it works.** Matching (step 2) only
+> reads, so it succeeds on a view-only token; the move in step 3 is then
+> rejected per batch and every agent in it is reported failed with the
+> console's reason.
+
 ### Operations Pages
 
 | Permission | Page |
