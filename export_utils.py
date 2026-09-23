@@ -109,68 +109,278 @@ thead th.sortable::after { content: " ↕"; opacity: .25; font-size: 10px; }
 thead th.sortable[aria-sort="ascending"]::after { content: " ↑"; opacity: .9; }
 thead th.sortable[aria-sort="descending"]::after { content: " ↓"; opacity: .9; }
 tr.no-match td { color: #666; text-align: center; font-style: italic; }
+.stat-card.stat-clickable { cursor: pointer;
+    transition: border-color .15s, box-shadow .15s, transform .05s; }
+.stat-card.stat-clickable:hover { border-color: #3d5a8a; }
+.stat-card.stat-clickable:active { transform: translateY(1px); }
+.stat-card.stat-clickable .label::after {
+    content: " ▾"; font-size: 10px; opacity: .55; }
+.stat-card.stat-active {
+    border-color: #0984e3; box-shadow: 0 0 0 1px #0984e3 inset; }
+.tbl-filters { display: flex; align-items: center; gap: 10px;
+    margin: 0 0 10px; flex-wrap: wrap; }
+.tbl-filter-sel {
+    background: #12122a; border: 1px solid #2d2d44; border-radius: 8px;
+    color: #cdd3e1; font-size: 12px; padding: 7px 10px; outline: none;
+    cursor: pointer; }
+.tbl-filter-sel:focus { border-color: #0984e3; }
+.tbl-clear {
+    background: #2a1520; border: 1px solid #e9456055; color: #ff6b81;
+    border-radius: 8px; font-size: 12px; padding: 7px 12px; cursor: pointer; }
+.tbl-clear:hover { background: #3a1a2a; }
+.tbl-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: #16182e; border: 1px solid #2d2d44; color: #aab2c8;
+    border-radius: 999px; font-size: 12px; font-weight: 600;
+    padding: 6px 12px; cursor: pointer; transition: all .12s; }
+.chip:hover { border-color: #44496a; color: #dfe4f0; }
+.chip .chip-dot { width: 8px; height: 8px; border-radius: 50%;
+    background: #66708f; flex: 0 0 auto; }
+.chip .chip-n { color: #6b7391; font-weight: 700; }
+.chip.on { color: #fff; background: #0984e322; border-color: #0984e3; }
+.chip-green .chip-dot { background: #00b894; }
+.chip-red .chip-dot { background: #e94560; }
+.chip-yellow .chip-dot { background: #fdcb6e; }
+.chip-blue .chip-dot { background: #74b9ff; }
+.chip-green.on { background: #00b89422; border-color: #00b894; }
+.chip-red.on { background: #e9456022; border-color: #e94560; }
+.chip-yellow.on { background: #fdcb6e22; border-color: #fdcb6e; }
+.chip-blue.on { background: #0984e322; border-color: #74b9ff; }
 """
 
 
 # Embedded once per report. Vanilla JS, no external assets, so the file stays
-# self-contained and works from disk (file://). Adds a filter box and
-# click-to-sort to every data table.
+# self-contained and works from disk (file://). For every data table it builds
+# a search box, per-column dropdown filters and colour-coded status chips, and
+# it turns the matching stat cards into one-click filters. Columns click-sort.
 _REPORT_JS = """
 <script>
 (function () {
-  function norm(s) { return (s || "").toLowerCase(); }
+  function norm(s) { return (s || "").trim().toLowerCase(); }
+  function txt(c) { return c ? c.textContent.trim() : ""; }
   function dataRows(body) {
     return Array.prototype.filter.call(body.rows, function (r) {
       return !r.classList.contains("no-match");
     });
   }
-
-  // Per-table filter box.
-  document.querySelectorAll(".tbl-search").forEach(function (inp) {
-    var tbl = document.getElementById(inp.dataset.for);
-    if (!tbl || !tbl.tBodies.length) return;
-    var body = tbl.tBodies[0];
-    var cnt = document.getElementById("cnt-" + inp.dataset.for);
-    var nm = body.querySelector("tr.no-match");
-    var total = dataRows(body).length;
-    inp.placeholder = "Filter " + total + " rows\u2026";
-    if (cnt) cnt.textContent = total + " rows";
-    inp.addEventListener("input", function () {
-      var q = norm(inp.value), shown = 0;
-      dataRows(body).forEach(function (r) {
-        var hit = norm(r.textContent).indexOf(q) !== -1;
-        r.style.display = hit ? "" : "none";
-        if (hit) shown++;
-      });
-      if (cnt) cnt.textContent = (shown === total)
-        ? total + " rows" : shown + " of " + total;
-      if (nm) nm.style.display = shown === 0 ? "" : "none";
+  function distinct(rows, idx) {
+    var counts = {}, order = [];
+    rows.forEach(function (r) {
+      var v = txt(r.cells[idx]);
+      if (v === "") return;
+      if (!(v in counts)) { counts[v] = 0; order.push(v); }
+      counts[v]++;
     });
-  });
+    return { order: order, counts: counts };
+  }
+  function allNumeric(rows, idx) {
+    return rows.every(function (r) {
+      var t = txt(r.cells[idx]).replace(/[,%$]/g, "");
+      return t === "" || !isNaN(parseFloat(t));
+    });
+  }
+  function badgeKind(cell) {
+    var b = cell ? cell.querySelector(".badge") : null;
+    if (!b) return "";
+    var k = "";
+    ["green", "red", "yellow", "blue"].forEach(function (c) {
+      if (b.classList.contains("badge-" + c)) k = c;
+    });
+    return k;
+  }
 
-  // Click-to-sort headers.
-  document.querySelectorAll("table.data-table").forEach(function (tbl) {
-    if (!tbl.tBodies.length) return;
-    var body = tbl.tBodies[0];
-    tbl.querySelectorAll("thead th").forEach(function (th, idx) {
+  // normalized status value -> [{table, isActive, selectOnly, clearAll}]
+  var STATUS_INDEX = {};
+
+  function enhance(table) {
+    if (!table.tBodies.length) return;
+    var body = table.tBodies[0];
+    var heads = table.tHead
+      ? Array.prototype.slice.call(table.tHead.rows[0].cells) : [];
+    var rows = dataRows(body);
+    if (!rows.length) return;
+    var ncol = heads.length || rows[0].cells.length;
+
+    var nm = body.querySelector("tr.no-match");
+    if (!nm) {
+      nm = document.createElement("tr");
+      nm.className = "no-match";
+      var ntd = document.createElement("td");
+      ntd.colSpan = ncol;
+      ntd.textContent = "No matching rows.";
+      nm.appendChild(ntd);
+      nm.style.display = "none";
+      body.appendChild(nm);
+    }
+
+    // status column = the first column whose cells carry a badge
+    var statusCol = -1;
+    for (var c = 0; c < ncol; c++) {
+      var hasBadge = rows.some(function (r) {
+        return r.cells[c] && r.cells[c].querySelector(".badge");
+      });
+      if (hasBadge) { statusCol = c; break; }
+    }
+
+    var prev = table.previousElementSibling;
+    if (prev && prev.classList.contains("tbl-tools")) {
+      prev.parentNode.removeChild(prev);
+    }
+
+    var bar = document.createElement("div");
+    bar.className = "tbl-filters";
+    var search = document.createElement("input");
+    search.className = "tbl-search";
+    search.type = "search";
+    search.placeholder = "Search " + rows.length + " rows\u2026";
+    search.setAttribute("aria-label", "Search rows");
+    bar.appendChild(search);
+
+    // one dropdown per low-cardinality, non-numeric column (not the status one)
+    var selects = [];
+    for (var ci = 0; ci < ncol; ci++) {
+      if (ci === statusCol) continue;
+      if (allNumeric(rows, ci)) continue;
+      var d = distinct(rows, ci);
+      if (d.order.length < 2 || d.order.length > 12) continue;
+      if (d.order.length >= rows.length) continue;
+      var sel = document.createElement("select");
+      sel.className = "tbl-filter-sel";
+      sel.dataset.col = ci;
+      var label = heads[ci] ? txt(heads[ci]) : ("Col " + (ci + 1));
+      var o0 = document.createElement("option");
+      o0.value = ""; o0.textContent = "All " + label;
+      sel.appendChild(o0);
+      d.order.sort(function (a, b) {
+        return a.localeCompare(b, undefined, { numeric: true });
+      });
+      d.order.forEach(function (v) {
+        var o = document.createElement("option");
+        o.value = v.toLowerCase();
+        o.textContent = v + " (" + d.counts[v] + ")";
+        sel.appendChild(o);
+      });
+      sel.addEventListener("change", apply);
+      selects.push(sel);
+      bar.appendChild(sel);
+    }
+
+    var clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "tbl-clear";
+    clear.textContent = "Clear filters";
+    clear.style.display = "none";
+    bar.appendChild(clear);
+
+    var cnt = document.createElement("span");
+    cnt.className = "tbl-count";
+    bar.appendChild(cnt);
+
+    // colour-coded status chips (multi-select)
+    var chipState = {}, chipEls = {}, chipBar = null;
+    if (statusCol >= 0) {
+      chipBar = document.createElement("div");
+      chipBar.className = "tbl-chips";
+      var sd = distinct(rows, statusCol);
+      sd.order.forEach(function (v) {
+        var k = norm(v), kind = "";
+        for (var i = 0; i < rows.length; i++) {
+          if (txt(rows[i].cells[statusCol]) === v) {
+            kind = badgeKind(rows[i].cells[statusCol]); break;
+          }
+        }
+        var chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip" + (kind ? " chip-" + kind : "");
+        chip.innerHTML = '<span class="chip-dot"></span>' + v +
+          ' <span class="chip-n">' + sd.counts[v] + '</span>';
+        chip.addEventListener("click", function () {
+          chipState[k] = !chipState[k];
+          chip.classList.toggle("on", chipState[k]);
+          apply();
+        });
+        chipEls[k] = chip;
+        chipState[k] = false;
+        chipBar.appendChild(chip);
+        (STATUS_INDEX[k] = STATUS_INDEX[k] || []).push({
+          table: table,
+          isActive: function () { return !!chipState[k]; },
+          selectOnly: function () {
+            for (var kk in chipState) {
+              chipState[kk] = false; chipEls[kk].classList.remove("on");
+            }
+            chipState[k] = true; chipEls[k].classList.add("on"); apply();
+          },
+          clearAll: function () {
+            for (var kk in chipState) {
+              chipState[kk] = false; chipEls[kk].classList.remove("on");
+            }
+            apply();
+          }
+        });
+      });
+    }
+
+    table.parentNode.insertBefore(bar, table);
+    if (chipBar) table.parentNode.insertBefore(chipBar, table);
+
+    var total = rows.length;
+    function apply() {
+      var q = norm(search.value), chips = [];
+      for (var kk in chipState) { if (chipState[kk]) chips.push(kk); }
+      var selVals = selects.map(function (s) {
+        return { idx: parseInt(s.dataset.col, 10), val: s.value };
+      });
+      var active = q !== "" || chips.length > 0 ||
+        selVals.some(function (s) { return s.val !== ""; });
+      var shown = 0;
+      dataRows(body).forEach(function (r) {
+        var ok = true;
+        if (q !== "" && norm(r.textContent).indexOf(q) === -1) ok = false;
+        if (ok && chips.length && statusCol >= 0 &&
+            chips.indexOf(norm(txt(r.cells[statusCol]))) === -1) ok = false;
+        if (ok) {
+          for (var i = 0; i < selVals.length; i++) {
+            if (selVals[i].val !== "" &&
+                norm(txt(r.cells[selVals[i].idx])) !== selVals[i].val) {
+              ok = false; break;
+            }
+          }
+        }
+        r.style.display = ok ? "" : "none";
+        if (ok) shown++;
+      });
+      cnt.textContent = (!active && shown === total)
+        ? total + " rows" : shown + " of " + total;
+      nm.style.display = shown === 0 ? "" : "none";
+      clear.style.display = active ? "" : "none";
+    }
+
+    clear.addEventListener("click", function () {
+      search.value = "";
+      selects.forEach(function (s) { s.value = ""; });
+      for (var kk in chipState) {
+        chipState[kk] = false;
+        if (chipEls[kk]) chipEls[kk].classList.remove("on");
+      }
+      apply();
+    });
+    search.addEventListener("input", apply);
+
+    heads.forEach(function (th, idx) {
       th.classList.add("sortable");
       th.addEventListener("click", function () {
         var asc = th.getAttribute("data-asc") !== "true";
-        tbl.querySelectorAll("thead th").forEach(function (o) {
+        heads.forEach(function (o) {
           o.removeAttribute("data-asc"); o.removeAttribute("aria-sort");
         });
         th.setAttribute("data-asc", asc ? "true" : "false");
         th.setAttribute("aria-sort", asc ? "ascending" : "descending");
-        var rows = dataRows(body);
-        function val(r) {
-          return r.cells[idx] ? r.cells[idx].textContent.trim() : "";
-        }
-        var numeric = rows.every(function (r) {
-          var t = val(r).replace(/[,%$]/g, "");
-          return t === "" || !isNaN(parseFloat(t));
-        });
-        rows.sort(function (a, b) {
-          var x = val(a), y = val(b);
+        var rs = dataRows(body);
+        var numeric = allNumeric(rs, idx);
+        rs.sort(function (a, b) {
+          var x = txt(a.cells[idx]), y = txt(b.cells[idx]);
           if (numeric) {
             return (asc ? 1 : -1) *
               ((parseFloat(x.replace(/[,%$]/g, "")) || 0) -
@@ -179,51 +389,42 @@ _REPORT_JS = """
           return (asc ? 1 : -1) *
             x.localeCompare(y, undefined, { numeric: true });
         });
-        rows.forEach(function (r) { body.appendChild(r); });
-        var nm = body.querySelector("tr.no-match");
-        if (nm) body.appendChild(nm);
+        rs.forEach(function (r) { body.appendChild(r); });
+        body.appendChild(nm);
       });
     });
-  });
 
-  // Auto-bootstrap: any data table rendered WITHOUT a server-side toolbar
-  // (the restore & validation reports) gets a filter box + no-match row.
-  document.querySelectorAll("table.data-table").forEach(function (tbl) {
-    if (!tbl.tBodies.length) return;
-    var prev = tbl.previousElementSibling;
-    if (prev && prev.classList.contains("tbl-tools")) return;
-    var body = tbl.tBodies[0];
-    var rows = dataRows(body);
-    if (rows.length < 2) return;
-    var ncol = tbl.tHead ? tbl.tHead.rows[0].cells.length
-                         : (rows[0] ? rows[0].cells.length : 1);
-    var tools = document.createElement("div");
-    tools.className = "tbl-tools";
-    var inp = document.createElement("input");
-    inp.className = "tbl-search"; inp.type = "search";
-    inp.placeholder = "Filter " + rows.length + " rows\u2026";
-    inp.setAttribute("aria-label", "Filter rows");
-    var cnt = document.createElement("span");
-    cnt.className = "tbl-count"; cnt.textContent = rows.length + " rows";
-    tools.appendChild(inp); tools.appendChild(cnt);
-    tbl.parentNode.insertBefore(tools, tbl);
-    var nmr = document.createElement("tr");
-    nmr.className = "no-match";
-    var td = document.createElement("td");
-    td.colSpan = ncol; td.textContent = "No matching rows.";
-    nmr.appendChild(td); nmr.style.display = "none";
-    body.appendChild(nmr);
-    var total = rows.length;
-    inp.addEventListener("input", function () {
-      var q = norm(inp.value), shown = 0;
-      dataRows(body).forEach(function (r) {
-        var hit = norm(r.textContent).indexOf(q) !== -1;
-        r.style.display = hit ? "" : "none";
-        if (hit) shown++;
-      });
-      cnt.textContent = (shown === total) ? total + " rows"
-                                          : shown + " of " + total;
-      nmr.style.display = shown === 0 ? "" : "none";
+    cnt.textContent = total + " rows";
+  }
+
+  document.querySelectorAll("table.data-table").forEach(enhance);
+
+  // Stat cards become one-click filters for their matching status value.
+  document.querySelectorAll(".stat-card").forEach(function (card) {
+    var lab = card.querySelector(".label");
+    if (!lab) return;
+    var targets = STATUS_INDEX[norm(lab.textContent)];
+    if (!targets || !targets.length) return;
+    var t = targets[0];
+    card.classList.add("stat-clickable");
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    function toggle() {
+      var wasActive = t.isActive();
+      document.querySelectorAll(".stat-card.stat-active").forEach(
+        function (c) { c.classList.remove("stat-active"); });
+      if (wasActive) { t.clearAll(); }
+      else {
+        t.selectOnly();
+        card.classList.add("stat-active");
+        if (t.table.scrollIntoView) {
+          t.table.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }
+    }
+    card.addEventListener("click", toggle);
+    card.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
     });
   });
 })();
@@ -1614,17 +1815,10 @@ def _section_html(sec: dict, idx: int = 0) -> str:
             tds += (f"<td>{_badge(_esc(val))}</td>" if c in badge
                     else f"<td>{_esc(_cell(val))}</td>")
         body.append(f"<tr>{tds}</tr>")
-    ncols = len(cols) or 1
-    tools = (f'<div class="tbl-tools">'
-             f'<input class="tbl-search" data-for="{tid}" '
-             f'placeholder="Filter\u2026" aria-label="Filter rows">'
-             f'<span class="tbl-count" id="cnt-{tid}"></span></div>')
-    nomatch = (f'<tr class="no-match" style="display:none">'
-               f'<td colspan="{ncols}">No matching rows.</td></tr>')
-    return head + tools + (
+    return head + (
         f'<table class="data-table" id="{tid}">'
         f'<thead><tr>{th}</tr></thead>'
-        f'<tbody>{"".join(body)}{nomatch}</tbody></table>')
+        f'<tbody>{"".join(body)}</tbody></table>')
 
 
 def generate_migration_html(report: dict) -> str:

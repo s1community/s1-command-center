@@ -175,19 +175,20 @@ def test_html_tables_are_interactive():
     html = eu.generate_migration_html(am.build_status_report(_status()))
     # each data table is filterable and sortable
     assert 'class="data-table"' in html
-    assert 'class="tbl-search"' in html
-    assert 'class="no-match"' in html
-    # the behaviour ships inline, exactly once, no external assets
+    # the behaviour ships inline, exactly once, no external assets; the search
+    # box, chips and no-match row are built by that script at load
     assert html.count("<script>") == 1
+    assert "tbl-search" in html
+    assert "no-match" in html
     assert 'addEventListener("input"' in html   # filtering
-    assert 'aria-sort' in html                   # sorting
+    assert "aria-sort" in html                   # sorting
 
 
-def test_html_search_targets_its_own_table():
-    # two sections -> two independently targeted search boxes
+def test_each_section_is_its_own_table():
+    # two sections -> two independently identified, independently filtered tables
     html = eu.generate_migration_html(am.build_live_report(_run()))
-    assert 'data-for="tbl-0"' in html
-    assert 'id="cnt-tbl-0"' in html
+    assert 'id="tbl-0"' in html
+    assert 'id="tbl-1"' in html
     assert html.count('class="data-table"') >= 2
 
 
@@ -199,6 +200,29 @@ def test_report_js_auto_bootstraps_plain_data_tables():
     assert 'querySelectorAll("table.data-table")' in js
     assert 'createElement("input")' in js
     assert 'classList.contains("tbl-tools")' in js
+
+
+def test_status_cards_are_clickable_filters():
+    # clicking a stat card (e.g. "Migrated") filters its table to that value
+    js = eu._REPORT_JS
+    assert ".stat-card" in js
+    assert "STATUS_INDEX" in js
+    assert "selectOnly" in js
+    assert "stat-clickable" in js
+    # the card labels line up with the status column values they filter by
+    rep = am.build_status_report(_status())
+    labels = {s["label"].strip().lower() for s in rep["stats"]}
+    col = rep["sections"][0]["badge_cols"][0]
+    values = {str(r.get(col, "")).strip().lower()
+              for r in rep["sections"][0]["rows"]}
+    assert labels & values   # at least one card maps onto a real status value
+
+
+def test_report_has_status_chips_and_column_dropdowns():
+    js = eu._REPORT_JS
+    assert "tbl-chips" in js          # colour-coded status chips
+    assert "tbl-filter-sel" in js     # per-column dropdown filters
+    assert "Clear filters" in js      # reset control
 
 
 # ── open after export ────────────────────────────────────────────────────

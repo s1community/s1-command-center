@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.6.2 — 2026-09-23
+
+### Added
+- **Much richer report filtering.** Building on v2.6.1's search + sort, every report now gives several ways to slice a table, all working together:
+  - **Clickable stat cards** — click *Migrated* (or *Pending*, *Failed*, *N/A*, *Decommissioned*, …) and the table below narrows to just those rows; click again to clear. Each filtering card carries a small ▾ affordance.
+  - **Colour-coded status chips** — one per value in the status column, each with its live count; click to toggle, and combine several (OR within the status column).
+  - **Per-column dropdowns** — added automatically for every low-cardinality column (Site, OS, Group, Decommissioned, …), each option showing its own count.
+  - **Free-text search** across the whole row, plus a **Clear filters** button that appears whenever a filter is active.
+  Everything combines (AND across search + dropdowns + chips), the count reads "N of M", and it is still inline vanilla JavaScript with no external assets. This applies to the agent reports and the configuration Restore / Validation reports alike.
+
+### Tests
+- 602 total (+2): the clickable-card wiring plus the card-label ↔ status-value mapping, and the presence of chips, per-column dropdowns and the clear control. The card click ("show only Migrated" → "5 of 13") and a column dropdown ("Site = Branch" → "4 of 13") were verified end-to-end in headless Chrome.
+
 ## v2.6.1 — 2026-09-23
 
 ### Added

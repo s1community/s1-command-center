@@ -88,7 +88,7 @@ Moves the agents themselves between consoles, so each source group's endpoints l
 - **JSON Export** — Structured data for programmatic analysis
 - **Export Log** — Available after restore completes
 - **Agent Migration Report** — The same dark-themed, self-contained HTML (plus Excel/CSV/JSON) for the agent live run, the match plan and the status report, so both the configuration migration *and* the agent migration hand back a proper report
-- **Interactive tables** — every table in every report is **searchable** (a filter box that shows *N of M*) and **sortable** (click any column). Inline vanilla JS, no external assets, so the saved `.html` still works offline. After an export the app offers to **open the file** for you
+- **Interactive tables** — every table in every report is **searchable**, **sortable**, and deeply **filterable**: click a stat card (e.g. *Migrated*) to show only those rows, toggle colour-coded **status chips**, or pick from auto-generated **per-column dropdowns** (Site, OS, Group, …). A *Clear filters* button resets everything and the count reads *N of M*. Inline vanilla JS, no external assets, so the saved `.html` still works offline. After an export the app offers to **open the file** for you
 
 ### Operations Pages
 - **Accounts & Sites** — Browse and manage console structure
@@ -123,7 +123,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.6.1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.6.2 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -384,6 +384,12 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v2.6.2 — 2026-09-23
+#### Added
+- **Much richer report filtering** — building on v2.6.1's search + sort: **clickable stat cards** (click *Migrated* to show only migrated agents), **colour-coded status chips** (multi-select, with counts), **per-column dropdown filters** (Site, OS, Group, …) and a **Clear filters** button. Everything combines and the count reads *N of M*. Applies to every report.
+#### Tests
+- 602 total (+2). Card-click ("only Migrated" → 5 of 13) and a column dropdown (Site=Branch → 4 of 13) verified in headless Chrome.
 
 ### v2.6.1 — 2026-09-23
 #### Added
