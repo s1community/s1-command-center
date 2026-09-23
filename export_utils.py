@@ -5,6 +5,8 @@ import csv
 import json
 import os
 import re
+import subprocess
+import sys
 from collections import Counter
 from datetime import datetime
 from tkinter import filedialog, messagebox
@@ -92,6 +94,140 @@ tbody tr:nth-child(even) { background: #151528; }
 .banner.warn { background: #fdcb6e14; border-color: #fdcb6e55; color: #fdcb6e; }
 .banner.danger { background: #e9456014; border-color: #e9456055; color: #ff6b81; }
 .rep-h2 { color: #fff; margin: 28px 0 12px; font-size: 18px; }
+.tbl-tools { display: flex; align-items: center; gap: 12px; margin: 0 0 8px; }
+.tbl-search {
+    background: #12122a; border: 1px solid #2d2d44; border-radius: 8px;
+    color: #e0e0e0; font-size: 13px; padding: 8px 12px; width: 280px;
+    outline: none;
+}
+.tbl-search:focus { border-color: #0984e3; }
+.tbl-search::placeholder { color: #555; }
+.tbl-count { color: #666; font-size: 12px; }
+thead th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+thead th.sortable:hover { color: #fff; }
+thead th.sortable::after { content: " ↕"; opacity: .25; font-size: 10px; }
+thead th.sortable[aria-sort="ascending"]::after { content: " ↑"; opacity: .9; }
+thead th.sortable[aria-sort="descending"]::after { content: " ↓"; opacity: .9; }
+tr.no-match td { color: #666; text-align: center; font-style: italic; }
+"""
+
+
+# Embedded once per report. Vanilla JS, no external assets, so the file stays
+# self-contained and works from disk (file://). Adds a filter box and
+# click-to-sort to every data table.
+_REPORT_JS = """
+<script>
+(function () {
+  function norm(s) { return (s || "").toLowerCase(); }
+  function dataRows(body) {
+    return Array.prototype.filter.call(body.rows, function (r) {
+      return !r.classList.contains("no-match");
+    });
+  }
+
+  // Per-table filter box.
+  document.querySelectorAll(".tbl-search").forEach(function (inp) {
+    var tbl = document.getElementById(inp.dataset.for);
+    if (!tbl || !tbl.tBodies.length) return;
+    var body = tbl.tBodies[0];
+    var cnt = document.getElementById("cnt-" + inp.dataset.for);
+    var nm = body.querySelector("tr.no-match");
+    var total = dataRows(body).length;
+    inp.placeholder = "Filter " + total + " rows\u2026";
+    if (cnt) cnt.textContent = total + " rows";
+    inp.addEventListener("input", function () {
+      var q = norm(inp.value), shown = 0;
+      dataRows(body).forEach(function (r) {
+        var hit = norm(r.textContent).indexOf(q) !== -1;
+        r.style.display = hit ? "" : "none";
+        if (hit) shown++;
+      });
+      if (cnt) cnt.textContent = (shown === total)
+        ? total + " rows" : shown + " of " + total;
+      if (nm) nm.style.display = shown === 0 ? "" : "none";
+    });
+  });
+
+  // Click-to-sort headers.
+  document.querySelectorAll("table.data-table").forEach(function (tbl) {
+    if (!tbl.tBodies.length) return;
+    var body = tbl.tBodies[0];
+    tbl.querySelectorAll("thead th").forEach(function (th, idx) {
+      th.classList.add("sortable");
+      th.addEventListener("click", function () {
+        var asc = th.getAttribute("data-asc") !== "true";
+        tbl.querySelectorAll("thead th").forEach(function (o) {
+          o.removeAttribute("data-asc"); o.removeAttribute("aria-sort");
+        });
+        th.setAttribute("data-asc", asc ? "true" : "false");
+        th.setAttribute("aria-sort", asc ? "ascending" : "descending");
+        var rows = dataRows(body);
+        function val(r) {
+          return r.cells[idx] ? r.cells[idx].textContent.trim() : "";
+        }
+        var numeric = rows.every(function (r) {
+          var t = val(r).replace(/[,%$]/g, "");
+          return t === "" || !isNaN(parseFloat(t));
+        });
+        rows.sort(function (a, b) {
+          var x = val(a), y = val(b);
+          if (numeric) {
+            return (asc ? 1 : -1) *
+              ((parseFloat(x.replace(/[,%$]/g, "")) || 0) -
+               (parseFloat(y.replace(/[,%$]/g, "")) || 0));
+          }
+          return (asc ? 1 : -1) *
+            x.localeCompare(y, undefined, { numeric: true });
+        });
+        rows.forEach(function (r) { body.appendChild(r); });
+        var nm = body.querySelector("tr.no-match");
+        if (nm) body.appendChild(nm);
+      });
+    });
+  });
+
+  // Auto-bootstrap: any data table rendered WITHOUT a server-side toolbar
+  // (the restore & validation reports) gets a filter box + no-match row.
+  document.querySelectorAll("table.data-table").forEach(function (tbl) {
+    if (!tbl.tBodies.length) return;
+    var prev = tbl.previousElementSibling;
+    if (prev && prev.classList.contains("tbl-tools")) return;
+    var body = tbl.tBodies[0];
+    var rows = dataRows(body);
+    if (rows.length < 2) return;
+    var ncol = tbl.tHead ? tbl.tHead.rows[0].cells.length
+                         : (rows[0] ? rows[0].cells.length : 1);
+    var tools = document.createElement("div");
+    tools.className = "tbl-tools";
+    var inp = document.createElement("input");
+    inp.className = "tbl-search"; inp.type = "search";
+    inp.placeholder = "Filter " + rows.length + " rows\u2026";
+    inp.setAttribute("aria-label", "Filter rows");
+    var cnt = document.createElement("span");
+    cnt.className = "tbl-count"; cnt.textContent = rows.length + " rows";
+    tools.appendChild(inp); tools.appendChild(cnt);
+    tbl.parentNode.insertBefore(tools, tbl);
+    var nmr = document.createElement("tr");
+    nmr.className = "no-match";
+    var td = document.createElement("td");
+    td.colSpan = ncol; td.textContent = "No matching rows.";
+    nmr.appendChild(td); nmr.style.display = "none";
+    body.appendChild(nmr);
+    var total = rows.length;
+    inp.addEventListener("input", function () {
+      var q = norm(inp.value), shown = 0;
+      dataRows(body).forEach(function (r) {
+        var hit = norm(r.textContent).indexOf(q) !== -1;
+        r.style.display = hit ? "" : "none";
+        if (hit) shown++;
+      });
+      cnt.textContent = (shown === total) ? total + " rows"
+                                          : shown + " of " + total;
+      nmr.style.display = shown === 0 ? "" : "none";
+    });
+  });
+})();
+</script>
 """
 
 # Fields that get badge styling
@@ -1455,7 +1591,7 @@ def _stat_cards(stats) -> str:
     return f'<div class="stats">{cards}</div>'
 
 
-def _section_html(sec: dict) -> str:
+def _section_html(sec: dict, idx: int = 0) -> str:
     cols = sec.get("columns", [])
     rows = sec.get("rows", [])
     badge = set(sec.get("badge_cols", []))
@@ -1468,6 +1604,7 @@ def _section_html(sec: dict) -> str:
         return head + (f'<p style="color:#666; font-size:13px; '
                        f'margin-bottom:8px;">'
                        f'{_esc(sec.get("empty", "Nothing here."))}</p>')
+    tid = f"tbl-{idx}"
     th = "".join(f"<th>{_esc(c)}</th>" for c in cols)
     body = []
     for r in rows:
@@ -1477,8 +1614,17 @@ def _section_html(sec: dict) -> str:
             tds += (f"<td>{_badge(_esc(val))}</td>" if c in badge
                     else f"<td>{_esc(_cell(val))}</td>")
         body.append(f"<tr>{tds}</tr>")
-    return head + (f'<table><thead><tr>{th}</tr></thead>'
-                   f'<tbody>{"".join(body)}</tbody></table>')
+    ncols = len(cols) or 1
+    tools = (f'<div class="tbl-tools">'
+             f'<input class="tbl-search" data-for="{tid}" '
+             f'placeholder="Filter\u2026" aria-label="Filter rows">'
+             f'<span class="tbl-count" id="cnt-{tid}"></span></div>')
+    nomatch = (f'<tr class="no-match" style="display:none">'
+               f'<td colspan="{ncols}">No matching rows.</td></tr>')
+    return head + tools + (
+        f'<table class="data-table" id="{tid}">'
+        f'<thead><tr>{th}</tr></thead>'
+        f'<tbody>{"".join(body)}{nomatch}</tbody></table>')
 
 
 def generate_migration_html(report: dict) -> str:
@@ -1504,8 +1650,9 @@ def generate_migration_html(report: dict) -> str:
         note_html = (f'<div class="banner {note.get("kind", "info")}">'
                      f'{_esc(note["text"])}</div>')
 
-    sections_html = "\n".join(_section_html(s)
-                              for s in report.get("sections", []))
+    sections_html = "\n".join(
+        _section_html(s, i)
+        for i, s in enumerate(report.get("sections", [])))
 
     log = report.get("log")
     log_html = ""
@@ -1535,6 +1682,7 @@ def generate_migration_html(report: dict) -> str:
 {sections_html}
 {log_html}
 <div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
+{_REPORT_JS}
 </body></html>"""
 
 
@@ -1546,6 +1694,19 @@ def _write_flat_csv(path: str, columns: list, rows: list) -> int:
         for r in rows:
             w.writerow([r.get(c, "") for c in columns])
     return len(rows)
+
+
+def _open_path(path: str):
+    """Open a saved file with the OS default handler."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=False)
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+    except Exception as e:
+        cli_log(f"Could not open the file: {e}", "warning")
 
 
 def export_agent_report(report: dict, default_name: str = ""):
@@ -1588,6 +1749,10 @@ def export_agent_report(report: dict, default_name: str = ""):
         cli_log(f"Report exported → {os.path.basename(path)} "
                 f"({len(rows)} row(s))", "success")
         cli_log(f"File saved to: {path}", "info")
+        if messagebox.askyesno(
+                "Open report?",
+                f"Saved to:\n{path}\n\nOpen it now?"):
+            _open_path(path)
         return path
     except Exception as e:
         cli_log(f"Report export error: {e}", "error")

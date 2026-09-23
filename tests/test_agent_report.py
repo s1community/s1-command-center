@@ -169,6 +169,47 @@ def test_html_handles_empty_report():
     assert "</html>" in html
 
 
+# ── interactivity (filter + sort) ────────────────────────────────────────
+
+def test_html_tables_are_interactive():
+    html = eu.generate_migration_html(am.build_status_report(_status()))
+    # each data table is filterable and sortable
+    assert 'class="data-table"' in html
+    assert 'class="tbl-search"' in html
+    assert 'class="no-match"' in html
+    # the behaviour ships inline, exactly once, no external assets
+    assert html.count("<script>") == 1
+    assert 'addEventListener("input"' in html   # filtering
+    assert 'aria-sort' in html                   # sorting
+
+
+def test_html_search_targets_its_own_table():
+    # two sections -> two independently targeted search boxes
+    html = eu.generate_migration_html(am.build_live_report(_run()))
+    assert 'data-for="tbl-0"' in html
+    assert 'id="cnt-tbl-0"' in html
+    assert html.count('class="data-table"') >= 2
+
+
+def test_report_js_auto_bootstraps_plain_data_tables():
+    # the restore & validation reports only tag their tables .data-table;
+    # the shared script must build the toolbar for them at load, and must
+    # skip any table that already has a server-rendered toolbar.
+    js = eu._REPORT_JS
+    assert 'querySelectorAll("table.data-table")' in js
+    assert 'createElement("input")' in js
+    assert 'classList.contains("tbl-tools")' in js
+
+
+# ── open after export ────────────────────────────────────────────────────
+
+def test_export_offers_to_open_the_file():
+    assert hasattr(eu, "_open_path")
+    src = inspect.getsource(eu.export_agent_report)
+    assert "askyesno" in src
+    assert "_open_path" in src
+
+
 # ── flat CSV writer ──────────────────────────────────────────────────────
 
 def test_flat_csv_writes_header_and_rows(tmp_path):

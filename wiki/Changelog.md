@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.6.1 — 2026-09-23
+
+### Added
+- **Every report is now interactive.** The tables in the agent-migration reports (live run, status, match plan) *and* in the configuration **Restore Report** and **Migration Validation Report** now carry a filter box and click-to-sort columns. Type to narrow a table to the matching rows — the count shows "N of M" and an empty result says so — and click any header to sort it, numeric-aware, ascending then descending. It ships as inline vanilla JavaScript with no external assets, so the saved `.html` still opens offline and unchanged when it's emailed or attached to a ticket, and every untrusted value stays HTML-escaped. The agent reports render their own filter toolbar; the restore and validation reports only tag their tables, and the shared script builds the toolbar for them at load (skipping any table that already has one).
+- **Open the report straight after export.** Saving any report now asks *"Open it now?"* and, if you agree, opens the file with the operating system's default handler — cross-platform (`open` on macOS, `os.startfile` on Windows, `xdg-open` on Linux).
+
+### Tests
+- 600 total (+4 since v2.6.0): the interactive markup, the shared script's auto-bootstrap of plain `.data-table` tables while it skips ones that already have a toolbar, and the open-after-export prompt. Filtering and sorting were additionally verified end-to-end in headless Chrome (typing a term hides the non-matching rows and the count updates to "N of M").
+
 ## v2.6.0 — 2026-09-23
 
 ### Added

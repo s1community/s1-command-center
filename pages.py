@@ -9256,7 +9256,7 @@ class RestorePage(ctk.CTkFrame):
         end = meta.get("end_time", "")[:19].replace("T", " ")
 
         # ── Build HTML ──
-        from export_utils import _CSS, _badge
+        from export_utils import _CSS, _badge, _REPORT_JS, _open_path
 
         # stat cards
         stats_html = f"""<div class="stats">
@@ -9338,7 +9338,7 @@ class RestorePage(ctk.CTkFrame):
 
         node_table = f"""<h2 style="color:#fff; margin:28px 0 12px; font-size:18px;">
           Per-Node Details</h2>
-        <table><thead><tr>
+        <table class="data-table"><thead><tr>
           <th>Type</th><th>Path</th><th>Status</th><th>Elements</th>
         </tr></thead><tbody>{node_rows}</tbody></table>"""
 
@@ -9434,7 +9434,7 @@ class RestorePage(ctk.CTkFrame):
             <p style="color:#888; font-size:13px; margin-bottom:12px;">
               Raw per-item failures. Cross-reference each row with the
               triage table above for the recommended action.</p>
-            <table><thead><tr>
+            <table class="data-table"><thead><tr>
               <th>Node Path</th><th>Element</th>
               <th>Item Name / Value</th><th>Error</th>
             </tr></thead><tbody>{fi_rows}</tbody></table>"""
@@ -9469,6 +9469,7 @@ class RestorePage(ctk.CTkFrame):
 {failed_html}
 {log_html}
 <div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
+{_REPORT_JS}
 </body></html>"""
 
         # save
@@ -9498,8 +9499,9 @@ class RestorePage(ctk.CTkFrame):
                 json.dump(report, f, indent=2, default=str)
         cli_log(f"Restore report exported → {os.path.basename(path)}",
                 "success")
-        messagebox.showinfo("Report Exported",
-                            f"Restore report saved to:\n{path}")
+        if messagebox.askyesno("Open report?",
+                               f"Saved to:\n{path}\n\nOpen it now?"):
+            _open_path(path)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -10033,7 +10035,7 @@ class ValidationPage(ctk.CTkFrame):
         if not self._results:
             cli_log("Run a validation first.", "warning")
             return
-        from export_utils import _CSS
+        from export_utils import _CSS, _REPORT_JS, _open_path
 
         meta, res = self._meta, self._results
         n = len(res)
@@ -10089,7 +10091,7 @@ class ValidationPage(ctk.CTkFrame):
                 f'<td><span class="badge {cls}">{txt}</span></td></tr>')
         node_table = f"""<h2 style="color:#fff; margin:28px 0 12px; font-size:18px;">
           Node Comparison</h2>
-        <table><thead><tr><th>Type</th><th>Path</th><th>Result</th></tr></thead>
+        <table class="data-table"><thead><tr><th>Type</th><th>Path</th><th>Result</th></tr></thead>
         <tbody>{node_rows}</tbody></table>"""
 
         # differences table
@@ -10153,7 +10155,7 @@ class ValidationPage(ctk.CTkFrame):
               Every differing item is listed by name below. Red = present on
               the source but missing on the destination; yellow = present on
               the destination but not the source.</p>
-            <table><thead><tr>
+            <table class="data-table"><thead><tr>
               <th>Node Path</th><th>Element</th><th>Src</th><th>Dst</th>
               <th style="min-width:260px;">Item names (missing / extra)</th>
               <th>Why</th><th>What to do</th>
@@ -10175,6 +10177,7 @@ class ValidationPage(ctk.CTkFrame):
 {node_table}
 {diff_section}
 <div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
+{_REPORT_JS}
 </body></html>"""
 
         ts = datetime.now().strftime("%Y%m%d-%H%M")
@@ -10195,8 +10198,9 @@ class ValidationPage(ctk.CTkFrame):
                 f.write(html)
         cli_log(f"Validation report exported → {os.path.basename(path)}",
                 "success")
-        messagebox.showinfo("Report Exported",
-                            f"Validation report saved to:\n{path}")
+        if messagebox.askyesno("Open report?",
+                               f"Saved to:\n{path}\n\nOpen it now?"):
+            _open_path(path)
 
     def _export_manifest(self):
         """Export a structured migration manifest (JSON) plus a ready-to-post
