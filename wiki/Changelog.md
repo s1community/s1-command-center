@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.6.0 — 2026-09-23
+
+### Added
+- **A full HTML report for the agent migration, to match the one the configuration migration already had.** The restore has always exported a polished HTML Restore Report; the agent side only ever produced a flat table. All three agent exports — the **match plan**, the **live run** and the **status report** — now build the same kind of self-contained, dark-themed document: a header, stat cards, a source/destination info box, colour-coded status badges (moved / pending / failed / migrated / decommissioned), and one section per concern. The live-run report leads with a **Did not migrate — manual action required** table carrying the console's own reason per machine, then the errors, a per-group breakdown, and finally every agent; the match-plan report splits **Will migrate** from **Will not migrate** (with the reason) and **Already migrated**. The **Export** button on each panel now offers HTML (default), Excel, flat CSV and JSON from one place. Every untrusted value — computer names, usernames, error text — is HTML-escaped, so a hostile agent name cannot inject markup into the report.
+- **The "Include passphrases" option now states what it costs, and asks first.** Fetching agent passphrases is a sensitive, audited action, and the switch used to describe it only as "one extra API call per agent". It now says plainly — in the field caption, in the live log when toggled on, and in a confirmation dialog before the run starts — that it is one API call per agent (slow on a large scope), that **SentinelOne records every passphrase fetch in the source console's activity log**, and that the exported file will contain secrets. A status report that actually carries passphrases prints a red banner at the top of the HTML repeating the warning, so whoever opens the file is told to treat it as sensitive and that the fetches were logged.
+
+### Changed
+- The generic table export (`export_utils.export_report`) is unchanged and still used elsewhere; the agent migration now routes through a new `export_agent_report` that renders the structured report. The report itself is built by plain functions (`build_live_report` / `build_status_report` / `build_match_report`) on plain dicts, so it is produced and tested without a console or a window.
+
+### Tests
+- 596 total, up from 584. New `tests/test_agent_report.py` covers the three builders (the failure/error/per-group/agent sections, the verification and stopped notes, the ready-vs-blocked split), the HTML generator (stat cards, status badges, the passphrase danger banner, and that untrusted values are escaped rather than rendered), the flat-CSV writer, and a source guard asserting the passphrase option warns about the activity log in the caption, the toggle and the run confirmation.
+
 ## v2.5.0 — 2026-09-21
 
 ### Added

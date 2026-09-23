@@ -74,7 +74,8 @@ Moves the agents themselves between consoles, so each source group's endpoints l
 - **Remembers the plan** — Step 2's result is cached, so reopening the app doesn't re-walk the console; the plan's age is shown with a **Match again** button
 - **No dry-run switch** — Step 2 physically cannot move anything, and step 3's button names the number of agents it is about to move
 - **Scheduling** — Arm a live run for a chosen date and time
-- **Migration status report** — Counts per console-migration status, optional passphrases, decommissioned agents
+- **Full HTML report** — Every export (match plan, live run, status) writes a polished, self-contained HTML report: stat cards, source/destination info, colour-coded status badges, a *did-not-migrate* section with the console's own reason per machine, and the complete agent list. Excel, flat CSV and JSON come from the same **Export** button
+- **Migration status report** — Counts per console-migration status and decommissioned agents. An opt-in **Include passphrases** switch fetches each agent's uninstall passphrase from the source — it warns (and asks to confirm) that this is one API call per agent (slow on a large scope), that **SentinelOne records every fetch in the source console's activity log**, and that the exported report becomes sensitive
 
 ### Reports
 - **HTML Restore Report** — Professional dark-themed report with:
@@ -86,6 +87,7 @@ Moves the agents themselves between consoles, so each source group's endpoints l
   - Collapsible full operation log
 - **JSON Export** — Structured data for programmatic analysis
 - **Export Log** — Available after restore completes
+- **Agent Migration Report** — The same dark-themed, self-contained HTML (plus Excel/CSV/JSON) for the agent live run, the match plan and the status report, so both the configuration migration *and* the agent migration hand back a proper report
 
 ### Operations Pages
 - **Accounts & Sites** — Browse and manage console structure
@@ -120,7 +122,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.5.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.6.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -381,6 +383,13 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v2.6.0 — 2026-09-23
+#### Added
+- **Full HTML reports for agent migration** — the live run, the match plan and the status report now export the same polished, self-contained HTML as the restore report: stat cards, source/destination info, colour-coded status badges, a *did-not-migrate* section with the console's own reason per machine, and the complete agent list. Excel, flat CSV and JSON come from the same **Export** button. The settings/configuration migration already had its HTML Restore Report; both sides now match.
+- **The passphrase option spells out its cost** — the status report's **Include passphrases** switch now warns, and asks for confirmation before running, that fetching passphrases is one API call per agent (slow on a large scope), that **SentinelOne records every fetch in the source console's activity log**, and that the exported report contains secrets. A report that carries passphrases prints a red banner saying the same.
+#### Tests
+- 596 total (+12): the report builders, HTML escaping and badges, the passphrase activity-log warning, and the export format list.
 
 ### v2.5.0 — 2026-09-21
 #### Added

@@ -43,7 +43,7 @@ from app import (run_async, cli_log, _ConsoleProxy, UI_FONT,
                  MONO_FONT, CARD, CARD_ELEVATED, BORDER, ACCENT, ACCENT_HOVER,
                  BRAND, BRAND_HOVER, GREEN, GREEN_HOVER, WARN, WARN_HOVER,
                  NEUTRAL, NEUTRAL_HOVER, TEXT, TEXT_MUTED, TEXT_FAINT)
-from export_utils import export_report
+from export_utils import export_agent_report
 from s1_api import S1API, S1APIError
 from theme import RADIUS_MD, RADIUS_SM
 
@@ -1008,6 +1008,196 @@ def status_summary_text(result: dict) -> str:
         lines += ["", "Passphrases are included in the export — treat that "
                       "file as sensitive."]
     return "\n".join(lines)
+
+
+# ── rich report builders ───────────────────────────────────────────────
+#
+# Each export turns its result into the structured dict that
+# export_utils.export_agent_report renders as a polished HTML document (or
+# Excel / CSV / JSON). These are plain functions on plain dicts, so the
+# report can be built and asserted without a console or a window.
+
+def _stat(label, value, cls: str = "") -> dict:
+    return {"label": label, "value": value, "class": cls}
+
+
+def build_live_report(run: dict, source: str = "", map_path: str = "") -> dict:
+    """Structured report for one live migration run."""
+    run = run or {}
+    agents = run.get("agents") or []
+    moved, pending = run.get("moved", 0), run.get("pending", 0)
+    failed = run.get("failed", 0)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    failures = [a for a in agents if a.get("Result") == "failed"]
+    err_rows = [{"Error": e} for e in (run.get("errors") or [])]
+    group_rows = [{
+        "Group": where_of(t["row"]),
+        "Destination": t["row"].get("Destination", ""),
+        "Candidates": t.get("candidates", 0),
+        "Accepted by console": t.get("moved", 0),
+        "Errors": len(t.get("errors") or []),
+    } for t in (run.get("by_group") or [])]
+
+    sections = []
+    if failures:
+        sections.append({
+            "title": "Did not migrate — manual action required",
+            "icon": "✕", "color": "#ff6b81",
+            "columns": ["Computer", "OS", "Group", "Destination", "Detail"],
+            "rows": failures})
+    if err_rows:
+        sections.append({
+            "title": "Errors", "icon": "⚠", "color": "#fdcb6e",
+            "columns": ["Error"], "rows": err_rows})
+    if group_rows:
+        sections.append({
+            "title": "Per group", "icon": "▦", "color": "#74b9ff",
+            "columns": ["Group", "Destination", "Candidates",
+                        "Accepted by console", "Errors"], "rows": group_rows})
+    sections.append({
+        "title": "Every agent", "icon": "🖥", "color": "#ffffff",
+        "columns": LIVE_COLUMNS + ["Agent ID"], "rows": agents,
+        "badge_cols": ["Result"], "empty": "No agents were processed."})
+
+    note = None
+    if run.get("stopped"):
+        note = {"kind": "warn",
+                "text": "The run was stopped early, so this report is partial."}
+    elif not run.get("verified") and (moved or pending):
+        note = {"kind": "info",
+                "text": "Per-agent confirmation was off, so “moved” is what "
+                        "the console accepted, not what was verified on each "
+                        "agent. Run the Status report to confirm they arrived."}
+
+    return {
+        "title": "Agent Migration — Live Run", "icon": "🚚",
+        "subtitle": "S1 Command Center — agents moved to the destination "
+                    "console",
+        "meta_line": f"Generated {now} • {len(agents)} agent(s) • "
+                     f"{moved} moved • {pending} pending • "
+                     f"{failed} failed",
+        "info": [
+            ("Source console", source or "—"),
+            ("Destination map file", map_path or "—"),
+            ("Groups migrated", run.get("groups", 0)),
+            ("Agents sent", run.get("sent", 0)),
+            ("Accepted by the console", run.get("affected", 0)),
+            ("Per-agent confirmation", "on" if run.get("verified") else "off"),
+        ],
+        "stats": [
+            _stat("Moved", moved),
+            _stat("Pending check-in", pending, "warn"),
+            _stat("Failed", failed, "accent" if failed else "muted"),
+            _stat("Groups", run.get("groups", 0), "blue"),
+            _stat("Accepted", run.get("affected", 0), "blue"),
+        ],
+        "note": note, "sections": sections,
+        "flat": {"columns": LIVE_COLUMNS + ["Agent ID"], "rows": agents},
+    }
+
+
+def build_status_report(result: dict, console: str = "", scope: str = "",
+                        passphrases: bool = False) -> dict:
+    """Structured report for one migration status run."""
+    result = result or {}
+    counts = result.get("counts") or {}
+    agents = list(result.get("agents") or [])
+    decommissioned = list(result.get("decommissioned") or [])
+    all_rows = agents + decommissioned
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    has_pass = any(r.get("Passphrase") not in ("", "not fetched", None)
+                   for r in all_rows)
+    note = None
+    if has_pass:
+        note = {"kind": "danger",
+                "text": "This report contains agent passphrases — treat the "
+                        "file as sensitive, store it securely and delete it "
+                        "when finished. Each passphrase was recorded in the "
+                        "source console's activity log when it was fetched."}
+
+    return {
+        "title": "Agent Migration — Status Report", "icon": "📋",
+        "subtitle": "S1 Command Center — agents by console-migration status",
+        "meta_line": f"Generated {now} • {len(all_rows)} agent(s)",
+        "info": [
+            ("Console", console or "—"),
+            ("Scope", scope or "whole console"),
+            ("Passphrases included", "yes" if has_pass else "no"),
+        ],
+        "stats": [
+            _stat("Migrated", counts.get("Migrated", 0)),
+            _stat("Pending", counts.get("Pending", 0), "warn"),
+            _stat("Failed", counts.get("Failed", 0),
+                  "accent" if counts.get("Failed") else "muted"),
+            _stat("N/A", counts.get("N/A", 0), "muted"),
+            _stat("Decommissioned", len(decommissioned), "muted"),
+        ],
+        "note": note,
+        "sections": [{
+            "title": "Agents", "icon": "🖥", "color": "#ffffff",
+            "columns": AGENT_REPORT_COLUMNS, "rows": all_rows,
+            "badge_cols": ["Migration Status"],
+            "empty": "No agents in that scope."}],
+        "flat": {"columns": AGENT_REPORT_COLUMNS, "rows": all_rows},
+    }
+
+
+def build_match_report(plan: dict, map_path: str = "") -> dict:
+    """Structured report for one source→destination match pass."""
+    plan = plan or {}
+    rows = plan.get("rows") or []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _plain(rs):
+        return [{k: r.get(k, "") for k in PLAN_COLUMNS} for r in rs]
+
+    def _with_reason(rs):
+        return [{**{k: r.get(k, "") for k in PLAN_COLUMNS},
+                 "Reason": r.get("reason", "")} for r in rs]
+
+    ready = [r for r in rows if r.get("state") == "ready"]
+    blocked = [r for r in rows if r.get("state") == "blocked"]
+    done = [r for r in rows if r.get("state") == "done"]
+
+    sections = [
+        {"title": "Will migrate", "icon": "✓", "color": "#00e0a4",
+         "columns": PLAN_COLUMNS, "rows": _plain(ready),
+         "empty": "No group is ready to migrate."},
+        {"title": "Will not migrate", "icon": "✕", "color": "#ff6b81",
+         "columns": PLAN_COLUMNS + ["Reason"], "rows": _with_reason(blocked),
+         "empty": "Nothing is blocked."},
+    ]
+    if done:
+        sections.append(
+            {"title": "Already migrated", "icon": "≡", "color": "#74b9ff",
+             "columns": PLAN_COLUMNS, "rows": _plain(done)})
+
+    return {
+        "title": "Agent Migration — Match Plan", "icon": "🧭",
+        "subtitle": "S1 Command Center — source scopes matched to the "
+                    "destination (nothing has moved)",
+        "meta_line": f"Generated {now} • {len(rows)} scope(s)",
+        "info": [
+            ("Destination map file", map_path or "—"),
+            ("Accounts read", plan.get("accounts", 0)),
+            ("Agents to migrate", plan.get("agents", 0)),
+        ],
+        "stats": [
+            _stat("Ready", plan.get("ready", 0)),
+            _stat("Agents to migrate", plan.get("agents", 0), "blue"),
+            _stat("Blocked", plan.get("blocked", 0),
+                  "accent" if plan.get("blocked") else "muted"),
+            _stat("Already migrated", plan.get("done", 0), "muted"),
+            _stat("Empty groups", plan.get("empty_groups", 0), "muted"),
+        ],
+        "sections": sections,
+        "flat": {"columns": PLAN_COLUMNS + ["State", "Reason"],
+                 "rows": [{**{k: r.get(k, "") for k in PLAN_COLUMNS},
+                           "State": r.get("state", ""),
+                           "Reason": r.get("reason", "")} for r in rows]},
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3098,17 +3288,9 @@ class AgentMigratorPage(ctk.CTkFrame):
             messagebox.showinfo("Nothing to export", "Find the matches "
                                                      "first.")
             return
-        stats = [
-            {"label": "Accounts read", "value": plan["accounts"]},
-            {"label": "Groups matched", "value": plan["ready"]},
-            {"label": "Agents to migrate", "value": plan["agents"]},
-            {"label": "Cannot migrate", "value": plan["blocked"]},
-            {"label": "Empty groups skipped", "value": plan["empty_groups"]},
-        ]
-        rows = [{k: r[k] for k in PLAN_COLUMNS} for r in plan["rows"]]
-        export_report("Agent Migration — match plan", PLAN_COLUMNS, rows,
-                      stats=stats,
-                      subtitle=f"Destination file: {self._map_path}")
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        export_agent_report(build_match_report(plan, self._map_path),
+                            default_name=f"s1-agent-match-plan-{ts}")
 
     def _fix_names(self):
         unmatched = (self._plan or {}).get("unmatched") or []
@@ -3445,18 +3627,11 @@ class AgentMigratorPage(ctk.CTkFrame):
             messagebox.showinfo("Nothing to export", "Run the migration "
                                                      "first.")
             return
-        stats = [
-            {"label": "Moved", "value": run["moved"]},
-            {"label": "Pending check-in", "value": run["pending"]},
-            {"label": "Failed", "value": run["failed"]},
-            {"label": "Groups", "value": run["groups"]},
-            {"label": "Accepted by the console", "value": run["affected"]},
-        ]
-        rows = [{k: r.get(k, "") for k in LIVE_COLUMNS + ["Agent ID"]}
-                for r in run["agents"]]
-        export_report("Agent Migration — agents", LIVE_COLUMNS + ["Agent ID"],
-                      rows, stats=stats,
-                      subtitle=f"Destination file: {self._map_path}")
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        export_agent_report(
+            build_live_report(run, source=self.match_conn.url(),
+                              map_path=self._map_path),
+            default_name=f"s1-agent-live-run-{ts}")
 
     # ── tool · status report ──────────────────────────────────────────
 
@@ -3490,9 +3665,12 @@ class AgentMigratorPage(ctk.CTkFrame):
                           command=self._on_passphrase_toggle).grid(
                 row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
             ctk.CTkLabel(body,
-                         text="One extra API call per agent, and the export "
-                              "becomes sensitive. Off unless the customer "
-                              "needs them.",
+                         text="Fetches each agent's uninstall passphrase from "
+                              "the source — one API call per agent, so it can "
+                              "take a while on a large scope. SentinelOne "
+                              "records every passphrase fetch in the source "
+                              "console's activity log, and the export becomes "
+                              "sensitive. Off unless the customer needs them.",
                          font=(UI_FONT, 11), text_color=TEXT_FAINT,
                          justify="left", wraplength=560).grid(
                 row=2, column=0, columnspan=2, sticky="w")
@@ -3538,8 +3716,9 @@ class AgentMigratorPage(ctk.CTkFrame):
     def _on_passphrase_toggle(self):
         if self.pass_var.get():
             self.log.log(
-                "Passphrases add one API call per agent — the report will "
-                "take considerably longer, and the export becomes sensitive.")
+                "Passphrases: one API call per agent (slow on a large scope), "
+                "each fetch is written to the source console's activity log, "
+                "and the exported report becomes sensitive.")
 
     def _run_status(self):
         try:
@@ -3556,6 +3735,17 @@ class AgentMigratorPage(ctk.CTkFrame):
                 "paging.\n\nContinue?"):
             return
         fetch = bool(self.pass_var.get())
+        if fetch and not messagebox.askyesno(
+                "Fetch passphrases?",
+                "Including passphrases reads each agent's uninstall passphrase "
+                "from the source console.\n\n"
+                "•  One API call per agent — this can take a long time on a "
+                "large scope.\n"
+                "•  SentinelOne records every passphrase fetch in the source "
+                "console's ACTIVITY LOG.\n"
+                "•  The exported report will contain secrets — treat it as "
+                "sensitive.\n\nContinue?"):
+            return
 
         self._stop.clear()
         self.status_btn.configure(state="disabled", text="Running…")
@@ -3606,20 +3796,17 @@ class AgentMigratorPage(ctk.CTkFrame):
 
     def _export_status(self):
         result = self._status or {}
-        rows = list(result.get("agents") or []) + \
-            list(result.get("decommissioned") or [])
-        if not rows:
+        if not (result.get("agents") or result.get("decommissioned")):
             messagebox.showinfo("Nothing to export", "Run the report first.")
             return
-        counts = result.get("counts") or {}
-        stats = [{"label": s, "value": counts.get(s, 0)}
-                 for s in MIGRATION_STATUSES]
-        stats.append({"label": "Decommissioned",
-                      "value": len(result.get("decommissioned") or [])})
         scope = (self.status_site.get().strip()
                  or self.status_account.get().strip() or "whole console")
-        export_report("Agent Migration Status", AGENT_REPORT_COLUMNS, rows,
-                      stats=stats, subtitle=f"Scope: {scope}")
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        export_agent_report(
+            build_status_report(result, console=self.status_conn.url(),
+                                scope=scope,
+                                passphrases=bool(self.pass_var.get())),
+            default_name=f"s1-agent-status-{ts}")
 
     # ── tool · scheduler ──────────────────────────────────────────────
 

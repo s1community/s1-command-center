@@ -72,6 +72,26 @@ tbody tr:nth-child(even) { background: #151528; }
     text-align: center; color: #444; font-size: 11px;
     margin-top: 32px; padding-top: 16px; border-top: 1px solid #222;
 }
+.value.blue { color: #74b9ff; }
+.value.muted { color: #888; }
+.infobox {
+    background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 12px;
+    padding: 20px 28px; margin-bottom: 24px;
+}
+.infobox table { border: none; background: transparent; }
+.infobox td {
+    border: none; padding: 4px 16px 4px 0; font-size: 13px; white-space: nowrap;
+}
+.infobox td.k { color: #888; }
+.infobox td.v { color: #e0e0e0; }
+.banner {
+    border-radius: 12px; padding: 14px 20px; margin-bottom: 24px;
+    font-size: 14px; border: 1px solid; line-height: 1.5;
+}
+.banner.info { background: #0984e314; border-color: #0984e355; color: #74b9ff; }
+.banner.warn { background: #fdcb6e14; border-color: #fdcb6e55; color: #fdcb6e; }
+.banner.danger { background: #e9456014; border-color: #e9456055; color: #ff6b81; }
+.rep-h2 { color: #fff; margin: 28px 0 12px; font-size: 18px; }
 """
 
 # Fields that get badge styling
@@ -84,6 +104,11 @@ _BADGE_MAP = {
     "medium": "badge-yellow", "low": "badge-blue",
     "finished": "badge-green", "running": "badge-yellow",
     "enabled": "badge-green", "disabled": "badge-red",
+    # Agent-migration outcomes.
+    "moved": "badge-green", "migrated": "badge-green",
+    "pending": "badge-yellow", "queued": "badge-blue",
+    "sending": "badge-blue", "failed": "badge-red",
+    "decommissioned": "badge-yellow",
 }
 
 
@@ -1401,3 +1426,170 @@ def export_report(title: str, columns: list[str], rows: list[dict],
     except Exception as e:
         cli_log(f"Export error: {e}", "error")
         messagebox.showerror("Export Error", str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Rich migration report (agent runs, status) — one structured dict in,
+#  a self-contained HTML document / Excel / CSV / JSON out.
+# ═══════════════════════════════════════════════════════════════════════
+#
+# The caller hands a plain dict so the whole report is testable without a
+# console or a window:
+#   {title, icon, subtitle, meta_line,
+#    info:    [(label, value), ...],          # the connection/scope box
+#    stats:   [{label, value, class}],        # class in "", accent, warn,
+#                                             #   blue, muted
+#    note:    {text, kind} | None,            # kind in info|warn|danger
+#    sections:[{title, icon, color, columns, rows, badge_cols, empty}],
+#    log:     [line, ...] | None,
+#    flat:    {columns, rows}}                 # feeds Excel/CSV/JSON
+
+def _stat_cards(stats) -> str:
+    if not stats:
+        return ""
+    cards = "".join(
+        f'<div class="stat-card"><div class="label">{_esc(s.get("label", ""))}'
+        f'</div><div class="value {s.get("class", "")}">'
+        f'{_esc(s.get("value", ""))}</div></div>'
+        for s in stats)
+    return f'<div class="stats">{cards}</div>'
+
+
+def _section_html(sec: dict) -> str:
+    cols = sec.get("columns", [])
+    rows = sec.get("rows", [])
+    badge = set(sec.get("badge_cols", []))
+    head = (f'<h2 class="rep-h2" style="color:{sec.get("color", "#fff")}">'
+            f'{(sec.get("icon", "") + " ") if sec.get("icon") else ""}'
+            f'{_esc(sec.get("title", ""))} '
+            f'<span style="color:#666; font-weight:400; font-size:14px;">'
+            f'({len(rows)})</span></h2>')
+    if not rows:
+        return head + (f'<p style="color:#666; font-size:13px; '
+                       f'margin-bottom:8px;">'
+                       f'{_esc(sec.get("empty", "Nothing here."))}</p>')
+    th = "".join(f"<th>{_esc(c)}</th>" for c in cols)
+    body = []
+    for r in rows:
+        tds = ""
+        for c in cols:
+            val = r.get(c, "")
+            tds += (f"<td>{_badge(_esc(val))}</td>" if c in badge
+                    else f"<td>{_esc(_cell(val))}</td>")
+        body.append(f"<tr>{tds}</tr>")
+    return head + (f'<table><thead><tr>{th}</tr></thead>'
+                   f'<tbody>{"".join(body)}</tbody></table>')
+
+
+def generate_migration_html(report: dict) -> str:
+    """Render a structured migration report as a self-contained HTML page."""
+    report = report or {}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    icon = report.get("icon", "")
+    title = _esc(report.get("title", "Migration Report"))
+    subtitle = _esc(report.get("subtitle", "S1 Command Center Report"))
+    meta_line = _esc(report.get("meta_line", f"Generated {now}"))
+
+    info = report.get("info") or []
+    info_html = ""
+    if info:
+        rows = "".join(
+            f'<tr><td class="k">{_esc(k)}</td>'
+            f'<td class="v">{_esc(v)}</td></tr>' for k, v in info)
+        info_html = f'<div class="infobox"><table>{rows}</table></div>'
+
+    note = report.get("note") or {}
+    note_html = ""
+    if note.get("text"):
+        note_html = (f'<div class="banner {note.get("kind", "info")}">'
+                     f'{_esc(note["text"])}</div>')
+
+    sections_html = "\n".join(_section_html(s)
+                              for s in report.get("sections", []))
+
+    log = report.get("log")
+    log_html = ""
+    if log:
+        lines = "".join(
+            f'<div style="font-family:Consolas,monospace; font-size:11px; '
+            f'color:#888; padding:1px 0;">{_esc(l)}</div>' for l in log)
+        log_html = (
+            f'<details style="margin-top:28px;"><summary style="color:#888; '
+            f'cursor:pointer; font-size:14px; margin-bottom:8px;">Full log '
+            f'({len(log)} lines)</summary><div style="background:#111; '
+            f'border-radius:8px; padding:16px; max-height:600px; '
+            f'overflow-y:auto;">{lines}</div></details>')
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>{title} — S1 Command Center Report</title>
+<style>{_CSS}</style></head><body>
+<div class="header">
+  <h1>{(icon + ' ') if icon else ''}{title}</h1>
+  <div class="subtitle">{subtitle}</div>
+  <div class="meta">{meta_line}</div>
+</div>
+{_stat_cards(report.get('stats'))}
+{info_html}
+{note_html}
+{sections_html}
+{log_html}
+<div class="footer">S1 Command Center &bull; Made by Ran Jacobi &bull; Generated {now}</div>
+</body></html>"""
+
+
+def _write_flat_csv(path: str, columns: list, rows: list) -> int:
+    """One flat CSV of `rows`. utf-8-sig so Excel-on-Windows keeps non-ASCII."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(columns)
+        for r in rows:
+            w.writerow([r.get(c, "") for c in columns])
+    return len(rows)
+
+
+def export_agent_report(report: dict, default_name: str = ""):
+    """Save dialog + write a migration report as a rich HTML document, Excel
+    workbook, flat CSV or JSON. Returns the path written, or None."""
+    report = report or {}
+    flat = report.get("flat") or {}
+    columns = flat.get("columns") or []
+    rows = flat.get("rows") or []
+    if not rows and not report.get("sections"):
+        messagebox.showwarning(
+            "Nothing to Export",
+            "Run the report first — there is no data yet.")
+        return None
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    path = filedialog.asksaveasfilename(
+        title=f"Export {report.get('title', 'Report')}",
+        initialfile=default_name or f"s1-agent-report-{ts}",
+        defaultextension=".html",
+        filetypes=[
+            ("HTML Report", "*.html"),
+            ("Excel Workbook", "*.xlsx"),
+            ("CSV (flat)", "*.csv"),
+            ("JSON Data", "*.json"),
+        ])
+    if not path:
+        return None
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".xlsx":
+            generate_excel(path, report.get("title", "Report"), columns, rows)
+        elif ext == ".csv":
+            _write_flat_csv(path, columns, rows)
+        elif ext == ".json":
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2, default=str)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(generate_migration_html(report))
+        cli_log(f"Report exported → {os.path.basename(path)} "
+                f"({len(rows)} row(s))", "success")
+        cli_log(f"File saved to: {path}", "info")
+        return path
+    except Exception as e:
+        cli_log(f"Report export error: {e}", "error")
+        messagebox.showerror("Export Error", str(e))
+        return None
