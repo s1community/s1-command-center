@@ -1345,13 +1345,14 @@ class _ChoiceDialog(ctk.CTkToplevel):
     DEBOUNCE_MS = 300    # quiet time before a keystroke hits the API
 
     def __init__(self, master, title, fetch, chosen=(), note="",
-                 noun="item"):
+                 noun="item", source="the console"):
         super().__init__(master)
         self.title(title)
         self.geometry("560x560")
         self.minsize(440, 380)
         self._fetch = fetch
         self._noun = noun
+        self._source = source
         # dict, not set: insertion order is the order we hand back
         self._chosen = dict.fromkeys(
             str(c) for c in chosen if str(c).strip())
@@ -1391,7 +1392,7 @@ class _ChoiceDialog(ctk.CTkToplevel):
 
         self._build_list(row=3)
 
-        self._status = ctk.CTkLabel(self, text="Searching the console…",
+        self._status = ctk.CTkLabel(self, text=f"Searching {source}…",
                                     anchor="w", font=(UI_FONT, 11),
                                     text_color=TEXT_FAINT)
         self._status.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 6))
@@ -1513,7 +1514,7 @@ class _ChoiceDialog(ctk.CTkToplevel):
             self._blank.configure(
                 text=f"No {self._noun} matches that search."
                 if self._search.get().strip()
-                else f"No {self._noun} came back from the console.")
+                else f"No {self._noun} came back from {self._source}.")
             self._blank.grid(row=self.PAGE, column=0, sticky="ew",
                              padx=12, pady=12)
         self._canvas.yview_moveto(0)
@@ -1534,7 +1535,7 @@ class _ChoiceDialog(ctk.CTkToplevel):
         self._gen += 1
         gen = self._gen
         query = self._search.get().strip()
-        self._status.configure(text="Searching the console…")
+        self._status.configure(text=f"Searching {self._source}…")
 
         # Ask for one more than we can show: that is how we know whether
         # to tell the operator there is more behind the search.
@@ -1585,7 +1586,7 @@ class _ChoiceDialog(ctk.CTkToplevel):
         elif self._more:
             self._status.configure(
                 text=f"Showing the first {n}. Type a name to narrow it "
-                     f"down — the console is doing the searching.")
+                     f"down — the search covers all of {self._source}.")
         else:
             self._status.configure(
                 text=f"Showing all {n} {self._noun}(s) that match.")

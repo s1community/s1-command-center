@@ -237,7 +237,7 @@ def test_csv_is_offered_by_the_main_gap_export_dialog():
 
 
 def test_restore_page_wires_a_csv_button():
-    build = inspect.getsource(RestorePage.__init__)
+    build = inspect.getsource(RestorePage._build_run_card)
     assert "self._gap_csv_btn" in build
     assert "self._export_gap_csv" in build
     handler = inspect.getsource(RestorePage._export_gap_csv)

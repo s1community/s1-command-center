@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.7.0 — 2026-10-07
+
+### Changed
+- **A new Restore screen.** The old page stacked a file row, a collapsible "Structure Operations", the scope card, an element grid and three rows of buttons (Prepare / Run / Review) — fourteen buttons visible at once, most of them disabled. It is now three numbered steps, top to bottom:
+  - **1 · Backup file** — the file, **Browse…**, **↩ Rollback**, and one line saying what the file holds (`1 account · 2 sites · 4 groups · from fao.sentinelone.net`). A backup holding secrets gets its own line with **Save a redacted copy**.
+  - **2 · What to restore** — Account / Site / Group (with **Choose…**), the levels, and a live line stating exactly what will be restored — the same scope the restore uses, recomputed as you type. A site name that isn't in the backup turns the step red with the names the backup does have. Element choices, **Rename in the backup** and **Defaults & licenses** are folded under **More options**, whose label still shows the element count.
+  - **3 · Restore** — **▶ Restore N nodes** names how many nodes it will write; **✈ Pre-flight** and **🔍 Preview changes** sit beside it. While a restore runs only **Stop** and **Skip** are offered; afterwards the results (**Restore report**, **Explain errors** when something failed, **Gap report** / **CSV**) and, after a stop, **↻ Resume (N left)**.
+  Each step's badge turns ✓ when done and ! when something needs fixing, and the next thing to do is the only filled button. **⚡ Auto Restore** is now the **Unattended** switch on the one Restore button, and it confirms once before it starts (Resume keeps its own confirmation). Progress and Backup vs destination are tabs instead of a split pane, and the page fills the window without pushing the app's status bar off-screen. The progress table's scrollbar follows the theme instead of showing a white native bar in dark mode, and the table no longer keeps the start-up colours after a live Light/Dark switch in Settings (Backup page too).
+- **Progress, site by site.** The progress list numbered every node of the backup in one sequence, so a single-site restore read 1, 6, 7, 8. It is now a card per site — the account and global settings get cards of their own — each with a badge (the site's number, then ✓ or !), a done/total count and a small bar. Groups are numbered 1, 2, 3 inside their own site, and the line above the bar names both: *Restoring site 3 of 4 · FAO-ROME — group 2 of 3: Servers*. A strip on top totals the run (`1 account · 4 sites · 13 groups · ✓ 10 done · ✗ 1 failed`). Click a card to fold or unfold it; a big run starts folded and opens the card that is running or has failed, and **Show failed only** hides everything that went through. Hover a row for its full path and the whole message. Nodes a Resume passes over because they already finished show as done. The Backup page uses the same view.
+- **Big restores no longer freeze the window.** The progress list is drawn instead of built from thousands of widgets: 600+ nodes appear in a fraction of a second (it took tens of seconds), and each status update takes under a millisecond.
+
+### Fixed
+- **Restoring one site restored others too.** Naming a site now restores only that site and its groups (plus its own account when Accounts is ticked); several sites can be typed comma-separated or ticked with **Choose…**, which lists the sites in the loaded backup. Auto Restore and Resume no longer ignore the fields, group ranking only touches the chosen sites, and a name that isn't in the backup stops the restore before anything is written.
+- **Loading a restore report as a backup** failed with *"'str' object has no attribute 'get'"*, and auto-load picked the newest `s1*.json` — often a report. A report or any other non-backup JSON is now named for what it is in plain words, and auto-load passes over files that aren't backups.
+
+### Tests
+- 692 total (+90): the new Restore screen, restoring only the named sites, and the site-by-site progress — per-site numbering, counts, folding, the failed-only filter, the status line, resumed nodes shown as done, and that the list is drawn rather than built from widgets. Checked by hand in light and dark mode at window widths from 1000 to 1280 px, including a 661-node run.
+
 ## v2.6.2 — 2026-09-23
 
 ### Added

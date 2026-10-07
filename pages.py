@@ -2,6 +2,7 @@
 Backup, Restore, and Agent Migration pages.
 """
 import copy
+import csv
 import customtkinter as ctk
 import json
 import os
@@ -215,14 +216,16 @@ def _build_elements_section(parent, row, title="Elements"):
 
 
 class ProgressTable(ctk.CTkFrame):
-    """Live-updating progress table for backup/restore operations.
+    """Live progress for backup/restore runs, grouped by site.
 
-    Rolled-our-own scrollable container: an outer `tk.Canvas` + vertical
-    `tk.Scrollbar`, with an inner CTkFrame containing the rows. We bypass
-    `CTkScrollableFrame` entirely because its layout fights with
-    `tk.PanedWindow` (the real Tk path is nested under an internal canvas,
-    so siblings can't see it) and its mouse-wheel binding fails to reach
-    nested CTkLabel widgets.
+    Each site is a card with its own number, badge, done/total count and
+    bar, and its groups are numbered 1, 2, 3 within the site. Account and
+    global settings get a card each.
+
+    The cards are drawn as items on one `tk.Canvas`, not built from
+    widgets: on macOS, Tk slows down quadratically with the number of
+    visible child widgets (221 rows of CTkLabels took 33 s to appear),
+    while canvas items cost microseconds.
     """
 
     # (bg, fg) per status; each is a (light, dark) pair — CTk labels accept them.
@@ -233,77 +236,146 @@ class ProgressTable(ctk.CTkFrame):
         "error":    (("#FFE4E6", "#3b0d1e"), ("#BE123C", "#e94560")),
         "skipped":  (("#E4E7EC", "#333"),    ("#8A909C", "#666")),
     }
+    STATUS_TEXT = {"pending": "waiting", "running": "running",
+                   "done": "done", "error": "failed", "skipped": "skipped"}
+    TALLIES = (("done", "✓", "done"), ("error", "✗", "failed"),
+               ("skipped", "⏭", "skipped"), ("pending", "◌", "waiting"))
+    RUNNING_TINT = ("#EEF0FF", "#2E2C48")
+    FOLD_AT = 14
+    HEAD_H, ROW_H, GAP = 44, 28, 8
+    FONTS = {"title": (UI_FONT, 13, "bold"), "sub": (UI_FONT, 11),
+             "issues": (UI_FONT, 11, "bold"), "count": (MONO_FONT, 11),
+             "glyph": (UI_FONT, 11, "bold"), "chev": (UI_FONT, 16),
+             "mark": (MONO_FONT, 11), "name": (UI_FONT, 12),
+             "pill": (UI_FONT, 10, "bold"), "detail": (MONO_FONT, 10)}
 
-    def __init__(self, master, height: int = 300, **kw):
+    def __init__(self, master, height: int = 300,
+                 empty_text: str = "Progress shows here, site by site, once "
+                                   "the run starts.", **kw):
         kw.setdefault("fg_color", CARD)
         kw.setdefault("corner_radius", 12)
         super().__init__(master, **kw)
         import tkinter as _tk
 
-        self._rows = {}
-        self._row_idx = 0
+        self._flush_job = None
+        self._scroll_job = None
+        self._resize_job = None
+        self._scroll_pos = (0.0, 1.0)
+        self._tip = {"win": None, "job": None}
+        self._fonts = {}
+        self._drawn_width = 0
+        self._reset_model()
+        self._build_strip()
 
         # Outer canvas (the scrollable viewport).
-        self._canvas = _tk.Canvas(
+        self._view = _tk.Canvas(
             self, highlightthickness=0, bd=0, height=height)
-        theme.tk_track(self._canvas,
-                       lambda w: w.configure(bg=theme.tkcolor(CARD)))
-        self._vscroll = _tk.Scrollbar(
-            self, orient="vertical", command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=self._vscroll.set)
+        theme.tk_track(self._view, self._repaint_theme)
+        self._vscroll = ctk.CTkScrollbar(
+            self, orientation="vertical", command=self._view.yview)
+        self._view.configure(yscrollcommand=self._queue_scrollbar)
 
-        self._canvas.grid(row=0, column=0, sticky="nsew")
-        self._vscroll.grid(row=0, column=1, sticky="ns")
-        self.grid_rowconfigure(0, weight=1)
+        self._view.grid(row=1, column=0, sticky="nsew")
+        self._vscroll.grid(row=1, column=1, sticky="ns")
+        self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Inner frame — every row goes inside this.
-        self._inner = ctk.CTkFrame(self._canvas, fg_color="transparent",
-                                    corner_radius=0)
-        self._inner_window = self._canvas.create_window(
-            (0, 0), window=self._inner, anchor="nw")
-        # When the inner content's bounding box changes, update the
-        # canvas scrollregion (otherwise the scrollbar thinks there's
-        # nothing to scroll).
-        self._inner.bind("<Configure>", self._on_inner_configure)
-        # When the canvas itself is resized, stretch the inner frame to
-        # match its width so column-weighted children expand correctly.
-        self._canvas.bind("<Configure>", self._on_canvas_configure)
-        # Wheel scrolling on the canvas + any descendant (see _bind_wheel).
-        self._bind_wheel(self._canvas)
-        self._bind_wheel(self._inner)
+        self._view.bind("<Configure>", self._on_canvas_configure)
+        # Wheel scrolling on the canvas (see _bind_wheel).
+        self._bind_wheel(self._view)
+        hand = (lambda _e: self._view.configure(cursor="hand2"),
+                lambda _e: self._view.configure(cursor=""))
+        for tag, seq, fn in (("head", "<Button-1>", self._on_head_click),
+                             ("head", "<Enter>", hand[0]),
+                             ("head", "<Leave>", hand[1]),
+                             ("tip", "<Enter>", self._on_tip_enter),
+                             ("tip", "<Leave>", self._tip_hide)):
+            self._view.tag_bind(tag, seq, fn)
 
-        # Header row inside the inner frame.
-        ctk.CTkLabel(self._inner, text="Node",
-                     font=(UI_FONT, 10, "bold"),
-                     text_color=TEXT_MUTED, width=250).grid(
-            row=0, column=0, padx=(8, 4), pady=4, sticky="w")
-        ctk.CTkLabel(self._inner, text="Status",
-                     font=(UI_FONT, 10, "bold"),
-                     text_color=TEXT_MUTED, width=70).grid(
-            row=0, column=1, padx=4, pady=4)
-        ctk.CTkLabel(self._inner, text="Details",
-                     font=(UI_FONT, 10, "bold"),
-                     text_color=TEXT_MUTED).grid(
-            row=0, column=2, padx=(4, 8), pady=4, sticky="w")
-        self._inner.grid_columnconfigure(2, weight=1)
+        self._empty = ctk.CTkLabel(self, text=empty_text, font=(UI_FONT, 12),
+                                   text_color=TEXT_MUTED)
+        self._show_empty(True)
 
-        # Re-compute detail-label wraplength on resize.
-        self.bind("<Configure>", self._on_configure_relayout)
-        self._canvas.bind("<Configure>", self._on_configure_relayout, add="+")
+    def _reset_model(self):
+        self._rows = {}
+        self._row_ids = []
+        self._sections = {}
+        self._order = []
+        self._content_h = 1
+        self._kinds = dict.fromkeys(("global", "account", "site", "other"), 0)
+        self._groups = 0
+        self._counts = dict.fromkeys(self.STATUS_COLORS, 0)
+        self._only_failed = False
+
+    def _build_strip(self):
+        strip = ctk.CTkFrame(self, fg_color="transparent")
+        strip.grid(row=0, column=0, columnspan=2, sticky="ew",
+                   padx=14, pady=(10, 2))
+        strip.grid_columnconfigure(1, weight=1)
+        self._scope_lbl = ctk.CTkLabel(strip, text="", text_color=TEXT,
+                                       font=(UI_FONT, 12, "bold"))
+        self._scope_lbl.grid(row=0, column=0, sticky="w")
+        tallies = ctk.CTkFrame(strip, fg_color="transparent")
+        tallies.grid(row=0, column=1, sticky="w", padx=(16, 0))
+        self._tally = {}
+        for col, (key, mark, _word) in enumerate(self.TALLIES):
+            lbl = ctk.CTkLabel(tallies, text="", font=(UI_FONT, 12),
+                               text_color={"done": GREEN, "error": ACCENT}.get(
+                                   key, TEXT_MUTED))
+            lbl.grid(row=0, column=col, padx=(0, 14))
+            lbl.grid_remove()
+            self._tally[key] = (lbl, mark)
+        self._fold_btn = _ghost_button(strip, "Fold all",
+                                       command=self._toggle_fold_all,
+                                       width=92, height=26, font=(UI_FONT, 11))
+        self._fold_btn.grid(row=0, column=2, padx=(8, 0))
+        self._failed_btn = _ghost_button(strip, "",
+                                         command=self._toggle_only_failed,
+                                         width=160, height=26,
+                                         font=(UI_FONT, 11))
+        self._failed_btn.grid(row=0, column=3, padx=(8, 0))
+        for btn in (self._fold_btn, self._failed_btn):
+            btn._busy_exempt = True
+            btn.grid_remove()
+        self._strip = strip
+
+    def _show_empty(self, empty):
+        for widget in (self._strip, self._view, self._vscroll):
+            _grid_visible(widget, not empty)
+        if empty:
+            self._empty.grid(row=1, column=0, columnspan=2, sticky="nsew",
+                             pady=24)
+        else:
+            self._empty.grid_remove()
 
     # ── scrolling plumbing ────────────────────────────────────────────
 
-    def _on_inner_configure(self, _evt=None):
-        # Inner content grew/shrunk → recompute scrollable region.
-        bbox = self._canvas.bbox("all")
-        if bbox:
-            self._canvas.configure(scrollregion=bbox)
-
     def _on_canvas_configure(self, event):
-        # Stretch the inner frame to fill the canvas width so column
-        # weight=1 children actually expand.
-        self._canvas.itemconfigure(self._inner_window, width=event.width)
+        if event.width == self._drawn_width or not self._order:
+            return
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(60, self._relayout)
+
+    def _repaint_theme(self, canvas):
+        canvas.configure(bg=theme.tkcolor(CARD))
+        if self._order:
+            self._relayout()
+
+    def _set_scaling(self, *args, **kwargs):
+        super()._set_scaling(*args, **kwargs)
+        self._fonts = {}
+        if self._order:
+            self._relayout()
+
+    def _queue_scrollbar(self, first, last):
+        self._scroll_pos = (first, last)
+        if self._scroll_job is None:
+            self._scroll_job = self.after(15, self._apply_scrollbar)
+
+    def _apply_scrollbar(self):
+        self._scroll_job = None
+        self._vscroll.set(*self._scroll_pos)
 
     def _bind_wheel(self, widget):
         """Bind mouse-wheel and arrow-keys to scroll the inner canvas.
@@ -321,208 +393,527 @@ class ProgressTable(ctk.CTkFrame):
                     step = -1 * int(d / 120)
             else:                        # X11
                 step = -1 if event.num == 4 else 1
-            self._canvas.yview_scroll(step, "units")
+            self._view.yview_scroll(step, "units")
             return "break"
 
         widget.bind("<MouseWheel>", on_wheel, add="+")
         widget.bind("<Button-4>", on_wheel, add="+")
         widget.bind("<Button-5>", on_wheel, add="+")
         # Arrow keys when the canvas has focus.
-        widget.bind("<Up>",   lambda _e: (self._canvas.yview_scroll(-1, "units"), "break"), add="+")
-        widget.bind("<Down>", lambda _e: (self._canvas.yview_scroll( 1, "units"), "break"), add="+")
-        widget.bind("<Prior>", lambda _e: (self._canvas.yview_scroll(-1, "pages"), "break"), add="+")
-        widget.bind("<Next>",  lambda _e: (self._canvas.yview_scroll( 1, "pages"), "break"), add="+")
-
-    def _on_configure_relayout(self, event=None):
-        try:
-            total_w = self.winfo_width()
-        except Exception:
-            return
-        # Subtract Node (~240px), Status (~80px), padding (~40px).
-        avail = max(180, total_w - 360)
-        for row in self._rows.values():
-            try:
-                row["detail"].configure(wraplength=avail)
-                row["name"].configure(wraplength=max(200, total_w - avail - 120))
-            except Exception:
-                pass
+        widget.bind("<Up>",   lambda _e: (self._view.yview_scroll(-1, "units"), "break"), add="+")
+        widget.bind("<Down>", lambda _e: (self._view.yview_scroll( 1, "units"), "break"), add="+")
+        widget.bind("<Prior>", lambda _e: (self._view.yview_scroll(-1, "pages"), "break"), add="+")
+        widget.bind("<Next>",  lambda _e: (self._view.yview_scroll( 1, "pages"), "break"), add="+")
 
     def clear(self):
-        for widgets in self._rows.values():
-            for w in widgets.values():
-                w.destroy()
-        self._rows = {}
-        self._row_idx = 0
+        if self._flush_job is not None:
+            try:
+                self.after_cancel(self._flush_job)
+            except Exception:
+                pass
+            self._flush_job = None
+        self._tip_hide()
+        self._view.delete("all")
+        self._reset_model()
+        self._view.yview_moveto(0)
+        self._paint_summary()
+        self._show_empty(True)
 
     @staticmethod
-    def _short_path(path: str, ntype: str) -> str:
-        """Trim the redundant account/site prefix so long enterprise
-        paths don't eat the whole row. Full path stays in the tooltip."""
-        parts = [p for p in path.strip("/").split("/") if p]
-        if not parts:
-            return path
+    def _place(path: str, ntype: str):
+        parts = [p for p in str(path).strip("/").split("/") if p]
+        if ntype == "global" or not parts:
+            return "global", "global", "Global settings", "", \
+                "Global settings"
         if ntype == "account":
-            return parts[0]
+            return f"a:{parts[0]}", "account", parts[0], "account", \
+                "Account settings"
         if ntype == "site":
-            return parts[-1]
-        if ntype == "group":
-            # site / group   — drops the account prefix.
-            return " / ".join(parts[-2:])
-        return parts[-1]
+            acct, site = (parts[0], parts[1]) if len(parts) > 1 \
+                else ("", parts[0])
+            return f"s:{acct}/{site}", "site", site, acct, "Site settings"
+        if len(parts) > 2:
+            return f"s:{parts[0]}/{parts[1]}", "site", parts[1], parts[0], \
+                "/".join(parts[2:])
+        return f"o:{parts[0]}", "other", parts[0], "", \
+            "/".join(parts[1:]) or parts[0]
 
-    def add_node(self, node_id: str, path: str, ntype: str = ""):
+    def add_node(self, node_id: str, path: str, ntype: str = "",
+                 num: Optional[int] = None):
         """Add a pending row. Returns node_id for later updates."""
-        self._row_idx += 1
-        r = self._row_idx
-        prefix = {"global": "●", "account": "▸",
-                  "site": "  ▹", "group": "    ◦"}.get(ntype, "")
-        bg, fg = self.STATUS_COLORS["pending"]
-
-        display = self._short_path(path, ntype)
-        # Numbered index — same as diff panel ordering. Padded to 3 chars
-        # so paths stay vertically aligned no matter how many rows there
-        # are.
-        name_lbl = ctk.CTkLabel(self._inner,
-                                text=f"{r:>3}. {prefix} {display}",
-                                font=(MONO_FONT, 11), text_color=TEXT,
-                                anchor="w")
-        name_lbl.grid(row=r, column=0, padx=(8, 4), pady=1, sticky="ew")
-        # Hover-tooltip: show the FULL path on mouse-over so the operator
-        # can confirm what scope this row belongs to.
-        self._attach_tooltip(name_lbl, path)
-
-        status_lbl = ctk.CTkLabel(self._inner, text="pending",
-                                  font=(UI_FONT, 10, "bold"),
-                                  fg_color=bg, text_color=fg,
-                                  corner_radius=6, width=70, height=22)
-        status_lbl.grid(row=r, column=1, padx=4, pady=1)
-
-        # wraplength=0 disables wrap on CTkLabel; pass a positive value so
-        # long element-summary strings spill onto a second line instead of
-        # being clipped. Re-computed on resize via _on_configure.
-        detail_lbl = ctk.CTkLabel(self._inner, text="",
-                                  font=(MONO_FONT, 10), text_color=TEXT_MUTED,
-                                  anchor="w", justify="left",
-                                  wraplength=380)
-        detail_lbl.grid(row=r, column=2, padx=(4, 8), pady=1, sticky="ew")
-
-        # Forward wheel events on each row widget to the outer canvas so
-        # the cursor-position doesn't matter for trackpad/wheel scrolling.
-        for w in (name_lbl, status_lbl, detail_lbl):
-            self._bind_wheel(w)
-
+        if node_id in self._rows:
+            return node_id
+        key, kind, title, sub, label = self._place(path, ntype)
+        sec = self._sections.get(key)
+        if sec is None:
+            self._kinds[kind] += 1
+            sec = {"key": key, "kind": kind, "title": title, "sub": sub,
+                   "num": self._kinds[kind], "pos": len(self._order),
+                   "rows": [], "groups": 0,
+                   "counts": dict.fromkeys(self.STATUS_COLORS, 0),
+                   "open": None, "manual": False, "state": "",
+                   "items": None, "y": 0, "bar_span": None}
+            self._sections[key] = sec
+            self._order.append(key)
+        if ntype == "group":
+            sec["groups"] += 1
+            self._groups += 1
+            mark = str(sec["groups"])
+        else:
+            mark = "⚙"
         self._rows[node_id] = {
-            "name": name_lbl, "status": status_lbl, "detail": detail_lbl}
+            "id": node_id, "key": key, "ntype": ntype, "label": label,
+            "mark": mark, "n": len(self._row_ids),
+            "tip": path if num is None else f"{path}\nnode {num} in the "
+                                            f"backup",
+            "status": "pending", "detail": "", "tone": TEXT_MUTED,
+            "items": None, "y": 0, "detail_w": 0}
+        self._row_ids.append(node_id)
+        sec["rows"].append(node_id)
+        sec["counts"]["pending"] += 1
+        self._counts["pending"] += 1
+        if self._flush_job is None:
+            self._flush_job = self.after_idle(self._flush)
         return node_id
 
-    def _attach_tooltip(self, widget, text: str):
-        """Lightweight Tk tooltip — pops up after a brief hover."""
+    def _flush(self):
+        self._flush_job = None
+        big = len(self._rows) > self.FOLD_AT
+        for key in self._order:
+            sec = self._sections[key]
+            if sec["open"] is None:
+                sec["open"] = not big
+        self._show_empty(not self._rows)
+        self._relayout()
+        self._paint_summary()
+
+    def _px(self, value):
+        return self._apply_widget_scaling(value)
+
+    def _font(self, name):
+        font = self._fonts.get(name)
+        if font is None:
+            import tkinter.font as _tkfont
+            font = _tkfont.Font(
+                root=self, font=self._apply_font_scaling(self.FONTS[name]))
+            self._fonts[name] = font
+        return font
+
+    @staticmethod
+    def _fit(text, font, width):
+        text = " ".join(str(text).splitlines()).replace("\t", " ")
+        if font.measure(text) <= width:
+            return text
+        if width <= font.measure("…"):
+            return ""
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if font.measure(text[:mid] + "…") <= width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo].rstrip() + "…"
+
+    def _round_rect(self, x0, y0, x1, y1, r, **kw):
+        points = (x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r,
+                  x1, y1, x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r,
+                  x0, y0 + r, x0, y0)
+        return self._view.create_polygon(points, smooth=True, **kw)
+
+    def _relayout(self):
+        if self._resize_job is not None:
+            try:
+                self.after_cancel(self._resize_job)
+            except Exception:
+                pass
+            self._resize_job = None
+        canvas, px = self._view, self._px
+        self._tip_hide()
+        canvas.delete("all")
+        width = canvas.winfo_width()
+        if width < px(200):
+            width = px(760)
+        self._drawn_width = width
+        x0, x1 = px(10), width - px(8)
+        y = px(10)
+        for key in self._order:
+            sec = self._sections[key]
+            sec["items"] = None
+            rows = [self._rows[nid] for nid in sec["rows"]]
+            for row in rows:
+                row["items"] = None
+            if self._only_failed:
+                if not sec["counts"]["error"]:
+                    continue
+                rows = [row for row in rows if row["status"] == "error"]
+            elif not sec["open"]:
+                rows = []
+            bottom = y + px(self.HEAD_H)
+            if rows:
+                bottom += len(rows) * px(self.ROW_H) + px(8)
+            self._draw_card(sec, x0, y, x1, bottom)
+            row_y = y + px(self.HEAD_H)
+            for row in rows:
+                self._draw_row(row, x0, row_y, x1)
+                row_y += px(self.ROW_H)
+            y = bottom + px(self.GAP)
+        self._content_h = max(1, y)
+        canvas.configure(scrollregion=(0, 0, width, y))
+
+    def _draw_card(self, sec, x0, top, x1, bottom):
+        canvas, px, color = self._view, self._px, theme.tkcolor
+        tags = ("head", f"h{sec['pos']}")
+        items = {"card": self._round_rect(x0, top, x1, bottom, px(10),
+                                          fill=color(CARD),
+                                          outline=color(BORDER))}
+        canvas.create_rectangle(x0 + px(2), top + px(2), x1 - px(2),
+                                top + px(self.HEAD_H) - px(2),
+                                fill=color(CARD), outline="", tags=tags)
+        mid = top + px(self.HEAD_H) / 2
+        left, r = x0 + px(12), px(12)
+        items["badge"] = canvas.create_oval(left, mid - r, left + 2 * r,
+                                            mid + r, outline="", tags=tags)
+        items["glyph"] = canvas.create_text(left + r, mid, text="",
+                                            font=self._font("glyph"),
+                                            tags=tags)
+        chev_x = x1 - px(14)
+        items["chev"] = canvas.create_text(chev_x, mid, text="", anchor="e",
+                                           font=self._font("chev"),
+                                           fill=color(TEXT_MUTED), tags=tags)
+        bar_r = chev_x - px(24)
+        bar_l = bar_r - px(110)
+        items["track"] = canvas.create_line(bar_l, mid, bar_r, mid,
+                                            width=px(6), capstyle="round",
+                                            fill=color(BORDER), tags=tags)
+        items["bar"] = canvas.create_line(bar_l, mid, bar_l, mid,
+                                          width=px(6), capstyle="round",
+                                          fill=color(GREEN), tags=tags)
+        sec["bar_span"] = (bar_l, bar_r, mid)
+        count_r = bar_l - px(12)
+        items["count"] = canvas.create_text(count_r, mid, text="",
+                                            anchor="e",
+                                            font=self._font("count"),
+                                            fill=color(TEXT_MUTED), tags=tags)
+        issues_r = count_r - self._font("count").measure("000/000") - px(12)
+        items["issues"] = canvas.create_text(issues_r, mid, text="",
+                                             anchor="e",
+                                             font=self._font("issues"),
+                                             tags=tags)
+        text_x = left + 2 * r + px(10)
+        room = max(px(60), issues_r - px(150) - text_x)
+        title = self._fit(sec["title"], self._font("title"), room)
+        items["title"] = canvas.create_text(text_x, mid, text=title,
+                                            anchor="w",
+                                            font=self._font("title"),
+                                            fill=color(TEXT), tags=tags)
+        sub_x = text_x + self._font("title").measure(title)
+        sub = self._fit(f"  ·  {sec['sub']}" if sec["sub"] else "",
+                        self._font("sub"), max(0, text_x + room - sub_x))
+        items["sub"] = canvas.create_text(sub_x, mid, text=sub, anchor="w",
+                                          font=self._font("sub"),
+                                          fill=color(TEXT_MUTED), tags=tags)
+        sec["items"], sec["y"] = items, top
+        self._paint_section(sec)
+
+    def _draw_row(self, row, x0, top, x1):
+        canvas, px, color = self._view, self._px, theme.tkcolor
+        tags = ("row", f"r{row['n']}")
+        mid = top + px(self.ROW_H) / 2
+        items = {"tint": self._round_rect(
+            x0 + px(6), top + px(1), x1 - px(6), top + px(self.ROW_H) - px(1),
+            px(6), fill="", outline="", state="hidden", tags=tags)}
+        mark_r = x0 + px(46)
+        items["mark"] = canvas.create_text(mark_r, mid, text=row["mark"],
+                                           anchor="e", font=self._font("mark"),
+                                           fill=color(TEXT_FAINT), tags=tags)
+        name_x, name_w = mark_r + px(12), px(230)
+        # Hover-tooltip: show the FULL path on mouse-over so the operator
+        # can confirm what scope this row belongs to.
+        items["name"] = canvas.create_text(
+            name_x, mid, anchor="w", font=self._font("name"),
+            text=self._fit(row["label"], self._font("name"), name_w),
+            tags=tags + ("tip",))
+        pill_l = name_x + name_w + px(10)
+        pill_r = pill_l + px(70)
+        items["pill"] = self._round_rect(pill_l, mid - px(11), pill_r,
+                                         mid + px(11), px(6), outline="",
+                                         tags=tags)
+        items["pill_text"] = canvas.create_text(
+            (pill_l + pill_r) / 2, mid, text="", font=self._font("pill"),
+            tags=tags)
+        detail_x = pill_r + px(14)
+        row["detail_w"] = max(0, x1 - px(14) - detail_x)
+        items["detail"] = canvas.create_text(detail_x, mid, text="",
+                                             anchor="w",
+                                             font=self._font("detail"),
+                                             tags=tags + ("tip",))
+        row["items"], row["y"] = items, top
+        self._paint_row(row)
+
+    def _item_tag(self, prefix):
+        for tag in self._view.gettags("current"):
+            if tag[:1] == prefix and tag[1:].isdigit():
+                return int(tag[1:])
+        return None
+
+    def _on_head_click(self, _event=None):
+        pos = self._item_tag("h")
+        if pos is not None and pos < len(self._order):
+            self._toggle_section(self._sections[self._order[pos]])
+
+    def _on_tip_enter(self, event):
+        self._tip_hide()
+        n = self._item_tag("r")
+        if n is None or n >= len(self._row_ids):
+            return
+        row = self._rows[self._row_ids[n]]
+        text = row["tip"] + (f"\n{row['detail']}" if row["detail"] else "")
+        x, y = event.x_root + 16, event.y_root + 14
+        self._tip["job"] = self.after(450, lambda: self._tip_show(text, x, y))
+
+    def _tip_show(self, text, x, y):
         import tkinter as _tk
-        tip = {"win": None, "after_id": None}
+        self._tip["job"] = None
+        win = _tk.Toplevel(self)
+        win.wm_overrideredirect(True)
+        win.wm_geometry(f"+{x}+{y}")
+        _tk.Label(win, text=text, justify="left", wraplength=560,
+                  background=theme.tkcolor(CARD_ELEVATED),
+                  foreground=theme.tkcolor(TEXT), relief="solid",
+                  borderwidth=1, font=(MONO_FONT, 10), padx=6,
+                  pady=3).pack()
+        self._tip["win"] = win
 
-        def show(_evt=None):
-            if tip["win"] is not None:
-                return
-            x = widget.winfo_rootx() + 20
-            y = widget.winfo_rooty() + widget.winfo_height() + 2
-            w = _tk.Toplevel(widget)
-            w.wm_overrideredirect(True)
-            w.wm_geometry(f"+{x}+{y}")
-            lbl = _tk.Label(
-                w, text=text, justify="left",
-                background=theme.tkcolor(CARD_ELEVATED),
-                foreground=theme.tkcolor(TEXT),
-                relief="solid", borderwidth=1,
-                font=(MONO_FONT, 10), padx=6, pady=3)
-            lbl.pack()
-            tip["win"] = w
+    def _tip_hide(self, _event=None):
+        if self._tip["job"] is not None:
+            try:
+                self.after_cancel(self._tip["job"])
+            except Exception:
+                pass
+            self._tip["job"] = None
+        if self._tip["win"] is not None:
+            try:
+                self._tip["win"].destroy()
+            except Exception:
+                pass
+            self._tip["win"] = None
 
-        def schedule(_evt=None):
-            tip["after_id"] = widget.after(450, show)
+    def _set_status(self, node_id, status, detail=None, tone=None):
+        row = self._rows.get(node_id)
+        if row is None:
+            return None
+        sec = self._sections[row["key"]]
+        old = row["status"]
+        if old != status:
+            for counts in (self._counts, sec["counts"]):
+                counts[old] -= 1
+                counts[status] += 1
+            row["status"] = status
+        if detail is not None:
+            row["detail"] = detail
+        if tone is not None:
+            row["tone"] = tone
+        moved = self._auto_fold(sec) or (
+            self._only_failed and old != status and "error" in (old, status))
+        if moved and self._flush_job is None:
+            self._relayout()
+        else:
+            self._paint_row(row)
+            self._paint_section(sec)
+        self._paint_summary()
+        return row
 
-        def hide(_evt=None):
-            if tip["after_id"]:
-                try:
-                    widget.after_cancel(tip["after_id"])
-                except Exception:
-                    pass
-                tip["after_id"] = None
-            if tip["win"] is not None:
-                try:
-                    tip["win"].destroy()
-                except Exception:
-                    pass
-                tip["win"] = None
+    def _auto_fold(self, sec):
+        if sec["manual"]:
+            return False
+        counts = sec["counts"]
+        if counts["running"] or counts["error"]:
+            want = True
+        elif counts["pending"] or len(self._rows) <= self.FOLD_AT:
+            return False
+        else:
+            want = False
+        if sec["open"] is want:
+            return False
+        sec["open"] = want
+        return True
 
-        widget.bind("<Enter>", schedule)
-        widget.bind("<Leave>", hide)
-        widget.bind("<Button-1>", hide)
+    def _toggle_section(self, sec):
+        sec["manual"] = True
+        sec["open"] = not sec["open"]
+        self._relayout()
+        self._paint_summary()
+
+    def _toggle_fold_all(self):
+        open_ = not any(self._sections[k]["open"] for k in self._order)
+        for key in self._order:
+            self._sections[key]["manual"] = True
+            self._sections[key]["open"] = open_
+        self._relayout()
+        self._paint_summary()
+
+    def _toggle_only_failed(self):
+        self._only_failed = not self._only_failed
+        self._view.yview_moveto(0)
+        self._relayout()
+        self._paint_summary()
+
+    def _paint_row(self, row):
+        items = row["items"]
+        if items is None:
+            return
+        canvas, color = self._view, theme.tkcolor
+        status = row["status"]
+        bg, fg = self.STATUS_COLORS[status]
+        running = status == "running"
+        canvas.itemconfigure(items["tint"], state="normal" if running
+                             else "hidden",
+                             fill=color(self.RUNNING_TINT) if running else "")
+        canvas.itemconfigure(items["pill"], fill=color(bg))
+        canvas.itemconfigure(items["pill_text"], fill=color(fg),
+                             text=self.STATUS_TEXT[status])
+        canvas.itemconfigure(items["name"], fill=color(
+            TEXT_FAINT if status == "skipped" else TEXT))
+        canvas.itemconfigure(items["detail"], fill=color(row["tone"]),
+                             text=self._fit(row["detail"],
+                                            self._font("detail"),
+                                            row["detail_w"]))
+
+    def _paint_section(self, sec):
+        counts = sec["counts"]
+        total = len(sec["rows"])
+        finished = counts["done"] + counts["error"] + counts["skipped"]
+        if counts["running"] or (finished and counts["pending"]):
+            state = "active"
+        elif not finished:
+            state = "todo"
+        elif counts["error"]:
+            state = "error"
+        elif counts["done"]:
+            state = "done"
+        else:
+            state = "skipped"
+        sec["state"] = state
+        items = sec["items"]
+        if items is None:
+            return
+        canvas, color = self._view, theme.tkcolor
+        fill, mark, ink, _edge = _STEP_LOOK[
+            "todo" if state == "skipped" else state]
+        if state == "skipped":
+            mark = "–"
+        own = {"site": str(sec["num"]), "account": "A",
+               "global": "G"}.get(sec["kind"], "•")
+        canvas.itemconfigure(items["badge"], fill=color(fill))
+        canvas.itemconfigure(items["glyph"], text=mark or own,
+                             fill=color(ink))
+        canvas.itemconfigure(items["card"], outline=color(
+            BRAND if state == "active" else ACCENT if state == "error"
+            else BORDER))
+        several = "normal" if total > 1 else "hidden"
+        canvas.itemconfigure(items["count"], state=several,
+                             text=f"{counts['done']}/{total}")
+        canvas.itemconfigure(items["track"], state=several)
+        left, right, mid = sec["bar_span"]
+        value = counts["done"] / total if total else 0.0
+        canvas.coords(items["bar"], left, mid, left + (right - left) * value,
+                      mid)
+        canvas.itemconfigure(items["bar"], state=several if value
+                             else "hidden")
+        notes = []
+        if counts["error"]:
+            notes.append(f"{counts['error']} failed")
+        if counts["skipped"]:
+            notes.append(f"{counts['skipped']} skipped")
+        canvas.itemconfigure(items["issues"], text=" · ".join(notes),
+                             fill=color(ACCENT if counts["error"]
+                                        else TEXT_MUTED))
+        canvas.itemconfigure(items["chev"],
+                             text="▾" if sec["open"] else "▸")
+
+    def _paint_summary(self):
+        parts = ["global settings"] if self._kinds["global"] else []
+        for word, n in (("account", self._kinds["account"]),
+                        ("site", self._kinds["site"]),
+                        ("group", self._groups)):
+            if n:
+                parts.append(f"{n} {word}{'' if n == 1 else 's'}")
+        _configure_changed(self._scope_lbl, text=" · ".join(parts))
+        for key, mark, word in self.TALLIES:
+            lbl = self._tally[key][0]
+            n = self._counts[key]
+            if n:
+                _configure_changed(lbl, text=f"{mark} {n} {word}")
+            _grid_visible(lbl, n > 0)
+        failed = self._counts["error"]
+        if self._only_failed:
+            _configure_changed(self._failed_btn, text="Show all")
+        elif failed:
+            _configure_changed(self._failed_btn,
+                               text=f"Show failed only ({failed})")
+        _grid_visible(self._failed_btn, bool(failed or self._only_failed))
+        several = len(self._order) > 1
+        if several:
+            any_open = any(self._sections[k]["open"] for k in self._order)
+            _configure_changed(self._fold_btn,
+                               text="Fold all" if any_open else "Unfold all")
+        _grid_visible(self._fold_btn, several)
+
+    def position_text(self, node_id: str) -> str:
+        row = self._rows.get(node_id)
+        if row is None:
+            return ""
+        sec = self._sections[row["key"]]
+        if sec["kind"] == "site":
+            where = (f"site {sec['num']} of {self._kinds['site']} · "
+                     f"{sec['title']}")
+            if row["ntype"] == "group":
+                return (f"{where} — group {row['mark']} of {sec['groups']}: "
+                        f"{row['label']}")
+            return f"{where} — site settings"
+        if sec["kind"] == "account":
+            return f"account {sec['title']} — account settings"
+        if sec["kind"] == "global":
+            return "global settings"
+        return row["label"]
 
     def set_running(self, node_id: str):
-        row = self._rows.get(node_id)
-        if not row:
+        row = self._set_status(node_id, "running")
+        if row is None:
             return
-        bg, fg = self.STATUS_COLORS["running"]
-        row["status"].configure(text="running", fg_color=bg, text_color=fg)
-        row["name"].configure(text_color=TEXT)
         # Auto-scroll so the active row is always visible. Defer one tick
-        # so Tk has finished laying out the just-configured label widths.
-        self.after(20, lambda r=row: self._scroll_to_widget(r["name"]))
+        # so a pending first draw has happened.
+        self.after(20, lambda r=row: self._scroll_to_row(r))
 
-    def _scroll_to_widget(self, widget):
-        """Scroll the inner canvas so `widget` is visible inside the
-        viewport, near the top third."""
-        try:
-            self.update_idletasks()
-            canvas = self._canvas
-            wy = widget.winfo_y()           # y inside _inner
-            wh = widget.winfo_height() or 22
-            inner_h = max(1, self._inner.winfo_height())
-            view_top, view_bot = canvas.yview()
-            current_top_px = view_top * inner_h
-            current_bot_px = view_bot * inner_h
-            # Only scroll if the row isn't comfortably in view already.
-            if wy < current_top_px + 20 \
-                    or (wy + wh) > current_bot_px - 20:
-                target = max(0.0, (wy - 40) / inner_h)
-                target = min(target, 1.0)
-                canvas.yview_moveto(target)
-        except Exception:
-            pass
+    def _scroll_to_row(self, row):
+        sec = self._sections.get(row["key"])
+        if self._rows.get(row["id"]) is not row or sec["items"] is None:
+            return
+        drawn = row["items"] is not None
+        top = row["y"] if drawn else sec["y"]
+        height = self._px(self.ROW_H if drawn else self.HEAD_H)
+        total = self._content_h
+        view_top, view_bot = (v * total for v in self._view.yview())
+        # Only scroll if the row isn't comfortably in view already.
+        if top < view_top + 20 or top + height > view_bot - 20:
+            self._view.yview_moveto(
+                max(0.0, min(1.0, (top - self._px(40)) / total)))
 
     def set_done(self, node_id: str, summary: str = ""):
-        row = self._rows.get(node_id)
-        if not row:
-            return
-        bg, fg = self.STATUS_COLORS["done"]
-        row["status"].configure(text="done", fg_color=bg, text_color=fg)
-        row["name"].configure(text_color=TEXT_MUTED)
-        if summary:
-            row["detail"].configure(text=summary, text_color=GREEN)
+        self._set_status(node_id, "done", summary, TEXT_MUTED)
 
     def set_error(self, node_id: str, msg: str = ""):
-        row = self._rows.get(node_id)
-        if not row:
-            return
-        bg, fg = self.STATUS_COLORS["error"]
-        row["status"].configure(text="error", fg_color=bg, text_color=fg)
-        if msg:
-            row["detail"].configure(text=msg, text_color=ACCENT)
+        self._set_status(node_id, "error", msg or None, ACCENT)
 
     def set_skipped(self, node_id: str, reason: str = ""):
-        row = self._rows.get(node_id)
-        if not row:
-            return
-        bg, fg = self.STATUS_COLORS["skipped"]
-        row["status"].configure(text="skip", fg_color=bg, text_color=fg)
-        row["name"].configure(text_color=TEXT_FAINT)
-        if reason:
-            row["detail"].configure(text=reason, text_color=TEXT_FAINT)
+        self._set_status(node_id, "skipped", reason or None, TEXT_FAINT)
 
     def set_detail(self, node_id: str, text: str):
         row = self._rows.get(node_id)
         if row:
-            row["detail"].configure(text=text, text_color=TEXT_MUTED)
+            row["detail"], row["tone"] = text, TEXT_MUTED
+            self._paint_row(row)
 
 
 # The payload shaping lives in migtools so the Operations pages can create
@@ -1472,6 +1863,455 @@ def _select_by_name(items, filt, key=None):
     if exact:
         return exact
     return [it for it in items if nfilt in _norm_name(key(it))]
+
+
+def _split_scope_names(value):
+    """Split a scope-name filter into the names it lists.
+
+    The restore's Site field takes several names separated by commas (the
+    site chooser writes them that way). A name that itself holds a comma
+    can be double-quoted: '"Paris, France", Rome'. A list passes straight
+    through. Blank entries and repeats (after normalisation) drop out."""
+    if isinstance(value, (list, tuple)):
+        raw = [str(v) for v in value]
+    else:
+        text = str(value or "").replace("\r", ",").replace("\n", ",")
+        try:
+            raw = next(csv.reader([text], skipinitialspace=True), [])
+        except csv.Error:
+            raw = text.split(",")
+    out, seen = [], set()
+    for name in raw:
+        name = name.strip()
+        key = _norm_name(name)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def _join_scope_names(names):
+    """Inverse of _split_scope_names: comma-separated, quoting any name that
+    holds a comma or a double quote so it survives the round trip."""
+    parts = []
+    for name in names:
+        name = str(name)
+        if "," in name or '"' in name:
+            name = '"' + name.replace('"', '""') + '"'
+        parts.append(name)
+    return ", ".join(parts)
+
+
+def _match_scope_names(labels, filt, multi=True):
+    """Pick from `labels` by a scope filter -> (indices picked, the filter's
+    names that picked nothing).
+
+    Each name prefers EXACT matches and falls back to substring, exactly as
+    _select_by_name does. With `multi` the filter may list several names (a
+    list, or comma-separated text); text that EXACTLY names a label is still
+    taken whole, so a site called "Paris, France" needs no quotes. A blank
+    filter picks everything."""
+    labels = list(labels)
+    every = list(range(len(labels)))
+    if isinstance(filt, str):
+        whole = _norm_name(filt)
+        if not whole:
+            return every, []
+        exact = [i for i, lb in enumerate(labels) if _norm_name(lb) == whole]
+        if exact:
+            return exact, []
+        names = _split_scope_names(filt) if multi else [filt]
+    else:
+        names = _split_scope_names(filt)
+    if not names:
+        return every, []
+    pairs = list(enumerate(labels))
+    keep, missing = set(), []
+    for name in names:
+        hit = [i for i, _lb in _select_by_name(pairs, name,
+                                               key=lambda p: p[1])]
+        keep.update(hit)
+        if not hit:
+            missing.append(name)
+    return sorted(keep), missing
+
+
+def _select_by_names(items, filt, key=None):
+    """Several-names version of _select_by_name (see _match_scope_names);
+    the picked items come back in their original order."""
+    items = list(items)
+    if key is None:
+        def key(it):
+            return it
+    picked, _missing = _match_scope_names([key(it) for it in items], filt)
+    return [items[i] for i in picked]
+
+
+def _node_scope_names(node):
+    """(account, site, group) names a backup node sits under, read the way
+    the restore resolves it: ancestors come from the PATH (Mangle Rename
+    keeps it current and _resolve_dest_id anchors a group to path part 1),
+    and the node names itself from its own object."""
+    ntype = node.get("type")
+    parts = (node.get("path") or "").strip("/").split("/")
+    acct = parts[0] if ntype in ("account", "site", "group") else ""
+    site = group = ""
+    if ntype == "site":
+        site = ((node.get("site") or {}).get("name")
+                or (parts[1] if len(parts) > 1 else ""))
+    elif ntype == "group":
+        site = parts[1] if len(parts) > 1 else ""
+        group = (node.get("group") or {}).get("name") or parts[-1]
+    return acct, site, group
+
+
+def _unique_names(labels):
+    """Distinct non-blank names (after normalisation), first spelling wins."""
+    seen, out = set(), []
+    for lb in labels:
+        key = _norm_name(lb)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(lb)
+    return out
+
+
+def _restore_scope(backup, levels=None, filters=None):
+    """Decide which backup nodes a restore may touch.
+
+    The Account / Site / Group fields apply HIERARCHICALLY: a site is in
+    scope only when its account is, and a group only when its account AND
+    its site are. Matching the Site field against site nodes alone left
+    every OTHER site's groups in scope (FAO, 2026-10: asking for FAO-TEST
+    still restored FAO-DEFAULT's groups). Nodes outside the scope are never
+    resolved, written or even listed.
+
+    The Site field may name several sites (comma-separated, or ticked in the
+    chooser). Returns a dict:
+      indices    - backup indices to restore, in backup order
+      rank_nodes - every group node of an in-scope site: ranking needs the
+                   site's whole source order, not just the groups the Group
+                   field picked. Empty when Groups is unticked.
+      accounts / sites / groups - what each NON-blank field picked
+      unmatched  - {"account"|"site"|"group": [names that matched nothing]}
+    """
+    if levels is None:
+        levels = {"global": True, "accounts": True, "sites": True,
+                  "groups": True}
+    filters = filters or {}
+    named = [_node_scope_names(n) for n in backup]
+    active = {k: bool(_split_scope_names(filters.get(k) or ""))
+              for k in ("account", "site", "group")}
+
+    def _pick(labels, field, multi=False):
+        labels = _unique_names(labels)
+        hit, missing = _match_scope_names(labels, filters.get(field) or "",
+                                          multi=multi)
+        return ({_norm_name(labels[i]) for i in hit},
+                [labels[i] for i in hit], missing if active[field] else [])
+
+    accts, acct_names, acct_miss = _pick((a for a, _s, _g in named),
+                                         "account")
+
+    def acct_ok(a):
+        return not active["account"] or _norm_name(a) in accts
+
+    sites, site_names, site_miss = _pick(
+        (s for a, s, _g in named if acct_ok(a)), "site", multi=True)
+
+    def site_ok(a, s):
+        return acct_ok(a) and (not active["site"] or _norm_name(s) in sites)
+
+    groups, group_names, group_miss = _pick(
+        (g for a, s, g in named if site_ok(a, s)), "group")
+
+    def group_ok(a, s, g):
+        return site_ok(a, s) and (not active["group"]
+                                  or _norm_name(g) in groups)
+
+    if active["group"]:
+        held = {(_norm_name(a), _norm_name(s)) for a, s, g in named
+                if g and group_ok(a, s, g)}
+    elif active["site"]:
+        held = {(_norm_name(a), _norm_name(s)) for a, s, _g in named
+                if s and site_ok(a, s)}
+    else:
+        held = None
+    held_accts = None if held is None else {a for a, _s in held}
+    held_sites = held if active["group"] else None
+
+    def acct_kept(a):
+        return acct_ok(a) and (held_accts is None
+                               or _norm_name(a) in held_accts)
+
+    def site_kept(a, s):
+        return site_ok(a, s) and (
+            held_sites is None
+            or (_norm_name(a), _norm_name(s)) in held_sites)
+
+    indices, rank_nodes = [], []
+    parent_accts, parent_sites = [], []
+    for i, (node, (a, s, g)) in enumerate(zip(backup, named)):
+        ntype = node.get("type")
+        if ntype == "global":
+            keep = levels.get("global")
+        elif ntype == "account":
+            keep = levels.get("accounts") and acct_kept(a)
+            if keep and held_accts is not None and not active["account"]:
+                parent_accts.append(a)
+        elif ntype == "site":
+            keep = levels.get("sites") and site_kept(a, s)
+            if keep and held_sites is not None and not active["site"]:
+                parent_sites.append(s)
+        elif ntype == "group":
+            in_site = levels.get("groups") and site_kept(a, s)
+            if in_site:
+                rank_nodes.append(node)
+            keep = in_site and group_ok(a, s, g)
+        else:
+            keep = not any(active.values())
+        if keep:
+            indices.append(i)
+    return {
+        "indices": indices,
+        "rank_nodes": rank_nodes,
+        "accounts": acct_names if active["account"] else [],
+        "sites": site_names if active["site"] else [],
+        "groups": group_names if active["group"] else [],
+        "parent_accounts": _unique_names(parent_accts),
+        "parent_sites": _unique_names(parent_sites),
+        "unmatched": {"account": acct_miss, "site": site_miss,
+                      "group": group_miss},
+    }
+
+
+def _backup_sites(backup, account_filter=""):
+    """Sites in a backup, for the restore's site chooser:
+    [{"name", "accounts", "groups"}] in backup order.
+
+    A site is found through its own node AND through its groups' paths, so a
+    backup taken without the Sites level still lists it. Narrowed to the
+    account(s) the Account field picks; all accounts when that field is
+    blank or matches nothing."""
+    rows = [(n.get("type"),) + _node_scope_names(n) for n in backup]
+    accts = _unique_names(a for _t, a, _s, _g in rows)
+    hit, _miss = _match_scope_names(accts, account_filter or "", multi=False)
+    keep = ({_norm_name(accts[i]) for i in hit}
+            or {_norm_name(a) for a in accts})
+    sites = {}
+    for ntype, a, s, _g in rows:
+        if not s or _norm_name(a) not in keep:
+            continue
+        entry = sites.setdefault(_norm_name(s), {"name": s, "accounts": [],
+                                                 "groups": 0})
+        if a not in entry["accounts"]:
+            entry["accounts"].append(a)
+        if ntype == "group":
+            entry["groups"] += 1
+    return list(sites.values())
+
+
+def _restore_scope_problem(backup, scope):
+    """Why a restore scope cannot run as typed, or "" when it can.
+
+    A name that matches nothing stops the run before anything is written:
+    restoring the rest would hide the typo, and ignoring the field would
+    restore everything."""
+    miss = scope.get("unmatched") or {}
+    named = [_node_scope_names(n) for n in backup]
+
+    def _listing(labels):
+        labels = sorted(_unique_names(labels), key=_norm_name)
+        text = ", ".join(labels[:15]) or "(none)"
+        if len(labels) > 15:
+            text += f" (+{len(labels) - 15} more)"
+        return text
+
+    if miss.get("account"):
+        return (f"No account in this backup matches "
+                f"'{miss['account'][0]}'.\n\n"
+                f"Accounts in the backup: "
+                f"{_listing(a for a, _s, _g in named)}\n\n"
+                "Fix or clear the Account field, or rename the backup's "
+                "account first (More options → Rename in the backup).")
+    if miss.get("site"):
+        chosen = {_norm_name(a) for a in scope.get("accounts") or []}
+        names = ", ".join(f"'{n}'" for n in miss["site"])
+        where = " under the chosen account" if chosen else ""
+        have = _listing(s for a, s, _g in named
+                        if not chosen or _norm_name(a) in chosen)
+        return (f"No site named {names} in this backup{where}.\n\n"
+                f"Sites in the backup: {have}\n\n"
+                "Fix the Site field, or use Choose… to tick the sites "
+                "from the backup.")
+    if miss.get("group"):
+        return (f"No group in the chosen site(s) matches "
+                f"'{miss['group'][0]}'.\n\nFix or clear the Group field.")
+    if not scope.get("indices"):
+        return ("Nothing to restore: no backup node matches the ticked "
+                "restore levels and the Account / Site / Group fields.")
+    return ""
+
+
+def _describe_restore_scope(scope, total):
+    """One line for the confirmation and the log: what the restore touches."""
+    def _shown(names):
+        text = ", ".join(names[:8])
+        return text + (f" (+{len(names) - 8} more)" if len(names) > 8 else "")
+
+    bits = []
+    for label, key in (("Account", "accounts"), ("Site", "sites"),
+                       ("Group", "groups")):
+        names = scope.get(key) or []
+        if names:
+            bits.append(f"{label}{'' if len(names) == 1 else 's'}: "
+                        f"{_shown(names)}")
+    for label, key in (("site", "parent_sites"),
+                       ("account", "parent_accounts")):
+        names = scope.get(key) or []
+        if names:
+            one = len(names) == 1
+            bits.append(f"with {'its' if one else 'their'} {label}"
+                        f"{'' if one else 's'}: {_shown(names)}")
+    count = len(scope.get("indices") or [])
+    what = " · ".join(bits) if bits else (
+        "everything in the backup" if count == total else "the ticked levels")
+    return f"{what} — {count} of {total} backup node(s)"
+
+
+def _backup_file_problem(data):
+    """'' when parsed JSON is a backup the restore can use, else the reason
+    in plain words. A backup is a list of node objects; the restore report
+    the app also saves as JSON is an object, and loading one used to fail
+    with "'str' object has no attribute 'get'"."""
+    pick = ("Choose the backup file the Backup page saved "
+            "(s1-backup-….json).")
+    if isinstance(data, dict) and {"meta", "nodes"} <= set(data):
+        return f"This is a restore report, not a backup. {pick}"
+    if (not isinstance(data, list)
+            or not all(isinstance(n, dict) for n in data)):
+        return f"This file isn't a backup. {pick}"
+    if not data:
+        return "This backup is empty — it holds no nodes to restore."
+    return ""
+
+
+def _load_error_text(exc):
+    """A file-load failure, worded for the operator rather than the log."""
+    if isinstance(exc, json.JSONDecodeError):
+        return ("This file isn't valid JSON — it may be damaged, or it "
+                "isn't a backup.")
+    if isinstance(exc, UnicodeDecodeError):
+        return "This isn't a JSON text file — it can't be a backup."
+    if isinstance(exc, OSError):
+        return f"Can't open this file: {exc.strerror or exc}"
+    return str(exc)
+
+
+def _starts_like_backup(path):
+    """Cheap check without parsing: a backup's JSON opens with '['."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            head = f.read(256)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return head.lstrip("\ufeff \t\r\n").startswith("[")
+
+
+def _latest_backup_file(paths):
+    """Newest file in `paths` that is a backup, or None — reports and other
+    s1*.json files sitting next to backups are passed over."""
+    def mtime(path):
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return -1.0
+    for path in sorted(set(paths), key=mtime, reverse=True):
+        if mtime(path) >= 0 and _starts_like_backup(path):
+            return path
+    return None
+
+
+def _backup_overview(backup):
+    """One line for the backup card: what the file holds and where from."""
+    kinds = Counter(n.get("type") for n in backup if isinstance(n, dict))
+    bits = ["global settings"] if kinds.get("global") else []
+    for kind in ("account", "site", "group"):
+        n = kinds.get(kind, 0)
+        if n:
+            bits.append(f"{n:,} {kind}{'' if n == 1 else 's'}")
+    meta = next((n.get("backupMetadata") for n in backup
+                 if isinstance(n, dict) and n.get("backupMetadata")), {})
+    host = (meta.get("url") or "").split("//", 1)[-1].split("/")[0]
+    if meta.get("snapshot"):
+        bits.insert(0, "Pre-restore snapshot")
+    if host:
+        bits.append(f"{'of' if meta.get('snapshot') else 'from'} {host}")
+    return " · ".join(bits) or f"{len(backup):,} node(s)"
+
+
+def _ghost_button(parent, text, command, width=120, height=32, **kw):
+    """A secondary action. On the Restore screen the next thing to do is
+    the only filled button; everything else is a quiet outline."""
+    opts = dict(text=text, command=command, width=width, height=height,
+                font=(UI_FONT, 12), fg_color=theme.GHOST,
+                hover_color=theme.GHOST_HOVER, text_color=TEXT,
+                border_width=1, border_color=BORDER,
+                corner_radius=theme.RADIUS_MD)
+    opts.update(kw)
+    return ctk.CTkButton(parent, **opts)
+
+
+_PRIMARY_STYLE = dict(fg_color=BRAND, hover_color=BRAND_HOVER,
+                      text_color="#FFFFFF", border_width=0)
+_GHOST_STYLE = dict(fg_color=theme.GHOST, hover_color=theme.GHOST_HOVER,
+                    text_color=TEXT, border_width=1)
+_GO_STYLE = dict(fg_color=GREEN, hover_color=GREEN_HOVER,
+                 text_color="#FFFFFF", border_width=0)
+# step state -> (badge fill, glyph or None for the number, glyph colour,
+#                card edge)
+_STEP_LOOK = {
+    "todo":   (CARD_ELEVATED, None, TEXT_MUTED, BORDER),
+    "active": (BRAND, None, "#FFFFFF", BRAND),
+    "done":   (GREEN, "✓", "#FFFFFF", BORDER),
+    "warn":   (WARN, "!", "#FFFFFF", WARN),
+    "error":  (ACCENT, "!", "#FFFFFF", ACCENT),
+}
+_NO_BACKUP_TEXT = ("No backup loaded yet — Browse for the s1-backup-….json "
+                   "file the Backup page saved.")
+_SCOPE_IDLE_TEXT = ("Load a backup in step 1 — this line then shows exactly "
+                    "what will be restored.")
+_RESULT_HINTS = {
+    "progress": "A card per site, its groups counted 1, 2, 3 — click a "
+                "card to fold or unfold it.",
+    "compare": "Pick a node: what the backup holds vs what the destination "
+               "has now. Preview or Restore fills in the destination side.",
+}
+
+
+def _configure_changed(widget, **opts):
+    """configure() only the options that differ: every configure() on a
+    visible CTk widget redraws it, and the Restore screen re-applies its
+    state on each keystroke."""
+    todo = {}
+    for key, value in opts.items():
+        try:
+            if widget.cget(key) == value:
+                continue
+        except Exception:
+            pass
+        todo[key] = value
+    if todo:
+        widget.configure(**todo)
+
+
+def _grid_visible(widget, visible):
+    """grid() or grid_remove() a widget that was gridded once already."""
+    if visible:
+        if not widget.winfo_manager():
+            widget.grid()
+    elif widget.winfo_manager():
+        widget.grid_remove()
 
 
 # Whitelists for specific element types that are strict about accepted fields
@@ -2466,8 +3306,8 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
         except Exception as e:
             sites = []
             cli_log(f"Could not list sites under {aname}: {e}", "warning")
-        for site in _select_by_name(sites, site_f,
-                                     key=lambda s: s.get("name", "?")):
+        for site in _select_by_names(sites, site_f,
+                                      key=lambda s: s.get("name", "?")):
             sname = site.get("name", "?")
             sid = site.get("id", "")
             if levels.get("sites"):
@@ -2696,7 +3536,10 @@ class BackupPage(ctk.CTkFrame):
 
         # progress table
         self.grid_rowconfigure(4, weight=1)
-        self.ptable = ProgressTable(self, height=300)
+        self.ptable = ProgressTable(
+            self, height=300,
+            empty_text="Progress shows here, site by site, once the backup "
+                       "starts.")
         self.ptable.grid(row=4, column=0, sticky="nsew", padx=20, pady=(4, 12))
 
         self.log = _ConsoleProxy(self.app)
@@ -4321,357 +5164,27 @@ class RestorePage(ctk.CTkFrame):
         self.app = app
         self.backup_data = None
         self.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(self, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 2))
-        ctk.CTkLabel(hdr, text="Restore to",
-                     font=(UI_FONT, 22, "bold")).pack(side="left")
-        self._console_var = ctk.StringVar(value="DESTINATION")
-        ctk.CTkOptionMenu(hdr, values=["DESTINATION", "SOURCE"],
-                          variable=self._console_var, width=160, height=32,
-                          font=(UI_FONT, 14, "bold"),
-                          command=lambda _: self._update_indicator()).pack(
-            side="left", padx=(8, 0))
-        self._indicator = ctk.CTkLabel(hdr, text="",
-                                       font=(UI_FONT, 11),
-                                       text_color=ACCENT)
-        self._indicator.pack(side="left", padx=(12, 0))
-        ctk.CTkLabel(self,
-                     text="Load a backup file and push configuration to the selected console.",
-                     font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
-            row=1, column=0, sticky="w", padx=20, pady=(0, 12))
-
-        # file picker
-        file_row = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
-        file_row.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
-        file_row.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(file_row, text="Backup file:",
-                     font=(UI_FONT, 13)).grid(
-            row=0, column=0, padx=12, pady=10, sticky="w")
-        self.file_entry = ctk.CTkEntry(file_row, placeholder_text="Select a backup JSON…", height=32)
-        self.file_entry.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
-        ctk.CTkButton(file_row, text="Browse", width=80, height=32,
-                      command=self._browse).grid(
-            row=0, column=2, padx=12, pady=10)
-
-        self.info_lbl = ctk.CTkLabel(file_row, text="",
-                                     font=(UI_FONT, 12), text_color=TEXT_MUTED)
-        self.info_lbl.grid(row=1, column=0, columnspan=3, padx=12,
-                           pady=(0, 8), sticky="w")
-
-        # ── Mangle Rename & Set Target Context (collapsible) ──
-        mangle_outer = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
-        mangle_outer.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
+        self.grid_rowconfigure(4, weight=1)
+        self._load_state = "empty"
+        self._nsec = 0
+        self._scope_ok = False
+        self._scope_count = 0
+        self._summary_job = None
+        self._advanced_open = False
         self._mangle_collapsed = True
+        self._run_mode = "idle"
+        self._run_failed = False
+        self._badges, self._badge_state = {}, {}
 
-        mangle_hdr = ctk.CTkButton(
-            mangle_outer,
-            text="▶ Structure Operations (optional)",
-            font=(UI_FONT, 13), fg_color="transparent",
-            hover_color=NEUTRAL_HOVER, text_color=WARN, anchor="w", height=32,
-            command=self._toggle_mangle)
-        mangle_hdr.pack(fill="x", padx=8, pady=4)
-        self._mangle_toggle_btn = mangle_hdr
-
-        self._mangle_content = ctk.CTkFrame(mangle_outer, fg_color="transparent")
-        # starts collapsed — don't pack
-        self._mangle_content.columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(self._mangle_content, text="Source Name:",
-                     font=(UI_FONT, 13)).grid(
-            row=0, column=0, padx=12, pady=4, sticky="w")
-        self.mangle_src = ctk.CTkEntry(
-            self._mangle_content,
-            placeholder_text="e.g. Old Account/Old Site", height=32)
-        self.mangle_src.grid(row=0, column=1, padx=12, pady=4, sticky="ew")
-
-        ctk.CTkLabel(self._mangle_content, text="New Name:",
-                     font=(UI_FONT, 13)).grid(
-            row=1, column=0, padx=12, pady=4, sticky="w")
-        self.mangle_dst = ctk.CTkEntry(
-            self._mangle_content,
-            placeholder_text="e.g. New Account/New Site", height=32)
-        self.mangle_dst.grid(row=1, column=1, padx=12, pady=4, sticky="ew")
-
-        mangle_btns = ctk.CTkFrame(self._mangle_content, fg_color="transparent")
-        mangle_btns.grid(row=2, column=0, columnspan=2, padx=12,
-                         pady=(6, 10), sticky="w")
-        ctk.CTkButton(mangle_btns, text="Mangle Rename", height=34,
-                      fg_color=BRAND,
-                      command=self._mangle_rename).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(mangle_btns, text="Set Target Context", height=34,
-                      fg_color=NEUTRAL,
-                      command=self._set_target_context).pack(side="left", padx=(0, 8))
-        self.mangle_status = ctk.CTkLabel(mangle_btns, text="",
-                                          font=(UI_FONT, 11),
-                                          text_color=TEXT_MUTED)
-        self.mangle_status.pack(side="left", padx=8)
-
-        # restore scope card
-        scope_card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
-        scope_card.grid(row=4, column=0, sticky="ew", padx=20, pady=4)
-        scope_card.grid_columnconfigure(1, weight=1)
-        scope_card.grid_columnconfigure(3, weight=1)
-        scope_card.grid_columnconfigure(5, weight=1)
-
-        ctk.CTkLabel(scope_card, text="Restore level:",
-                     font=(UI_FONT, 13, "bold"), text_color=ACCENT).grid(
-            row=0, column=0, padx=12, pady=8, sticky="w")
-        lv_inner = ctk.CTkFrame(scope_card, fg_color="transparent")
-        lv_inner.grid(row=0, column=1, columnspan=5, padx=12, pady=8, sticky="w")
-        self.restore_level_vars = {}
-        for lv in ["global", "accounts", "sites", "groups"]:
-            var = ctk.BooleanVar(value=(lv != "global"))
-            ctk.CTkCheckBox(lv_inner, text=lv.capitalize(), variable=var,
-                            font=(UI_FONT, 12)).pack(side="left", padx=8)
-            self.restore_level_vars[lv] = var
-        self.restore_level_vars["global"].trace_add(
-            "write", lambda *a: self._toggle_restore_global())
-
-        self._restore_scope_widgets = []
-        for col_i, (lbl_text, attr) in enumerate([
-            ("Account:", "restore_acct"),
-            ("Site:", "restore_site"),
-            ("Group:", "restore_group"),
-        ]):
-            c0 = col_i * 2
-            lbl = ctk.CTkLabel(scope_card, text=lbl_text,
-                               font=(UI_FONT, 13))
-            lbl.grid(row=1, column=c0, padx=12, pady=6, sticky="w")
-            entry = ctk.CTkEntry(
-                scope_card, placeholder_text="(blank = all)", height=32)
-            entry.grid(row=1, column=c0 + 1, padx=(0, 12), pady=6, sticky="ew")
-            setattr(self, attr, entry)
-            self._restore_scope_widgets.extend([lbl, entry])
-
-        # element checkboxes (collapsible)
-        self._restore_el_frame = ctk.CTkFrame(self, fg_color=CARD,
-                                               corner_radius=12)
-        self._restore_el_frame.grid(row=5, column=0, sticky="ew",
-                                     padx=20, pady=4)
-        _, self.restore_vars = _build_elements_section(
-            self._restore_el_frame, row=0, title="Restore Elements")
-
-        # ─────────────────────────────────────────────────────────────
-        #  Action area — laid out in the order you actually work in:
-        #     1 · PREPARE  (verify + safety, before anything is written)
-        #     2 · RUN      (launch + live controls)
-        #     3 · REVIEW   (results + recovery, after the run)
-        # ─────────────────────────────────────────────────────────────
-        def _phase_label(parent, text):
-            return ctk.CTkLabel(parent, text=text, font=(UI_FONT, 11, "bold"),
-                                text_color=TEXT_FAINT, width=78, anchor="w")
-
-        # ── Phase 1 · PREPARE ──────────────────────────────────────────
-        prep_row = ctk.CTkFrame(self, fg_color="transparent")
-        prep_row.grid(row=6, column=0, sticky="ew", padx=20, pady=(10, 2))
-        _phase_label(prep_row, "1 · PREPARE").pack(side="left", padx=(0, 6))
-
-        self._preflight_btn = ctk.CTkButton(
-            prep_row, text="✈  Pre-flight", height=34, width=120,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._preflight)
-        self._preflight_btn.pack(side="left", padx=(0, 4))
-        _help_btn(prep_row,
-                  "Readiness check before you restore — destination "
-                  "reachable, token valid/not-expiring and scoped wide "
-                  "enough, and whether the target scope already exists. "
-                  "Read-only."
-                  ).pack(side="left", padx=(0, 8))
-        self._preview_btn = ctk.CTkButton(
-            prep_row, text="🔍  Preview vs Dest", height=34, width=160,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._preview_changes)
-        self._preview_btn.pack(side="left", padx=(0, 4))
-        _help_btn(prep_row,
-                  "Dry run — compares the loaded backup against the LIVE "
-                  "destination without writing anything. Shows how many items "
-                  "per element would be newly created vs already exist, and "
-                  "fills the Source-vs-Destination panel so you can review "
-                  "before restoring."
-                  ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(prep_row, text="⚙  Set Defaults", height=34, width=140,
-                      fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-                      font=(UI_FONT, 12),
-                      command=self._open_set_defaults).pack(side="left", padx=(0, 12))
-        self._snapshot_var = ctk.BooleanVar(
-            value=bool(self.app.settings.get("restore_snapshot_default", True)))
-        ctk.CTkCheckBox(
-            prep_row, text="📸 Snapshot first", variable=self._snapshot_var,
-            font=(UI_FONT, 12)).pack(side="left", padx=(0, 2))
-        _help_btn(prep_row,
-                  "Before restoring, back up the destination's current state "
-                  "of the selected elements/scope to a snapshot file. If the "
-                  "restore goes wrong, use Rollback to load that snapshot and "
-                  "restore the destination back to how it was."
-                  ).pack(side="left", padx=(0, 4))
-
-        # ── Phase 2 · RUN ──────────────────────────────────────────────
-        action_row = ctk.CTkFrame(self, fg_color="transparent")
-        action_row.grid(row=7, column=0, sticky="ew", padx=20, pady=(6, 2))
-        _phase_label(action_row, "2 · RUN").pack(side="left", padx=(0, 6))
-
-        # Launch (green tones)
-        self._start_btn = ctk.CTkButton(
-            action_row, text="▶  Restore", height=38, width=130,
-            fg_color=GREEN, hover_color=GREEN_HOVER,
-            font=(UI_FONT, 14, "bold"),
-            command=lambda: self._start_restore(auto=False))
-        self._start_btn.pack(side="left", padx=(0, 4))
-        self._auto_btn = ctk.CTkButton(
-            action_row, text="⚡ Auto Restore", height=38, width=150,
-            fg_color=GREEN_HOVER, hover_color=GREEN_HOVER,
-            font=(UI_FONT, 14, "bold"),
-            command=lambda: self._start_restore(auto=True))
-        self._auto_btn.pack(side="left", padx=(0, 4))
-        self._resume_btn = ctk.CTkButton(
-            action_row, text="↻  Resume", height=38, width=120,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 14, "bold"),
-            command=self._resume_restore, state="disabled")
-        self._resume_btn.pack(side="left", padx=(0, 12))
-
-        # Runtime control (disabled until running)
-        self._stop_btn = ctk.CTkButton(
-            action_row, text="■  Stop", height=38, width=90,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            font=(UI_FONT, 13, "bold"),
-            command=self._stop, state="disabled")
-        self._stop_btn.pack(side="left", padx=(0, 4))
-        self._skip_btn = ctk.CTkButton(
-            action_row, text=_SKIP_DEFAULT, height=38, width=180,
-            fg_color=WARN_HOVER, hover_color=WARN_HOVER,
-            font=(UI_FONT, 13, "bold"),
-            command=self._skip_current_element, state="disabled")
-        self._skip_btn.pack(side="left", padx=(0, 12))
-
-        # Progress strip lives in its own full-width row below (see
-        # progress_row) so it never crams the RUN buttons or floats mid-row.
-
-        progress_row = ctk.CTkFrame(self, fg_color="transparent")
-        progress_row.grid(row=8, column=0, sticky="ew", padx=20, pady=(2, 6))
-        progress_row.grid_columnconfigure(0, weight=1)   # bar stretches
-
-        self.progress = ctk.CTkProgressBar(progress_row, height=12,
-                                           corner_radius=6,
-                                           progress_color=GREEN)
-        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 12))
-        self.progress.set(0)
-        self._timer_lbl = ctk.CTkLabel(progress_row, text="",
-                                       font=(MONO_FONT, 12),
-                                       text_color=TEXT_MUTED)
-        self._timer_lbl.grid(row=0, column=1, sticky="e", padx=(0, 10))
-        self._status_lbl = ctk.CTkLabel(progress_row, text="",
-                                        font=(UI_FONT, 12, "bold"),
-                                        text_color=TEXT_MUTED)
-        self._status_lbl.grid(row=0, column=2, sticky="e")
-
-        # ── Phase 3 · REVIEW ───────────────────────────────────────────
-        review_row = ctk.CTkFrame(self, fg_color="transparent")
-        review_row.grid(row=9, column=0, sticky="ew", padx=20, pady=(6, 4))
-        _phase_label(review_row, "3 · REVIEW").pack(side="left", padx=(0, 6))
-
-        self._export_btn = ctk.CTkButton(
-            review_row, text="📋  Export Log", height=34, width=130,
-            fg_color=BRAND, hover_color=BRAND_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._export, state="disabled")
-        self._export_btn.pack(side="left", padx=(0, 4))
-        self._explain_btn = ctk.CTkButton(
-            review_row, text="🛟  Explain Errors", height=34, width=150,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._show_errors_dialog, state="disabled")
-        self._explain_btn.pack(side="left", padx=(0, 4))
-        _help_btn(review_row,
-                  "After a restore, click this to see plain-English "
-                  "explanations of every failure — what it means, why it "
-                  "happened, what to do, and how to copy the error to send "
-                  "to support."
-                  ).pack(side="left", padx=(0, 8))
-        self._redact_btn = ctk.CTkButton(
-            review_row, text="🛡  Redacted Copy", height=34, width=150,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._export_redacted, state="disabled")
-        self._redact_btn.pack(side="left", padx=(0, 4))
-        _help_btn(review_row,
-                  "Save a sanitised copy of the loaded backup with all "
-                  "secrets (SMTP/AD/SSO/syslog passwords, tokens, keys) "
-                  "masked — safe to attach to a ticket or share. The original "
-                  "backup is untouched."
-                  ).pack(side="left", padx=(0, 12))
-        self._gap_btn = ctk.CTkButton(
-            review_row, text="🧩  Gap Report", height=34, width=145,
-            fg_color=WARN, hover_color=WARN_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._export_gap_report, state="disabled")
-        self._gap_btn.pack(side="left", padx=(0, 4))
-        self._gap_csv_btn = ctk.CTkButton(
-            review_row, text="⬇  CSV", height=34, width=90,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._export_gap_csv, state="disabled")
-        self._gap_csv_btn.pack(side="left", padx=(0, 4))
-        _help_btn(review_row,
-                  "Item-by-item reconciliation of the last restore, one tab "
-                  "per element (Exclusions, Blocklist, Firewall Rules, …). "
-                  "Each tab lists every item that WAS restored and every item "
-                  "that was NOT — by name, with the reason. Export as Excel "
-                  "(one worksheet per element), tabbed HTML or JSON — or "
-                  "⬇ CSV for one flat, filterable row per item."
-                  ).pack(side="left", padx=(0, 12))
-        self._rollback_btn = ctk.CTkButton(
-            review_row, text="↩  Rollback", height=34, width=120,
-            fg_color=NEUTRAL, hover_color=NEUTRAL_HOVER,
-            font=(UI_FONT, 12, "bold"),
-            command=self._load_last_snapshot)
-        self._rollback_btn.pack(side="left", padx=(0, 4))
-        _help_btn(review_row,
-                  "Undo the last restore: loads the pre-restore snapshot and "
-                  "restores the destination back to how it was. Only works if "
-                  "'Snapshot first' (Prepare) was enabled for that run."
-                  ).pack(side="left", padx=(0, 4))
-
-        # progress table + diff panel (resizable side by side).
-        # Use a tk.PanedWindow so the user can drag the divider to give
-        # either side more room. PanedWindow requires its children to be
-        # DIRECT Tk-path children, but CTkScrollableFrame wraps itself in
-        # an internal canvas (its real Tk path is `…!canvas.!progresstable`,
-        # not `…!progresstable`). So we add plain tk.Frame holders and
-        # nest the actual widgets inside them.
-        self.grid_rowconfigure(10, weight=1)
-        import tkinter as _tk
-        split = _tk.PanedWindow(
-            self, orient="horizontal",
-            sashwidth=8, sashrelief="raised",
-            bd=0, sashpad=0,
-            opaqueresize=True)
-        theme.tk_track(split, lambda w: w.configure(bg=theme.tkcolor(CARD)))
-        split.grid(row=10, column=0, sticky="nsew", padx=20, pady=(4, 12))
-
-        # CRITICAL: PanedWindow doesn't constrain its children's heights —
-        # without pack_propagate(False) the inner CTkScrollableFrame would
-        # expand to fit all its rows (defeating the whole point of being
-        # scrollable). Fixed initial height + propagate-off keeps the
-        # scrollable region clipped so the scrollbar actually engages.
-        left_pane = _tk.Frame(split, bd=0, highlightthickness=0, height=400)
-        right_pane = _tk.Frame(split, bd=0, highlightthickness=0, height=400)
-        for _p in (left_pane, right_pane):
-            theme.tk_track(_p, lambda w: w.configure(bg=theme.tkcolor(CARD)))
-        left_pane.pack_propagate(False)
-        right_pane.pack_propagate(False)
-        split.add(left_pane, minsize=300, stretch="always", width=620)
-        split.add(right_pane, minsize=320, stretch="always", width=520)
-
-        self.ptable = ProgressTable(left_pane, height=300)
-        self.ptable.pack(fill="both", expand=True)
-        self.diff_panel = DiffPanel(right_pane)
-        self.diff_panel.pack(fill="both", expand=True)
-        self._split = split
+        self._build_header()
+        self._build_backup_card()
+        self._build_scope_card()
+        self._build_run_card()
+        self._build_results()
+        # Fill the space we are given instead of asking for more: a taller
+        # request (More options open, the Compare tab) would push the app's
+        # status bar below the window. The results row absorbs the slack.
+        self.grid_propagate(False)
 
         self.log = _ConsoleProxy(self.app)
         self._timer_running = False
@@ -4681,6 +5194,617 @@ class RestorePage(ctk.CTkFrame):
         self._cancelled = False
         self._skip_element = False
         self._acct_id = ""  # set by JiraPage._load_ticket for ID-based validation
+        self._update_scope_summary()
+
+    # ── layout: three numbered steps, then the results ─────────────────
+
+    def _step_card(self, row, key, num, title, caption):
+        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=theme.RADIUS_LG,
+                            border_width=1, border_color=BORDER)
+        card.grid(row=row, column=0, sticky="ew", padx=20, pady=(0, 10))
+        card.grid_columnconfigure(0, minsize=196)
+        card.grid_columnconfigure(1, weight=1)
+        rail = ctk.CTkFrame(card, fg_color="transparent")
+        rail.grid(row=0, column=0, sticky="nw", padx=(16, 8), pady=14)
+        # A label pads its text by the corner radius and turns into a pill;
+        # a fixed-size frame with the glyph placed inside stays a circle.
+        badge = ctk.CTkFrame(rail, width=28, height=28, corner_radius=14,
+                             fg_color=CARD_ELEVATED)
+        badge.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 10))
+        glyph = ctk.CTkLabel(badge, text=str(num), width=20, height=20,
+                             fg_color="transparent", text_color=TEXT_MUTED,
+                             font=(UI_FONT, 13, "bold"))
+        glyph.place(relx=0.5, rely=0.5, anchor="center")
+        ctk.CTkLabel(rail, text=title, anchor="w", height=20,
+                     font=(UI_FONT, 14, "bold")).grid(
+            row=0, column=1, sticky="w")
+        ctk.CTkLabel(rail, text=caption, anchor="w", height=16,
+                     font=(UI_FONT, 11), text_color=TEXT_FAINT).grid(
+            row=1, column=1, sticky="w")
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.grid(row=0, column=1, sticky="ew", padx=(0, 16), pady=12)
+        body.grid_columnconfigure(0, weight=1)
+        self._badges[key] = (badge, glyph, card, num)
+        return card, body
+
+    def _wrap_label(self, frame, label):
+        """Keep `label` wrapped to the width of `frame` as the window
+        resizes, so a long reason never runs off the card."""
+        def resize(event):
+            try:
+                scale = ctk.ScalingTracker.get_widget_scaling(label)
+            except Exception:
+                scale = 1.0
+            width = max(240, int(event.width / scale) - 8)
+            if getattr(label, "_wrap_px", None) != width:
+                label._wrap_px = width
+                label.configure(wraplength=width)
+        frame.bind("<Configure>", resize, add="+")
+
+    def _build_header(self):
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 12))
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hdr, text="Restore", anchor="w",
+                     font=(UI_FONT, 22, "bold")).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkLabel(hdr, text="Put a backup's settings onto a console: pick "
+                               "the file, choose what to restore, restore it.",
+                     anchor="w", font=(UI_FONT, 12),
+                     text_color=TEXT_MUTED).grid(row=1, column=0, sticky="w")
+        target = ctk.CTkFrame(hdr, fg_color="transparent")
+        target.grid(row=0, column=1, rowspan=2, sticky="e")
+        ctk.CTkLabel(target, text="Restore into", font=(UI_FONT, 12),
+                     text_color=TEXT_MUTED).grid(row=0, column=0, padx=(0, 8))
+        self._console_var = ctk.StringVar(value="DESTINATION")
+        self._console_menu = ctk.CTkOptionMenu(
+            target, values=["DESTINATION", "SOURCE"],
+            variable=self._console_var, width=150, height=30,
+            font=(UI_FONT, 13, "bold"),
+            command=lambda _: self._update_indicator())
+        self._console_menu.grid(row=0, column=1)
+        self._indicator = ctk.CTkLabel(target, text="", anchor="e", height=18,
+                                       font=(UI_FONT, 11), text_color=ACCENT)
+        self._indicator.grid(row=1, column=0, columnspan=2, sticky="e",
+                             pady=(4, 0))
+
+    def _build_backup_card(self):
+        _card, body = self._step_card(1, "backup", 1, "Backup file",
+                                      "What to restore from")
+        pick = ctk.CTkFrame(body, fg_color="transparent")
+        pick.grid(row=0, column=0, sticky="ew")
+        pick.grid_columnconfigure(0, weight=1)
+        self.file_entry = ctk.CTkEntry(
+            pick, height=34,
+            placeholder_text="s1-backup-….json — Browse, or paste a path "
+                             "and press Enter")
+        self.file_entry.grid(row=0, column=0, sticky="ew")
+        self.file_entry.bind("<Return>", lambda _e: self._load_typed_path())
+        self._browse_btn = _ghost_button(
+            pick, "Browse…", command=self._browse, width=104, height=34,
+            font=(UI_FONT, 13, "bold"))
+        self._browse_btn.grid(row=0, column=1, padx=(8, 0))
+        self._rollback_btn = _ghost_button(
+            pick, "↩  Rollback", command=self._load_last_snapshot,
+            width=112, height=34)
+        self._rollback_btn.grid(row=0, column=2, padx=(8, 0))
+        _ToolTip(self._rollback_btn,
+                 "Undo a restore: loads the snapshot of the destination taken "
+                 "just before the last restore (when 'Snapshot first' was "
+                 "ticked). Then click Restore to put the destination back the "
+                 "way it was.")
+        self.info_lbl = ctk.CTkLabel(body, text=_NO_BACKUP_TEXT, anchor="w",
+                                     justify="left", height=20,
+                                     font=(UI_FONT, 12), text_color=TEXT_MUTED)
+        self.info_lbl.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self._wrap_label(body, self.info_lbl)
+        self._secret_row = ctk.CTkFrame(body, fg_color="transparent")
+        self._secret_row.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self._secret_lbl = ctk.CTkLabel(self._secret_row, text="", height=20,
+                                        font=(UI_FONT, 12), text_color=WARN)
+        self._secret_lbl.grid(row=0, column=0, sticky="w")
+        self._redact_btn = _ghost_button(
+            self._secret_row, "🛡  Save a redacted copy",
+            command=self._export_redacted, width=180, height=28)
+        self._redact_btn.grid(row=0, column=1, padx=(10, 0))
+        _ToolTip(self._redact_btn,
+                 "Save a sanitised copy of the loaded backup with all secrets "
+                 "(SMTP/AD/SSO/syslog passwords, tokens, keys) masked — safe "
+                 "to attach to a ticket or share. Share that copy, never the "
+                 "original, which is left untouched.")
+        self._secret_row.grid_remove()
+
+    def _build_scope_card(self):
+        card, body = self._step_card(2, "scope", 2, "What to restore",
+                                     "Blank fields = everything")
+        names = ctk.CTkFrame(body, fg_color="transparent")
+        names.grid(row=0, column=0, sticky="ew")
+        col = 0
+        for label, attr, hint in (("Account", "restore_acct", "all accounts"),
+                                  ("Site", "restore_site", "all sites"),
+                                  ("Group", "restore_group", "all groups")):
+            ctk.CTkLabel(names, text=label, font=(UI_FONT, 12),
+                         text_color=TEXT_MUTED).grid(
+                row=0, column=col, sticky="w", padx=(0 if col == 0 else 16, 6))
+            entry = ctk.CTkEntry(names, height=32, placeholder_text=hint)
+            entry.grid(row=0, column=col + 1, sticky="ew")
+            names.grid_columnconfigure(col + 1, weight=1)
+            for seq in ("<KeyRelease>", "<FocusOut>"):
+                entry.bind(seq, self._schedule_scope_summary)
+            setattr(self, attr, entry)
+            col += 2
+            if attr == "restore_site":
+                self._choose_btn = _ghost_button(
+                    names, "Choose…", command=self._choose_restore_sites,
+                    width=84, height=32)
+                self._choose_btn.grid(row=0, column=col, padx=(6, 0))
+                _ToolTip(self._choose_btn,
+                         "Tick the sites to restore from the list in this "
+                         "backup — or type several names, comma-separated.")
+                col += 1
+        self._global_note = ctk.CTkLabel(
+            body, text="Global settings is ticked: the console-wide settings "
+                       "are restored too, and the Account / Site / Group "
+                       "fields don't apply.",
+            anchor="w", justify="left", height=32, font=(UI_FONT, 12),
+            text_color=WARN)
+        self._global_note.grid(row=0, column=0, sticky="ew")
+        self._global_note.grid_remove()
+        self._restore_scope_widgets = [names]
+
+        levels = ctk.CTkFrame(body, fg_color="transparent")
+        levels.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ctk.CTkLabel(levels, text="Levels", font=(UI_FONT, 12),
+                     text_color=TEXT_MUTED).pack(side="left", padx=(0, 12))
+        self.restore_level_vars = {
+            lv: ctk.BooleanVar(value=(lv != "global"))
+            for lv in ("global", "accounts", "sites", "groups")}
+        for lv, text in (("accounts", "Accounts"), ("sites", "Sites"),
+                         ("groups", "Groups"), ("global", "Global settings")):
+            ctk.CTkCheckBox(levels, text=text,
+                            variable=self.restore_level_vars[lv],
+                            font=(UI_FONT, 12), width=20, checkbox_width=18,
+                            checkbox_height=18, border_width=2).pack(
+                side="left", padx=(0, 18))
+        _help_btn(levels,
+                  "Which kinds of backup node to restore. Accounts, Sites and "
+                  "Groups restore the settings saved at that level. Naming a "
+                  "site with Accounts ticked also restores that site's own "
+                  "account — no other. Global settings restores the "
+                  "console-wide settings; it is rarely needed and ignores the "
+                  "name fields.").pack(side="left")
+        for var in self.restore_level_vars.values():
+            var.trace_add("write", self._schedule_scope_summary)
+        self.restore_level_vars["global"].trace_add(
+            "write", lambda *a: self._toggle_restore_global())
+
+        self._scope_summary = ctk.CTkLabel(
+            body, text="", anchor="w", justify="left",
+            font=(UI_FONT, 12, "bold"), text_color=TEXT_MUTED)
+        self._scope_summary.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self._wrap_label(body, self._scope_summary)
+
+        self._adv_btn = ctk.CTkButton(
+            body, text="", anchor="w", width=10, height=26,
+            fg_color="transparent", hover_color=theme.GHOST_HOVER,
+            text_color=theme.BRAND_LIGHT, font=(UI_FONT, 12, "bold"),
+            command=self._toggle_advanced)
+        self._adv_btn.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self._build_advanced(card)
+
+    def _build_advanced(self, card):
+        # Spans the whole card: the element grid needs the width.
+        adv = ctk.CTkFrame(card, fg_color=CARD_ELEVATED,
+                           corner_radius=theme.RADIUS_MD)
+        adv.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16,
+                 pady=(0, 14))
+        adv.grid_columnconfigure(0, weight=1)
+        self._adv_frame = adv
+
+        el = ctk.CTkFrame(adv, fg_color="transparent")
+        el.grid(row=0, column=0, sticky="ew", padx=4, pady=(6, 0))
+        el.grid_columnconfigure(0, weight=1)
+        _, self.restore_vars = _build_elements_section(
+            el, row=0, title="Elements to restore")
+        for var in self.restore_vars.values():
+            var.trace_add("write", self._schedule_scope_summary)
+        self._restore_el_frame = el
+
+        ren = ctk.CTkFrame(adv, fg_color="transparent")
+        ren.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 0))
+        ren.grid_columnconfigure((1, 3), weight=1)
+        head = ctk.CTkFrame(ren, fg_color="transparent")
+        head.grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 6))
+        ctk.CTkLabel(head, text="Rename in the backup",
+                     font=(UI_FONT, 13, "bold")).pack(side="left")
+        ctk.CTkLabel(head, text="  —  when the destination uses another "
+                                "name: Account, Account/Site or "
+                                "Account/Site/Group.",
+                     font=(UI_FONT, 11), text_color=TEXT_MUTED).pack(
+            side="left")
+        self.mangle_status = ctk.CTkLabel(head, text="",
+                                          font=(UI_FONT, 11, "bold"),
+                                          text_color=TEXT_MUTED)
+        self.mangle_status.pack(side="left", padx=(12, 0))
+        ctk.CTkLabel(ren, text="From", font=(UI_FONT, 12),
+                     text_color=TEXT_MUTED).grid(
+            row=1, column=0, sticky="w", padx=(0, 8))
+        self.mangle_src = ctk.CTkEntry(
+            ren, height=32, placeholder_text="e.g. Old Account/Old Site")
+        self.mangle_src.grid(row=1, column=1, sticky="ew")
+        ctk.CTkLabel(ren, text="to", font=(UI_FONT, 12),
+                     text_color=TEXT_MUTED).grid(row=1, column=2, padx=8)
+        self.mangle_dst = ctk.CTkEntry(
+            ren, height=32, placeholder_text="e.g. New Account/New Site")
+        self.mangle_dst.grid(row=1, column=3, sticky="ew")
+        _ghost_button(ren, "Rename", command=self._mangle_rename,
+                      width=90).grid(row=1, column=4, padx=(10, 0))
+        _ghost_button(ren, "Set target context",
+                      command=self._set_target_context,
+                      width=140).grid(row=1, column=5, padx=(8, 0))
+
+        dfl = ctk.CTkFrame(adv, fg_color="transparent")
+        dfl.grid(row=2, column=0, sticky="ew", padx=16, pady=(10, 12))
+        _ghost_button(dfl, "⚙  Defaults & licenses…",
+                      command=self._open_set_defaults, width=190).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkLabel(dfl, text="Change the default site, expiry dates and "
+                               "license limits saved in the backup file.",
+                     anchor="w", font=(UI_FONT, 11),
+                     text_color=TEXT_MUTED).grid(
+            row=0, column=1, sticky="w", padx=(10, 0))
+        adv.grid_remove()
+
+    def _build_run_card(self):
+        card, body = self._step_card(3, "run", 3, "Restore",
+                                     "Writes to the chosen console")
+        acts = ctk.CTkFrame(body, fg_color="transparent")
+        acts.grid(row=0, column=0, sticky="w")
+        big = dict(height=40, corner_radius=theme.RADIUS_MD,
+                   font=(UI_FONT, 14, "bold"))
+        self._start_btn = ctk.CTkButton(
+            acts, text="▶  Restore", width=200, border_color=BORDER,
+            text_color_disabled=TEXT_FAINT,
+            command=lambda: self._start_restore(
+                auto=self._auto_var.get(), confirm=True),
+            **_GO_STYLE, **big)
+        self._start_btn.grid(row=0, column=0, padx=(0, 8))
+        self._stop_btn = ctk.CTkButton(
+            acts, text="■  Stop", width=110, fg_color=ACCENT,
+            hover_color=ACCENT_HOVER, command=self._stop, state="disabled",
+            **big)
+        self._stop_btn.grid(row=0, column=1, padx=(0, 8))
+        self._skip_btn = ctk.CTkButton(
+            acts, text=_SKIP_DEFAULT, width=190, fg_color=WARN_HOVER,
+            hover_color=WARN_HOVER, command=self._skip_current_element,
+            state="disabled", **big)
+        self._skip_btn.grid(row=0, column=2, padx=(0, 8))
+        self._resume_btn = ctk.CTkButton(
+            acts, text="↻  Resume", width=150, fg_color=WARN,
+            hover_color=WARN_HOVER, command=self._resume_restore,
+            state="disabled", **big)
+        self._resume_btn.grid(row=0, column=3, padx=(0, 8))
+        _ToolTip(self._resume_btn,
+                 "Carry on where the last restore stopped: finished nodes are "
+                 "skipped, cancelled or failed ones are tried again.")
+        self._preflight_btn = _ghost_button(
+            acts, "✈  Pre-flight", command=self._preflight, width=124,
+            height=40)
+        self._preflight_btn.grid(row=0, column=4, padx=(0, 8))
+        _ToolTip(self._preflight_btn,
+                 "Readiness check before you restore — destination "
+                 "reachable, token valid/not-expiring and scoped wide "
+                 "enough, and whether the target scope already exists. "
+                 "Read-only.")
+        self._preview_btn = _ghost_button(
+            acts, "🔍  Preview changes", command=self._preview_changes,
+            width=164, height=40)
+        self._preview_btn.grid(row=0, column=5)
+        _ToolTip(self._preview_btn,
+                 "Dry run — compares the backup against the LIVE destination "
+                 "without writing anything: how many items per element would "
+                 "be created vs already exist. Also fills in the 'Backup vs "
+                 "destination' tab below.")
+
+        # Options on the left (hidden while running), live status on the
+        # right (always) — kept off the button row so it fits narrow windows.
+        meta = ctk.CTkFrame(body, fg_color="transparent")
+        meta.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        meta.grid_columnconfigure(1, weight=1)
+        opts = ctk.CTkFrame(meta, fg_color="transparent")
+        opts.grid(row=0, column=0, sticky="w")
+        stat = ctk.CTkFrame(meta, fg_color="transparent")
+        stat.grid(row=0, column=2, sticky="e", padx=(12, 0))
+        self._status_lbl = ctk.CTkLabel(stat, text="",
+                                        font=(UI_FONT, 12, "bold"),
+                                        text_color=TEXT_MUTED)
+        self._status_lbl.pack(side="left")
+        self._timer_lbl = ctk.CTkLabel(stat, text="", font=(MONO_FONT, 12),
+                                       text_color=TEXT_MUTED)
+        self._timer_lbl.pack(side="left", padx=(10, 0))
+        self._snapshot_var = ctk.BooleanVar(
+            value=bool(self.app.settings.get("restore_snapshot_default", True)))
+        snap = ctk.CTkCheckBox(
+            opts, text="📸  Snapshot first", variable=self._snapshot_var,
+            font=(UI_FONT, 12), width=20, checkbox_width=18,
+            checkbox_height=18, border_width=2)
+        snap.pack(side="left")
+        _ToolTip(snap,
+                 "Before writing, save the destination's current settings for "
+                 "the chosen scope and elements. If the restore goes wrong, "
+                 "↩ Rollback (step 1) loads that snapshot so you can restore "
+                 "it back.")
+        self._auto_var = ctk.BooleanVar(value=False)
+        self._auto_switch = ctk.CTkSwitch(
+            opts, text="⚡  Unattended", variable=self._auto_var,
+            font=(UI_FONT, 12), width=20, switch_width=34, switch_height=18,
+            command=self._apply_state)
+        self._auto_switch.pack(side="left", padx=(24, 0))
+        _ToolTip(self._auto_switch,
+                 "Run without stopping to ask: missing accounts are created "
+                 "and every question is answered automatically. You still "
+                 "confirm once before it starts.")
+        self._options_row = opts
+
+        self.progress = ctk.CTkProgressBar(body, height=8, corner_radius=4,
+                                           progress_color=GREEN)
+        self.progress.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.progress.set(0)
+
+        after = ctk.CTkFrame(card, fg_color="transparent")
+        after.grid(row=1, column=0, columnspan=2, sticky="w", padx=16,
+                   pady=(0, 12))
+        ctk.CTkLabel(after, text="Results", font=(UI_FONT, 12, "bold"),
+                     text_color=TEXT_MUTED).grid(row=0, column=0,
+                                                 padx=(0, 10))
+        self._export_btn = _ghost_button(
+            after, "📋  Restore report", command=self._export, width=140,
+            state="disabled")
+        self._export_btn.grid(row=0, column=1, padx=(0, 6))
+        _ToolTip(self._export_btn,
+                 "Save the full HTML report of the last restore: every node, "
+                 "every element, every error.")
+        self._explain_btn = _ghost_button(
+            after, "🛟  Explain errors", command=self._show_errors_dialog,
+            width=140, state="disabled")
+        self._explain_btn.grid(row=0, column=2, padx=(0, 6))
+        _ToolTip(self._explain_btn,
+                 "Plain-English explanations of every failure — what it "
+                 "means, why it happened, what to do, and how to copy the "
+                 "error to send to support.")
+        self._gap_btn = _ghost_button(
+            after, "🧩  Gap report", command=self._export_gap_report,
+            width=124, state="disabled")
+        self._gap_btn.grid(row=0, column=3, padx=(0, 6))
+        _ToolTip(self._gap_btn,
+                 "Item-by-item reconciliation of the last restore, one tab "
+                 "per element (Exclusions, Blocklist, Firewall Rules, …). "
+                 "Each tab lists every item that WAS restored and every item "
+                 "that was NOT — by name, with the reason. Export as Excel "
+                 "(one worksheet per element), tabbed HTML or JSON.")
+        self._gap_csv_btn = _ghost_button(
+            after, "⬇  CSV", command=self._export_gap_csv, width=76,
+            state="disabled")
+        self._gap_csv_btn.grid(row=0, column=4)
+        _ToolTip(self._gap_csv_btn,
+                 "The gap report as one flat, filterable CSV row per item.")
+        self._after_row = after
+
+    def _build_results(self):
+        wrap = ctk.CTkFrame(self, fg_color="transparent")
+        wrap.grid(row=4, column=0, sticky="nsew", padx=20, pady=(2, 14))
+        wrap.grid_columnconfigure(0, weight=1)
+        wrap.grid_rowconfigure(1, weight=1)
+        self._results_wrap = wrap
+        bar = ctk.CTkFrame(wrap, fg_color="transparent")
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self._result_tabs = {}
+        for key, text, width in (("progress", "Progress", 100),
+                                 ("compare", "Backup vs destination", 180)):
+            tab = ctk.CTkButton(bar, text=text, width=width, height=30,
+                                corner_radius=theme.RADIUS_MD, border_width=1,
+                                font=(UI_FONT, 12, "bold"),
+                                command=lambda k=key: self._show_results(k))
+            # Switching tabs must keep working while a restore runs.
+            tab._busy_exempt = True
+            tab.pack(side="left", padx=(0, 6))
+            self._result_tabs[key] = tab
+        self._results_hint = ctk.CTkLabel(bar, text="", font=(UI_FONT, 11),
+                                          text_color=TEXT_FAINT)
+        self._results_hint.pack(side="left", padx=(8, 0))
+        host = ctk.CTkFrame(wrap, fg_color="transparent")
+        host.grid(row=1, column=0, sticky="nsew")
+        host.grid_columnconfigure(0, weight=1)
+        host.grid_rowconfigure(0, weight=1)
+        self.ptable = ProgressTable(
+            host, height=220,
+            empty_text="Nothing restored yet — progress shows here, site by "
+                       "site, once you click Restore.")
+        self.ptable.grid(row=0, column=0, sticky="nsew")
+        self.diff_panel = DiffPanel(host)
+        self.diff_panel.grid(row=0, column=0, sticky="nsew")
+        self._results_tab = None
+        self._show_results("progress")
+
+    def _show_results(self, key):
+        if self._advanced_open:
+            self._set_advanced(False)
+        if key == self._results_tab:
+            return
+        self._results_tab = key
+        for name, pane in (("progress", self.ptable),
+                           ("compare", self.diff_panel)):
+            _grid_visible(pane, name == key)
+        for name, tab in self._result_tabs.items():
+            on = name == key
+            _configure_changed(
+                tab, fg_color=BRAND if on else theme.GHOST,
+                hover_color=BRAND_HOVER if on else theme.GHOST_HOVER,
+                text_color="#FFFFFF" if on else TEXT_MUTED,
+                border_color=BRAND if on else BORDER)
+        _configure_changed(self._results_hint, text=_RESULT_HINTS[key])
+
+    # ── screen state ───────────────────────────────────────────────────
+
+    def _toggle_advanced(self):
+        self._set_advanced(not self._advanced_open)
+
+    def _set_advanced(self, open_):
+        self._advanced_open = bool(open_)
+        self._mangle_collapsed = not self._advanced_open
+        _grid_visible(self._adv_frame, self._advanced_open)
+        # The options need the room; the results come back with Fewer options.
+        _grid_visible(self._results_wrap, not self._advanced_open)
+        self._paint_advanced_toggle()
+
+    def _paint_advanced_toggle(self):
+        if self._advanced_open:
+            text = "▾  Fewer options"
+        else:
+            picked = sum(1 for v in self.restore_vars.values() if v.get())
+            text = (f"▸  More options  ·  elements {picked}/"
+                    f"{len(self.restore_vars)}  ·  rename  ·  defaults & "
+                    "licenses")
+        _configure_changed(self._adv_btn, text=text)
+
+    def _set_step(self, key, state):
+        if self._badge_state.get(key) == state:
+            return
+        self._badge_state[key] = state
+        badge, glyph, card, num = self._badges[key]
+        fill, mark, ink, edge = _STEP_LOOK[state]
+        badge.configure(fg_color=fill)
+        glyph.configure(text=mark or str(num), text_color=ink)
+        card.configure(border_color=edge)
+
+    def _schedule_scope_summary(self, *_):
+        if self._summary_job is not None:
+            try:
+                self.after_cancel(self._summary_job)
+            except Exception:
+                pass
+        self._summary_job = self.after(150, self._update_scope_summary)
+
+    def _update_scope_summary(self):
+        """Recompute the 'what will be restored' line from the fields, levels
+        and elements — the same scope the restore itself will use — and arm
+        or disarm Restore to match."""
+        self._summary_job = None
+        ok, count, color = False, 0, TEXT_MUTED
+        if self._load_state == "loading":
+            text = "Reading the backup…"
+        elif not self.backup_data:
+            text = _SCOPE_IDLE_TEXT
+        else:
+            levels = {k: v.get() for k, v in self.restore_level_vars.items()}
+            scope = _restore_scope(self.backup_data, levels,
+                                   self._scope_filters(levels))
+            problem = _restore_scope_problem(self.backup_data, scope)
+            if problem:
+                text, color = "✕  " + problem.replace("\n\n", "\n"), ACCENT
+            else:
+                ok, count, color = True, len(scope["indices"]), TEXT
+                what = _describe_restore_scope(scope, len(self.backup_data))
+                if levels.get("global"):
+                    what = "Global settings · " + what
+                picked = sum(1 for v in self.restore_vars.values() if v.get())
+                if picked < len(self.restore_vars):
+                    what += f" · {picked} of {len(self.restore_vars)} elements"
+                text = "➜  " + what[:1].upper() + what[1:]
+        self._scope_ok, self._scope_count = ok, count
+        _configure_changed(self._scope_summary, text=text, text_color=color)
+        self._paint_advanced_toggle()
+        self._apply_state()
+
+    def _apply_state(self):
+        """Show, enable and label every control for where the operator is:
+        no backup → load one; loaded → Restore; running → Stop / Skip only;
+        finished → the results buttons."""
+        running = self._run_mode == "running"
+        finished = self._run_mode == "done"
+        ready = self._load_state == "ready" and bool(self.backup_data)
+        checkpoint = getattr(self, "_checkpoint", None) or {}
+        remaining = sum(1 for v in checkpoint.values()
+                        if v in ("cancelled", "error"))
+        failures = any(n.get("failed_items")
+                       for n in getattr(self, "_report_nodes", None) or [])
+        ledger = bool(getattr(self, "_item_ledger", None))
+
+        _configure_changed(self._browse_btn,
+                           **(_GHOST_STYLE if ready else _PRIMARY_STYLE))
+        self._set_step("backup", {"ready": "done", "error": "error"}.get(
+            self._load_state, "active"))
+        _grid_visible(self._secret_row, ready and self._nsec > 0)
+        self._set_step("scope", "todo" if not ready
+                       else "done" if self._scope_ok else "error")
+
+        can_start = ready and self._scope_ok and not running
+        can_resume = finished and remaining > 0
+        glyph = "⚡" if self._auto_var.get() else "▶"
+        n = self._scope_count
+        # Filled green only when Restore is the next step; disabled, or with
+        # Resume on offer, it steps back to an outline.
+        _configure_changed(
+            self._start_btn,
+            text=(f"{glyph}  Restore {n:,} node{'' if n == 1 else 's'}"
+                  if can_start else f"{glyph}  Restore"),
+            state="normal" if can_start else "disabled",
+            **(_GO_STYLE if can_start and not can_resume
+               else _GHOST_STYLE))
+        _grid_visible(self._start_btn, not running)
+        _grid_visible(self._stop_btn, running)
+        _grid_visible(self._skip_btn, running)
+        _grid_visible(self._resume_btn, can_resume)
+        if can_resume:
+            _configure_changed(self._resume_btn, state="normal",
+                               text=f"↻  Resume ({remaining} left)")
+        checks = ready and not running and not can_resume
+        _grid_visible(self._preflight_btn, checks)
+        _grid_visible(self._preview_btn, checks)
+        _grid_visible(self._options_row, not running)
+        _grid_visible(self.progress, running or finished)
+        _grid_visible(self._after_row, finished)
+        if finished:
+            _configure_changed(self._export_btn, state="normal")
+            _grid_visible(self._explain_btn, failures)
+            _configure_changed(self._explain_btn,
+                               state="normal" if failures else "disabled")
+            for btn in (self._gap_btn, self._gap_csv_btn):
+                _grid_visible(btn, ledger)
+                _configure_changed(btn,
+                                   state="normal" if ledger else "disabled")
+        _configure_changed(self._console_menu,
+                           state="disabled" if running else "normal")
+
+        if running:
+            step = "active"
+        elif finished and self._run_failed:
+            step = "error"
+        elif finished and (remaining or failures
+                           or getattr(self, "_cancelled", False)):
+            step = "warn"
+        elif finished:
+            step = "done"
+        else:
+            step = "active" if can_start else "todo"
+        self._set_step("run", step)
+
+    def reset_view(self):
+        """Back to the first-open look, after Reset All emptied the fields."""
+        self._load_state = "ready" if self.backup_data else "empty"
+        if not self.backup_data:
+            self._nsec = 0
+            _configure_changed(self.info_lbl, text=_NO_BACKUP_TEXT,
+                               text_color=TEXT_MUTED)
+        self._run_mode = "idle"
+        self._run_failed = False
+        self.progress.set(0)
+        self._update_scope_summary()
+
+    def _load_typed_path(self):
+        path = self.file_entry.get().strip().strip("\"'")
+        if path and self._run_mode != "running":
+            self._load_file(os.path.expanduser(path))
 
     def _tick_timer(self):
         if not self._timer_running:
@@ -4692,17 +5816,60 @@ class RestorePage(ctk.CTkFrame):
         self.after(500, self._tick_timer)
 
     def _toggle_restore_global(self):
-        """When Global is checked, hide scope filters and elements."""
+        """When Global is checked, hide scope filters."""
         is_global = self.restore_level_vars["global"].get()
         for w in self._restore_scope_widgets:
             if is_global:
                 w.grid_remove()
             else:
                 w.grid()
-        if is_global:
-            self._restore_el_frame.grid_remove()
-        else:
-            self._restore_el_frame.grid()
+        _grid_visible(self._global_note, is_global)
+        self._schedule_scope_summary()
+
+    def _choose_restore_sites(self):
+        """Tick the site(s) to restore from the loaded backup file; the picks
+        go into the Site field, comma-separated, in backup order."""
+        if not self.backup_data:
+            messagebox.showinfo("No backup loaded",
+                                "Load a backup file first — the list of "
+                                "sites comes from it.")
+            return
+        sites = _backup_sites(self.backup_data, self.restore_acct.get())
+        if not sites:
+            messagebox.showinfo("No sites in this backup",
+                                "This backup holds no site or group nodes.")
+            return
+        rows = [(s["name"], s["name"],
+                 f"{', '.join(s['accounts'])} · {s['groups']} group(s)")
+                for s in sites]
+
+        def fetch(query, limit):
+            q = _norm_name(query)
+            return [r for r in rows if not q or q in _norm_name(r[1])
+                    or q in _norm_name(r[2])][:limit]
+
+        current = self.restore_site.get()
+        chosen = []
+        if _split_scope_names(current):
+            hit, _missing = _match_scope_names([s["name"] for s in sites],
+                                               current)
+            chosen = [sites[i]["name"] for i in hit]
+        from agent_migrator import _ChoiceDialog
+        picked = _ChoiceDialog(
+            self, "Sites to restore", fetch, chosen=chosen, noun="site",
+            source="this backup",
+            note="Only the ticked sites and their groups are restored (plus "
+                 "their account, if Accounts is ticked) — no other site or "
+                 "account is touched. Tick none to restore every site.").ask()
+        if picked is None:
+            return
+        picked = set(picked)
+        text = _join_scope_names(s["name"] for s in sites
+                                 if s["name"] in picked)
+        self.restore_site.delete(0, "end")
+        if text:
+            self.restore_site.insert(0, text)
+        self._update_scope_summary()
 
     def _update_indicator(self):
         choice = self._console_var.get()
@@ -4724,22 +5891,14 @@ class RestorePage(ctk.CTkFrame):
     def on_show(self):
         self._update_indicator()
         self._auto_load_latest()
+        self._update_scope_summary()
 
     def _open_set_defaults(self):
         path = self.file_entry.get().strip() or getattr(self.app, "_last_backup_path", None)
         SetDefaultsDialog(self, path, on_save=lambda p: self._load_file(p))
 
     def _toggle_mangle(self):
-        if self._mangle_collapsed:
-            self._mangle_collapsed = False
-            self._mangle_content.pack(fill="x", padx=4, pady=(0, 4))
-            self._mangle_toggle_btn.configure(
-                text="▼ Structure Operations (optional)")
-        else:
-            self._mangle_collapsed = True
-            self._mangle_content.pack_forget()
-            self._mangle_toggle_btn.configure(
-                text="▶ Structure Operations (optional)")
+        self._set_advanced(self._mangle_collapsed)
 
     def _auto_load_latest(self):
         """Auto-load the most recent backup JSON. Checks:
@@ -4789,11 +5948,10 @@ class RestorePage(ctk.CTkFrame):
             candidates.extend(glob.glob(os.path.join(d, "*", "s1-backup-*.json")))
             candidates.extend(glob.glob(os.path.join(d, "*", "*backup*.json")))
 
-        unique = list(set(f for f in candidates
-                          if os.path.isfile(f) and f.endswith(".json")))
-        if not unique:
+        latest = _latest_backup_file(
+            f for f in candidates if os.path.isfile(f) and f.endswith(".json"))
+        if not latest:
             return
-        latest = max(unique, key=os.path.getmtime)
         self._load_file(latest)
         cli_log(f"Auto-loaded: {latest}", "info")
 
@@ -4806,16 +5964,20 @@ class RestorePage(ctk.CTkFrame):
         thread once it's done."""
         self.file_entry.delete(0, "end")
         self.file_entry.insert(0, fp)
-        self.info_lbl.configure(text=f"Loading {os.path.basename(fp)}…")
+        self._load_seq = getattr(self, "_load_seq", 0) + 1
+        seq = self._load_seq
+        self._load_state = "loading"
+        _configure_changed(self.info_lbl,
+                           text=f"Reading {os.path.basename(fp)}…",
+                           text_color=INFO)
+        self._update_scope_summary()
 
         def do():
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            types = {}
-            for node in data:
-                t = node.get("type", "?")
-                types[t] = types.get(t, 0) + 1
-            summary = ", ".join(f"{v} {k}(s)" for k, v in types.items())
+            problem = _backup_file_problem(data)
+            if problem:
+                raise ValueError(problem)
             nsec = 0
             try:
                 from export_utils import count_backup_secrets
@@ -4828,12 +5990,13 @@ class RestorePage(ctk.CTkFrame):
                 rep = check_backup_integrity(data)
             except Exception:
                 pass
-            return {"data": data, "summary": summary, "nsec": nsec,
-                    "rep": rep, "fp": fp}
+            return {"data": data, "nsec": nsec, "rep": rep}
 
         def done(res):
+            if seq != self._load_seq:
+                return
             self.backup_data = res["data"]
-            n = len(self.backup_data)
+            self._load_state = "ready"
             # Populate the diff panel so the operator can browse the
             # backup contents *before* clicking restore.
             if hasattr(self, "diff_panel"):
@@ -4841,14 +6004,14 @@ class RestorePage(ctk.CTkFrame):
                     self.diff_panel.set_backup(self.backup_data)
                 except Exception:
                     pass
-            note = ""
-            nsec = res["nsec"]
-            if hasattr(self, "_redact_btn"):
-                self._redact_btn.configure(
-                    state="normal" if nsec else "disabled")
+            note, color = "", TEXT
+            self._nsec = nsec = res["nsec"]
             if nsec:
-                note = (f"   ⚠ contains {nsec} secret value(s) — use "
-                        f"'Redacted Copy' before sharing")
+                _configure_changed(
+                    self._secret_lbl,
+                    text=f"⚠  Holds {nsec} secret value"
+                         f"{'' if nsec == 1 else 's'} (passwords, tokens, "
+                         f"keys)")
             rep = res["rep"]
             if rep is not None:
                 for w in rep["warnings"]:
@@ -4856,16 +6019,26 @@ class RestorePage(ctk.CTkFrame):
                 for e in rep["errors"]:
                     cli_log(f"backup integrity ERROR: {e}", "error")
                 if not rep["ok"]:
-                    note += "   ❌ integrity errors — see log"
+                    note, color = "   ❌ integrity errors — see the log", WARN
                 elif rep["warnings"]:
-                    note += f"   ⚠ {len(rep['warnings'])} integrity warning(s)"
-            self.info_lbl.configure(
-                text=f"Loaded {n} nodes: {res['summary']}  "
-                     f"({os.path.basename(res['fp'])}){note}")
+                    note = (f"   ⚠ {len(rep['warnings'])} integrity "
+                            f"warning(s) — see the log")
+            _configure_changed(
+                self.info_lbl,
+                text=f"✓  {_backup_overview(self.backup_data)}{note}",
+                text_color=color)
+            self._update_scope_summary()
 
         def fail(e):
-            self.info_lbl.configure(text=f"Error: {e}")
+            if seq != self._load_seq:
+                return
             self.backup_data = None
+            self._load_state = "error"
+            self._nsec = 0
+            _configure_changed(self.info_lbl,
+                               text=f"✕  {_load_error_text(e)}",
+                               text_color=ACCENT)
+            self._update_scope_summary()
 
         run_async(self, do, done, fail)
 
@@ -5189,6 +6362,13 @@ class RestorePage(ctk.CTkFrame):
             return
         if getattr(self, "_previewing", False):
             return
+        levels = {k: v.get() for k, v in self.restore_level_vars.items()}
+        scope = _restore_scope(self.backup_data, levels,
+                               self._scope_filters(levels))
+        problem = _restore_scope_problem(self.backup_data, scope)
+        if problem:
+            messagebox.showwarning("Check the restore scope", problem)
+            return
         self._previewing = True
         self._preview_btn.configure(state="disabled")
         self._status_lbl.configure(text="Previewing…", text_color=INFO)
@@ -5202,7 +6382,8 @@ class RestorePage(ctk.CTkFrame):
             total_create = total_exists = 0
             missing_scopes = 0
             per_element = {}  # cat -> [create, exists]
-            for idx, node in enumerate(self.backup_data):
+            for idx in scope["indices"]:
+                node = self.backup_data[idx]
                 ntype = node.get("type", "?")
                 dest_id, found = self._resolve_dest_id_readonly(api, node)
                 bk_sum = _summarize_node_payload(node.get("data") or {})
@@ -5242,7 +6423,7 @@ class RestorePage(ctk.CTkFrame):
                     total_exists += exists
             return {"create": total_create, "exists": total_exists,
                     "missing": missing_scopes, "per_element": per_element,
-                    "nodes": len(self.backup_data)}
+                    "nodes": len(scope["indices"])}
 
         def done(res):
             self._previewing = False
@@ -5269,6 +6450,7 @@ class RestorePage(ctk.CTkFrame):
             self._operation_log.extend(lines)
             cli_log("Dry-run preview complete (nothing was written).",
                     "success")
+            self._show_results("compare")
             messagebox.showinfo("Preview — Dry Run (no changes made)",
                                 "\n".join(lines))
 
@@ -5377,6 +6559,7 @@ class RestorePage(ctk.CTkFrame):
             text=f"Renamed {count} node(s)", text_color=GREEN)
         cli_log(f"Mangle rename: '{source}' → '{target}' — "
                 f"{count} nodes updated", "success")
+        self._update_scope_summary()
 
     def _set_target_context(self):
         """Set restoreToContext in all backup nodes to the selected console."""
@@ -5459,45 +6642,22 @@ class RestorePage(ctk.CTkFrame):
         # Element (and the OUTPUT drawer) stay clickable. The buttons this page
         # owns are exempted here and managed explicitly just below.
         self.app.set_busy(running, allow=(
-            self._start_btn, self._auto_btn, self._resume_btn,
+            self._start_btn, self._resume_btn,
             self._stop_btn, self._skip_btn, self._export_btn,
             self._explain_btn, self._gap_btn, self._gap_csv_btn))
         if running:
-            self._start_btn.configure(state="disabled")
-            self._auto_btn.configure(state="disabled")
-            self._resume_btn.configure(state="disabled")
+            self._run_mode = "running"
+            self._run_failed = False
             self._stop_btn.configure(state="normal")
             self._skip_btn.configure(state="normal", text=_SKIP_DEFAULT)
-            self._export_btn.configure(state="disabled")
-            self._explain_btn.configure(state="disabled")
-            self._gap_btn.configure(state="disabled")
-            self._gap_csv_btn.configure(state="disabled")
             self._status_lbl.configure(text="Restore running…",
                                         text_color=INFO)
+            self._show_results("progress")
         else:
-            self._start_btn.configure(state="normal")
-            self._auto_btn.configure(state="normal")
+            self._run_mode = "done"
             self._stop_btn.configure(state="disabled")
             self._skip_btn.configure(state="disabled", text=_SKIP_DEFAULT)
-            self._export_btn.configure(state="normal")
-            # enable Explain Errors only if the last run produced any
-            has_failures = any(
-                n.get("failed_items")
-                for n in getattr(self, "_report_nodes", []))
-            self._explain_btn.configure(
-                state="normal" if has_failures else "disabled")
-            gap_state = ("normal" if getattr(self, "_item_ledger", [])
-                         else "disabled")
-            self._gap_btn.configure(state=gap_state)
-            self._gap_csv_btn.configure(state=gap_state)
-            # enable Resume if the run was incomplete (cancelled / had errors)
-            cp = getattr(self, "_checkpoint", {})
-            has_remaining = any(
-                v in ("cancelled", "error")
-                for v in cp.values())
-            self._resume_btn.configure(
-                state="normal" if has_remaining else "disabled",
-                fg_color=WARN if has_remaining else "#555")
+        self._apply_state()
 
     def _open_structure_ops_for_rename(self, src_name, dst_name=""):
         """Expand Structure Operations and prefill the Mangle Rename fields so
@@ -5555,10 +6715,11 @@ class RestorePage(ctk.CTkFrame):
             f"{self._console_var.get()} console.\n\n"
             f"Destination account(s): {dest_list}\n\n"
             "If you meant to restore INTO an existing account, you likely need "
-            "to Mangle Rename it first (Structure Operations) so the names "
-            f'match — otherwise a NEW account named "{src}" will be created.\n\n'
-            "Open Structure Operations to rename now?\n\n"
-            "  • Yes — open Structure Operations (Mangle Rename)\n"
+            "to rename it in the backup first (More options → Rename in the "
+            f'backup) so the names match — otherwise a NEW account named '
+            f'"{src}" will be created.\n\n'
+            "Open the rename tools now?\n\n"
+            "  • Yes — open Rename in the backup\n"
             "  • No — continue and create it as-is\n"
             "  • Cancel — stop")
         ans = messagebox.askyesnocancel("Account name mismatch", msg)
@@ -5568,12 +6729,23 @@ class RestorePage(ctk.CTkFrame):
             self._open_structure_ops_for_rename(src, dst_preview)
             cli_log(
                 f'Restore paused — account "{src}" isn\'t on the destination. '
-                "Mangle Rename it in Structure Operations, then Restore again.",
+                "Rename it under More options → Rename in the backup, then "
+                "Restore again.",
                 "warning")
             return "abort"
         return "ok"                             # No → continue as-is
 
-    def _start_restore(self, auto=False):
+    def _scope_filters(self, levels):
+        """The Account / Site / Group fields as restore filters, for Restore,
+        Auto Restore, Resume and Preview alike. The fields are hidden while
+        Global is ticked, and a hidden field must not narrow the run."""
+        if levels.get("global"):
+            return {"account": "", "site": "", "group": ""}
+        return {"account": self.restore_acct.get().strip(),
+                "site": self.restore_site.get().strip(),
+                "group": self.restore_group.get().strip()}
+
+    def _start_restore(self, auto=False, confirm=None):
         api = self._get_restore_api()
         if not api:
             return
@@ -5596,7 +6768,20 @@ class RestorePage(ctk.CTkFrame):
             cli_log(f"Auto-set target context → {ctx.name} ({choice})", "info")
 
         levels = {k: v.get() for k, v in self.restore_level_vars.items()}
-        if not auto:
+        scope_filters = self._scope_filters(levels)
+        scope = _restore_scope(self.backup_data, levels, scope_filters)
+        problem = _restore_scope_problem(self.backup_data, scope)
+        if problem:
+            self._is_resuming = False
+            cli_log(f"Restore not started — {problem.splitlines()[0]}",
+                    "error")
+            messagebox.showwarning("Check the restore scope", problem)
+            return
+        scope_line = _describe_restore_scope(scope, len(self.backup_data))
+        target = self._console_var.get()
+        if confirm is None:
+            confirm = not auto
+        if confirm:
             # Guard: if none of the backup's account names exist on the
             # destination, the operator probably forgot to Mangle Rename the
             # account (Structure Operations). Offer to jump there.
@@ -5610,28 +6795,22 @@ class RestorePage(ctk.CTkFrame):
                         "Are you sure you want to include Global?"):
                     return
 
-            target = self._console_var.get()
+            unattended = (
+                "Unattended: it won't stop to ask — missing accounts are "
+                "created and every prompt is answered for you.\n\n"
+                if auto else "")
             if not messagebox.askyesno(
                     "⚠️ Confirm Restore",
                     f"This will OVERWRITE settings on the {target} console.\n\n"
+                    f"Restoring: {scope_line}\n\n{unattended}"
                     "This is potentially destructive. Only do this on a target "
                     "you intend to configure.\n\nProceed?"):
                 return
-        else:
-            target = self._console_var.get()
-            cli_log(f"⚡ Auto Restore — no prompts, creating everything "
-                    f"on {target}.", "cmd")
+        if auto:
+            cli_log(f"⚡ Auto Restore — no prompts, on {target}. "
+                    f"Restoring: {scope_line}", "cmd")
 
         elements = [k for k, v in self.restore_vars.items() if v.get()]
-        # In auto mode, clear name filters so nothing is skipped
-        if auto:
-            scope_filters = {"account": "", "site": "", "group": ""}
-        else:
-            scope_filters = {
-                "account": self.restore_acct.get().strip().lower(),
-                "site": self.restore_site.get().strip().lower(),
-                "group": self.restore_group.get().strip().lower(),
-            }
         import time as _time
         self.ptable.clear()
         self._operation_log = []
@@ -5665,7 +6844,9 @@ class RestorePage(ctk.CTkFrame):
             "dest_url": api.base_url,
             "dest_console": target,
             "customer": (ctx.name if ctx else target),
-            "total_nodes": len(self.backup_data),
+            "total_nodes": len(scope["indices"]),
+            "backup_nodes": len(self.backup_data),
+            "scope": scope_line,
             "elements": elements,
             "filters": scope_filters,
             "levels": levels,
@@ -5685,7 +6866,9 @@ class RestorePage(ctk.CTkFrame):
         self._timer_running = True
         self._tick_timer()
         self._set_ui_running(True)
-        cli_log(f"Starting restore to {target} console ({len(self.backup_data)} nodes)…", "cmd")
+        cli_log(f"Starting restore to {target} console "
+                f"({len(scope['indices'])} of {len(self.backup_data)} "
+                f"nodes)…", "cmd")
 
         # Snapshot the destination's current state before overwriting it, so
         # a bad restore can be rolled back. Skipped on resume (the snapshot was
@@ -5789,6 +6972,7 @@ class RestorePage(ctk.CTkFrame):
         def fail(e):
             api.disable_scope_cache()
             self._timer_running = False
+            self._run_failed = True
             self._set_ui_running(False)
             self._timer_lbl.configure(text="✗ failed", text_color=ACCENT)
             self._status_lbl.configure(text=f"Error: {str(e)[:40]}",
@@ -6006,15 +7190,14 @@ class RestorePage(ctk.CTkFrame):
         def log(msg):
             self.after(0, lambda: self.log.log(msg))
 
-        if levels is None:
-            levels = {"global": True, "accounts": True, "sites": True, "groups": True}
-        if scope_filters is None:
-            scope_filters = {}
-        acct_f = scope_filters.get("account", "")
-        site_f = scope_filters.get("site", "")
-        group_f = scope_filters.get("group", "")
-
-        total = len(backup)
+        run_scope = _restore_scope(backup, levels, scope_filters)
+        in_scope = run_scope["indices"]
+        total = len(in_scope)
+        if total < len(backup):
+            self._operation_log.append(
+                f"Scope: {_describe_restore_scope(run_scope, len(backup))} — "
+                f"the other {len(backup) - total} node(s) are outside it "
+                f"and were not touched.")
 
         # ── Build a source-side saved-filter id→name map ──
         # Group payloads sometimes carry `filterId` but not `filterName`
@@ -6037,12 +7220,14 @@ class RestorePage(ctk.CTkFrame):
         self._src_filter_id_to_name = src_filter_names
         self._dest_filter_cache: dict[str, dict] = {}
 
-        # ── add all nodes as pending rows ──
-        for i, node in enumerate(backup):
+        # ── add the in-scope nodes as pending rows ──
+        for i in in_scope:
+            node = backup[i]
             ntype = node.get("type", "?")
             npath = node.get("path", "?")
             nid = f"r-{i}"
-            ui(lambda n=nid, p=npath, t=ntype: pt.add_node(n, p, t))
+            ui(lambda n=nid, p=npath, t=ntype, k=i + 1:
+               pt.add_node(n, p, t, num=k))
 
         import time as _time
         _time.sleep(0.1)  # let UI render
@@ -6054,7 +7239,8 @@ class RestorePage(ctk.CTkFrame):
 
         restored = 0
         skipped = 0
-        for i, node in enumerate(backup):
+        for pos, i in enumerate(in_scope):
+            node = backup[i]
             nid = f"r-{i}"
             ntype = node.get("type", "?")
             npath = node.get("path", "?")
@@ -6062,7 +7248,7 @@ class RestorePage(ctk.CTkFrame):
 
             # cancellation
             if self._cancelled:
-                for j in range(i, len(backup)):
+                for j in in_scope[pos:]:
                     ui(lambda n=f"r-{j}": pt.set_skipped(n, "cancelled"))
                     self._checkpoint[j] = "cancelled"
                 self._operation_log.append(
@@ -6072,12 +7258,12 @@ class RestorePage(ctk.CTkFrame):
             # ── Resume: skip nodes already completed in a previous run ──
             prev = checkpoint.get(i)
             if prev == "done":
-                ui(lambda n=nid: pt.set_skipped(n, "already done (resumed)"))
+                ui(lambda n=nid: pt.set_done(n, "done in the previous run"))
                 skipped += 1
                 self._checkpoint[i] = "done"
                 continue
 
-            ui(lambda v=(i+1)/total: self.progress.set(v * 0.95))
+            ui(lambda v=(pos + 1) / total: self.progress.set(v * 0.95))
 
             # ── skip expired/deleted ──
             obj = node.get(ntype, {}) if ntype in ("account", "site") else {}
@@ -6092,45 +7278,13 @@ class RestorePage(ctk.CTkFrame):
                     f"was restored")
                 continue
 
-            # ── level + name filter ──
-            level_map = {"global": "global", "account": "accounts",
-                         "site": "sites", "group": "groups"}
-            level_key = level_map.get(ntype, "")
-            if level_key and not levels.get(level_key):
-                ui(lambda n=nid: pt.set_skipped(n, "level unchecked"))
-                skipped += 1
-                self._checkpoint[i] = "skipped"
-                continue
-            # When restoring at global level or auto-creating accounts,
-            # the user wants a full migration — bypass name filters so
-            # everything is restored (filters are usually ticket-paste
-            # leftovers that don't apply to a global restore).
-            _bypass_filters = (levels.get("global")
-                               or getattr(self, "_auto_create_accounts", False))
-            if ntype == "account":
-                # Prefer npath (already updated by mangle-rename) over the
-                # nested name field which is NOT updated by mangle-rename.
-                nm = npath.strip("/").split("/")[0]
-                if acct_f and acct_f not in nm.lower() and not _bypass_filters:
-                    ui(lambda n=nid: pt.set_skipped(n, "filtered"))
-                    skipped += 1; self._checkpoint[i] = "skipped"; continue
-            elif ntype == "site":
-                nm = node.get("site", {}).get("name", "")
-                if site_f and site_f not in nm.lower() and not _bypass_filters:
-                    ui(lambda n=nid: pt.set_skipped(n, "filtered"))
-                    skipped += 1; self._checkpoint[i] = "skipped"; continue
-            elif ntype == "group":
-                nm = node.get("group", {}).get("name", "")
-                if group_f and group_f not in nm.lower() and not _bypass_filters:
-                    ui(lambda n=nid: pt.set_skipped(n, "filtered"))
-                    skipped += 1; self._checkpoint[i] = "skipped"; continue
-
             # ── resolve destination (auto-create if needed) ──
             ui(lambda n=nid: pt.set_running(n))
             # Keep the status label in sync with the real phase so it never
             # shows a stale "📸 Snapshot…" while the restore is running.
-            ui(lambda p=npath, x=i, t=total: self._status_lbl.configure(
-                text=f"Restoring {x+1}/{t}: {p}…", text_color=INFO))
+            ui(lambda n=nid: self._status_lbl.configure(
+                text=f"Restoring {pt.position_text(n)}"[:90] + "…",
+                text_color=INFO))
             ui(lambda n=nid: pt.set_detail(n, "resolving…"))
             # Follow the active node in the diff panel so the operator
             # always sees source-vs-dest for whatever is currently being
@@ -7866,7 +9020,7 @@ class RestorePage(ctk.CTkFrame):
             self._report_nodes.append(node_report)
 
         # ── Group ranking (must run after every group exists) ──
-        self._rerank_groups(api, backup)
+        self._rerank_groups(api, run_scope["rank_nodes"])
 
         self._operation_log.append(
             f"Total: {restored} restored, {skipped} skipped (of {total})")
@@ -10277,7 +11431,7 @@ class MigrationRunbookPage(ctk.CTkFrame):
          "Pick the scope + elements (or load a profile) and run the backup.",
          "backup"),
         ("Preview vs destination", "Restore to Dest",
-         "Load the backup and click 🔍 Preview vs Dest — a dry run showing "
+         "Load the backup and click 🔍 Preview changes — a dry run showing "
          "what would be created vs already exists. Nothing is written.", None),
         ("Restore to destination", "Restore to Dest",
          "With 📸 Snapshot first enabled (default), run the restore. The "

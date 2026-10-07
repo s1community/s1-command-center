@@ -33,7 +33,8 @@ Built with Python and CustomTkinter — modern dark-themed UI with real-time pro
 
 - **Dual Console Connections** — SOURCE + DESTINATION with auto-connect
 - **26 Element Backup/Restore** — Policy, exclusions, blocklist, firewall, STAR, tags, settings, and more
-- **Mangle Rename** — Rename accounts/sites in backup before restoring
+- **Guided restore** — Three steps (backup file → what to restore → restore) with a live line stating exactly what will be restored
+- **Rename in the backup** — Rename accounts/sites in backup before restoring
 - **Auto-create Sites & Groups** — Missing structures created automatically
 - **SKU Mismatch Detection** — Detects and fixes license bundle conflicts
 - **16 Operations Pages** — Full console management from one app

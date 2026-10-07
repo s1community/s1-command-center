@@ -686,6 +686,7 @@ class ConnectionsPage(ctk.CTkFrame):
             rp._operation_log = []
             rp._report_nodes = []
             rp._report_meta = {}
+            rp.reset_view()
 
         # clear output console
         self.app._clear_console()

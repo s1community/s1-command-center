@@ -44,14 +44,18 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Scope Filtering** — Backup specific accounts, sites, or groups by name
 - **Level Selection** — Choose to backup Global, Accounts, Sites, and/or Groups
 - **Collapsible Elements** — Select exactly which elements to include
-- **Live Progress Table** — Real-time status updates for each node being backed up
+- **Live Progress, site by site** — A card per site with its own count and bar, groups numbered within their site, and live status for each node
 - **Timer & Progress Bar** — Track backup duration and completion
 - **Stop Button** — Cancel a running backup at any time
 
 ### Restore
-- **Smart Auto-load** — Automatically loads the latest backup file
-- **Mangle Rename** — Rename accounts, sites, or groups in the backup before restoring
-- **Account-name guard** — Warns before restoring if the backup's account name isn't on the destination console and offers to jump to Structure Operations → Mangle Rename, so you don't accidentally create a brand-new account
+- **Three guided steps** — **1 Backup file → 2 What to restore → 3 Restore**, each with a badge that turns ✓ when it's done (or ! when something needs fixing). The next thing to do is the only filled button; Stop/Skip appear only while a restore runs and the results buttons only after one. A live line under the scope fields says exactly what will be restored (`Site: FAO-TEST · with its account: FAO — 4 of 7 backup node(s)`), and the button counts it: **▶ Restore 4 nodes**. Element choices, renaming and defaults & licenses sit under **More options**
+- **Smart Auto-load** — Automatically loads the latest backup file, passing over restore reports and other JSON that isn't a backup
+- **Backup-file check** — A restore report or any other non-backup JSON is turned away in plain words ("This is a restore report, not a backup") instead of failing with a Python error
+- **Restore exactly what you name** — Put one or several sites in the Site field (or tick them with **Choose…**, which lists the sites in the loaded backup) and only those sites and their groups are restored, plus their account when **Accounts** is ticked. No other site or account is resolved, listed or written; a name that isn't in the backup stops the restore before anything is touched, and the confirmation shows the exact scope
+- **Rename in the backup** (More options) — Rename accounts, sites, or groups in the backup before restoring
+- **Account-name guard** — Warns before restoring if the backup's account name isn't on the destination console and offers to open **Rename in the backup**, so you don't accidentally create a brand-new account
+- **Unattended** — A switch next to the Restore button: the run creates missing accounts and answers every prompt itself. You still confirm once before it starts
 - **Auto Target Context** — Automatically sets the restore target on start
 - **SKU Mismatch Detection** — Detects license bundle conflicts and offers to fix them automatically
 - **Duplicate Detection** — Identifies existing items and skips them (exclusions, blocklist, hashes, STAR rules, filters)
@@ -59,7 +63,7 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Group Ranking** — Preserves group priority order after restore
 - **Expired STAR Rules** — Automatically extends expired rule dates
 - **Expired/Deleted Skip** — Skips expired or deleted sites and accounts
-- **Live Progress Table** — Color-coded status for each node
+- **Progress, site by site** — A card per site with a done/total count and bar, groups numbered 1, 2, 3 within their site, a status line naming the site and group being restored, fold/unfold and **Show failed only**
 - **Detailed Error Reporting** — Shows exact API errors for every failed item
 
 ### Agent Migration
@@ -86,7 +90,7 @@ Moves the agents themselves between consoles, so each source group's endpoints l
   - Errors & warnings section
   - Collapsible full operation log
 - **JSON Export** — Structured data for programmatic analysis
-- **Export Log** — Available after restore completes
+- **📋 Restore report** — Appears under step 3 as soon as a restore finishes, next to **Explain errors**, **Gap report** and **CSV**
 - **Agent Migration Report** — The same dark-themed, self-contained HTML (plus Excel/CSV/JSON) for the agent live run, the match plan and the status report, so both the configuration migration *and* the agent migration hand back a proper report
 - **Interactive tables** — every table in every report is **searchable**, **sortable**, and deeply **filterable**: click a stat card (e.g. *Migrated*) to show only those rows, toggle colour-coded **status chips**, or pick from auto-generated **per-column dropdowns** (Site, OS, Group, …). A *Clear filters* button resets everything and the count reads *N of M*. Inline vanilla JS, no external assets, so the saved `.html` still works offline. After an export the app offers to **open the file** for you
 
@@ -123,7 +127,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.6.2 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.7.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -202,12 +206,10 @@ Navigate to **Backup Source**:
 
 ### 3. Restore to Destination
 
-Navigate to **Restore to Dest**:
-1. The latest backup file loads automatically
-2. Expand **Structure Operations** if you need to rename accounts/sites
-3. Set restore scope and filters
-4. Click **▶ Restore Now**
-5. Click **Export Log** for a detailed HTML report
+Navigate to **Restore to Dest** — three numbered steps, top to bottom:
+1. **Backup file** — the latest backup loads automatically (or **Browse…**)
+2. **What to restore** — leave the fields blank for everything, or name accounts, sites or groups (**Choose…** lists the backup's sites). The line underneath states exactly what will be restored. Renaming and element choices are under **More options**
+3. **Restore** — click **▶ Restore N nodes**, then **📋 Restore report** for the detailed HTML report
 
 ### 4. Move the Agents
 
@@ -384,6 +386,17 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v2.7.0 — 2026-10-07
+#### Changed
+- **A new Restore screen** — three numbered steps (Backup file → What to restore → Restore) instead of three rows of buttons. One filled button at a time, controls that appear only when they apply, a live "what will be restored" line, the Restore button names the node count, **⚡ Unattended** is a switch on the one Restore button (it still confirms once), advanced options are folded under **More options**, and Progress / Backup vs destination are tabs.
+- **Progress, site by site** — a card per site (plus the account and global settings) with its own done/total count and bar; groups are numbered 1, 2, 3 within their site and the status line says *site 3 of 4 · FAO-ROME — group 2 of 3*. Cards fold and unfold, **Show failed only** hides what went through, and nodes a Resume passes over show as done. Backup uses the same view.
+- **Big restores stay responsive** — the progress list is drawn rather than built from widgets: 600+ nodes appear in a fraction of a second instead of tens of seconds.
+#### Fixed
+- **Restoring one site restored others too** — a named site (or several, comma-separated or ticked with **Choose…**) now restores only those sites and their groups, plus their own account when Accounts is ticked; Auto Restore and Resume no longer ignore the fields.
+- **Loading a restore report as a backup** failed with "'str' object has no attribute 'get'" — it is now named for what it is, and auto-load skips non-backup files.
+#### Tests
+- 692 total (+90): the new Restore screen, restoring only the named sites, and the site-by-site progress (numbering, counts, folding, failed-only filter, status line, resumed nodes).
 
 ### v2.6.2 — 2026-09-23
 #### Added

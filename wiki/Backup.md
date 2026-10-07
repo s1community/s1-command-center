@@ -49,15 +49,17 @@ The elements section is collapsible. Use **Select All / Deselect All** for quick
 
 ## Progress Table
 
-Each node gets a row with live status:
+Nodes are grouped into a card per site; the account and global settings get cards of their own. Each card shows a done/total count and a small bar, groups are numbered 1, 2, 3 inside their site, and a strip on top totals the run. Click a card to fold or unfold it (**Fold all** does every card); when something failed, **Show failed only** hides everything that went through. Hover a row for its full path and the whole message.
+
+Each node's row carries a live status:
 
 | Status | Color | Meaning |
 |--------|-------|---------|
-| `pending` | Gray | Queued, not yet started |
+| `waiting` | Gray | Queued, not yet started |
 | `running` | Blue | Currently reading from API |
 | `done` | Green | Completed, with element summary |
-| `error` | Red | Failed with error message |
-| `skip` | Dark gray | Skipped (level unchecked or cancelled) |
+| `failed` | Red | Failed with error message |
+| `skipped` | Dark gray | Skipped (level unchecked or cancelled) |
 
 ## Output
 

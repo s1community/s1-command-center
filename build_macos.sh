@@ -55,19 +55,18 @@ pyinstaller \
 echo "Removing quarantine flags..."
 xattr -cr "dist/S1 Command Center.app"
 
-# create DMG staging folder with app + installer script
+# create DMG staging folder: drag-to-Applications layout, same as CI
 echo "Preparing DMG contents..."
 DMG_STAGE="dist/dmg_stage"
 rm -rf "$DMG_STAGE"
 mkdir -p "$DMG_STAGE"
 cp -R "dist/S1 Command Center.app" "$DMG_STAGE/"
+ln -s /Applications "$DMG_STAGE/Applications"
 
-# Copy the installer script + README from the canonical source files.
-# Keeping them in installer/ on disk means both this script and CI get
+# Copy the README from the canonical source file.
+# Keeping it in installer/ on disk means both this script and CI get
 # byte-for-byte identical contents — important so macOS's content-hash
 # Gatekeeper approval ("Open Anyway") stays valid across rebuilds.
-cp "installer/Install & Launch.command" "$DMG_STAGE/Install & Launch.command"
-chmod +x "$DMG_STAGE/Install & Launch.command"
 cp "installer/README.txt" "$DMG_STAGE/README.txt"
 
 # create DMG
@@ -90,6 +89,6 @@ echo "  DMG: dist/S1-Command-Center.dmg"
 echo ""
 echo "  DMG contains:"
 echo "    • S1 Command Center.app"
-echo "    • Install & Launch.command (quarantine fix)"
+echo "    • Applications shortcut (drag the app onto it)"
 echo "    • README.txt"
 echo "═══════════════════════════════════════════════════"

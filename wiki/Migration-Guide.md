@@ -106,11 +106,11 @@ The backup captures all 26 element types, including:
 
 ### Step 3 — Restore to the Destination Console
 
-1. Navigate to **Restore to Dest** — the latest backup file loads automatically
-2. Set restore scope and filters
-3. If source and destination account/site names differ, use **Mangle Rename** to map them
-4. Click **▶ Restore Now**
-5. After completion, click **Export Log** to save a detailed HTML report
+1. Navigate to **Restore to Dest** — step 1, the latest backup file loads automatically
+2. Step 2 — set the restore scope; the line under the fields states exactly what will be restored
+3. If source and destination account/site names differ, use **More options → Rename in the backup** to map them
+4. Step 3 — click **▶ Restore N nodes**
+5. After completion, click **📋 Restore report** to save a detailed HTML report
 
 ### What Happens During Restore (Automatic)
 
@@ -228,7 +228,7 @@ S1 Command Center includes a dedicated **MIGRATION** tab that compares the live 
 
 ### Manual Validation Checklist
 
-1. **Review the Restore Report** — click **Export Log** after restore and check for:
+1. **Review the Restore Report** — click **📋 Restore report** after restore and check for:
    - Summary statistics (nodes restored, skipped, errors, elements created)
    - The **Failed Items Table** listing every un-restored item with its name, value, and exact API error
    - Errors & warnings section

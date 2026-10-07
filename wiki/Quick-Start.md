@@ -49,11 +49,11 @@ The progress table shows real-time status for each node (account → site → gr
 
 Navigate to **Restore to Dest**:
 
-1. The latest backup file loads automatically
-2. Set restore scope and filters
-3. If needed, use **Mangle Rename** to map source names → destination names
-4. Click **▶ Restore Now**
-5. Click **Export Log** for a professional HTML report
+1. **Backup file** — the latest backup file loads automatically
+2. **What to restore** — set the scope; the line under the fields states exactly what will be restored
+3. If needed, use **More options → Rename in the backup** to map source names → destination names
+4. **Restore** — click **▶ Restore N nodes**
+5. Click **📋 Restore report** for a professional HTML report
 
 ### Automatic Handling
 
