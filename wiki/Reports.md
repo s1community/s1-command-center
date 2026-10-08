@@ -11,6 +11,28 @@ S1 Command Center generates professional reports after backup/restore operations
 | **JSON** | `.json` | Programmatic processing, automation |
 | **CSV** | `.csv` | Unified Alerts export |
 
+## Full Migration Report (HTML)
+
+**📊 Full report** in the Restore screen's results (also offered by the pop-up when a restore finishes) saves the whole migration as one interactive HTML file, arranged in tabs:
+
+| Tab | What it answers |
+|-----|-----------------|
+| **Overview** | The verdict and success rate, source → backup → destination, headline numbers (click one to jump to its tab), item and scope outcome charts, key findings, a timeline of the backup, pre-flight, preview, each restore run and validation, a per-element bar chart, and a plain-text summary with **Copy summary** for an email or ticket |
+| **Backup** | How the backup went: file (size, modified, SHA-256), when, how long, who ran it, tool and console version, scope and levels, what the file holds per element, how every element read went (OK / no access / error / no API), scopes that failed to back up, file integrity, renames, and the account → site → group structure coloured by restore outcome |
+| **Restore** | How the restore went: run details, rollback snapshot, elements, one card per site with its groups folded inside, every scope in a filterable table, the slowest scopes, time per site, and each run when it was stopped and resumed |
+| **Failures** | Every rejected item grouped by cause, each with *why it happened* and *how to fix it*, the affected items, and **Copy for support** (one cause or all of them) |
+| **What landed** | What is on the destination now: created vs already there per element, the scopes where everything landed, and every item |
+| **Gaps** | Item-by-item reconciliation per element — what didn't land, by name and with the reason — plus the not-a-gap (inherited / empty) entries |
+| **Readiness** | Pre-flight results, and the dry-run preview compared with what actually happened |
+| **Validation** | Only when Migration Validation ran in the session: identical scopes, differences with the explanation, and scopes with no match. Flagged when the results predate the restore |
+| **Next steps** | What to do now, in priority order (*Do now* / *Soon* / *Good to know*), each linked to its tab, and a sign-off checklist |
+| **Log** | The full operation log, filterable by level (errors / warnings / success / info) and searchable, with **Copy shown lines** |
+| **About** | Versions, which data sources were available, what every status means |
+
+A restore that was stopped and resumed is reported as one migration: each scope is counted once, from the run that last handled it, and the Restore tab lists every run.
+
+Every table can be searched, filtered by status chip or column, and sorted. The report follows the system's light or dark mode (switch with **◐ Light / dark**), **☰ All sections** shows every tab on one page, and **🖨 Print / PDF** prints every section. The file is self-contained — no network access, no external assets — so it opens offline and can be attached to a ticket as is. It contains scope names, item names and error messages, but no API tokens.
+
 ## Restore Report (HTML)
 
 The restore HTML report includes:

@@ -4,8 +4,10 @@ Backup, Restore, and Agent Migration pages.
 import copy
 import csv
 import customtkinter as ctk
+import hashlib
 import json
 import os
+import platform
 import re as _re
 import unicodedata
 from collections import Counter
@@ -463,7 +465,7 @@ class ProgressTable(ctk.CTkFrame):
             mark = "⚙"
         self._rows[node_id] = {
             "id": node_id, "key": key, "ntype": ntype, "label": label,
-            "mark": mark, "n": len(self._row_ids),
+            "mark": mark, "n": len(self._row_ids), "path": path, "num": num,
             "tip": path if num is None else f"{path}\nnode {num} in the "
                                             f"backup",
             "status": "pending", "detail": "", "tone": TEXT_MUTED,
@@ -475,6 +477,21 @@ class ProgressTable(ctk.CTkFrame):
         if self._flush_job is None:
             self._flush_job = self.after_idle(self._flush)
         return node_id
+
+    def export_rows(self) -> list:
+        out = []
+        for key in self._order:
+            sec = self._sections[key]
+            for nid in sec["rows"]:
+                row = self._rows[nid]
+                out.append({
+                    "id": nid, "path": row.get("path", ""),
+                    "type": row["ntype"], "num": row.get("num"),
+                    "label": row["label"], "mark": row["mark"],
+                    "status": row["status"], "detail": row["detail"],
+                    "section": sec["title"], "section_kind": sec["kind"],
+                    "section_num": sec["num"], "account": sec["sub"]})
+        return out
 
     def _flush(self):
         self._flush_job = None
@@ -2250,6 +2267,51 @@ def _backup_overview(backup):
     return " · ".join(bits) or f"{len(backup):,} node(s)"
 
 
+def _user_brief(user):
+    if not isinstance(user, dict):
+        return {}
+    return {k: user.get(k) for k in ("fullName", "email", "scope")
+            if user.get(k)}
+
+
+def _stamp_backup_run(nodes, url, run, sys_info=None):
+    if not nodes or not isinstance(nodes[0], dict):
+        return
+    meta = nodes[0].get("backupMetadata")
+    if not isinstance(meta, dict) or not meta:
+        meta = nodes[0]["backupMetadata"] = {
+            "backupVersion": "gui-1.0",
+            "scope": {"filters": run.get("filters"),
+                      "levels": run.get("levels")},
+            "start": run.get("started"),
+            "restoreToContext": "",
+        }
+    if not meta.get("url"):
+        meta["url"] = url
+    if sys_info and not meta.get("systemInformation"):
+        meta["systemInformation"] = sys_info
+    meta["run"] = run
+
+
+def _backup_file_info(path):
+    info = {"path": path or "", "name": os.path.basename(path or "")}
+    if not path or not os.path.isfile(path):
+        return info
+    try:
+        st = os.stat(path)
+        info["size"] = st.st_size
+        info["modified"] = datetime.fromtimestamp(
+            st.st_mtime, timezone.utc).isoformat()
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        info["sha256"] = digest.hexdigest()
+    except OSError:
+        pass
+    return info
+
+
 def _ghost_button(parent, text, command, width=120, height=32, **kw):
     """A secondary action. On the Restore screen the next thing to do is
     the only filled button; everything else is a quiet outline."""
@@ -3962,7 +4024,7 @@ class BackupPage(ctk.CTkFrame):
     def _run_backup(self, api, levels, elements, filters):
         # ── verify connection first ──
         try:
-            api.get_my_user()
+            me = api.get_my_user()
         except S1APIError as e:
             if e.status_code == 401:
                 raise S1APIError("Connection refused — invalid or expired API token.", 401)
@@ -3972,6 +4034,8 @@ class BackupPage(ctk.CTkFrame):
             raise S1APIError(f"Cannot reach console — connection refused. Check URL and token.")
 
         nodes = []
+        run_t0 = datetime.now(timezone.utc)
+        failed_nodes = []
         acct_f    = filters.get("account", "")
         site_f    = filters.get("site", "")
         group_f   = filters.get("group", "")
@@ -4017,6 +4081,7 @@ class BackupPage(ctk.CTkFrame):
                     "data": self._read_node(api, "global", "", scope,
                                             elements, lambda m: None)}
             summary = _make_summary(self._last_results)
+            node["backupResults"] = dict(self._last_results)
             ui(lambda: pt.set_done(nid, summary))
             try:
                 user_info = api.get_my_user()
@@ -4191,7 +4256,8 @@ class BackupPage(ctk.CTkFrame):
                 node_dict = {"path": npath, "type": ntype,
                              ntype: obj,
                              "policyInheritanceBroken": broken,
-                             "data": data}
+                             "data": data,
+                             "backupResults": dict(self._last_results)}
                 nodes.append(node_dict)
                 ui(lambda n=nid, s=summary: pt.set_done(n, s))
                 # detailed log
@@ -4205,8 +4271,30 @@ class BackupPage(ctk.CTkFrame):
                 ui(lambda n=nid, m=e_msg: pt.set_error(n, m))
                 self._operation_log.append(
                     f"[{ntype.upper()}] {npath} — ERROR: {e_msg}")
+                failed_nodes.append({"path": npath, "type": ntype,
+                                     "error": str(exc)[:300]})
 
         ui(lambda: self.progress.set(0.98))
+        sys_info = None
+        try:
+            sys_info = api.get_system_info()
+        except Exception:
+            pass
+        finished = datetime.now(timezone.utc)
+        _stamp_backup_run(nodes, getattr(api, "base_url", ""), {
+            "tool": "S1 Command Center", "toolVersion": APP_VERSION,
+            "started": run_t0.isoformat(), "finished": finished.isoformat(),
+            "seconds": round((finished - run_t0).total_seconds(), 1),
+            "cancelled": bool(getattr(self, "_cancelled", False)),
+            "elements": list(elements), "levels": dict(levels),
+            "filters": dict(filters),
+            "nodesPlanned": sum(
+                1 for r in row_map if levels.get(
+                    {"account": "accounts", "site": "sites",
+                     "group": "groups"}.get(r[1], ""))
+            ) + (1 if levels.get("global") else 0),
+            "nodesSaved": len(nodes), "failedNodes": failed_nodes,
+            "runBy": _user_brief(me)}, sys_info)
         return nodes
 
     def _read_node(self, api, scope_type, scope_id, scope, elements, log):
@@ -5557,17 +5645,26 @@ class RestorePage(ctk.CTkFrame):
         ctk.CTkLabel(after, text="Results", font=(UI_FONT, 12, "bold"),
                      text_color=TEXT_MUTED).grid(row=0, column=0,
                                                  padx=(0, 10))
+        self._full_report_btn = _ghost_button(
+            after, "📊  Full report", command=self._export_full_report,
+            width=118, state="disabled")
+        self._full_report_btn.grid(row=0, column=1, padx=(0, 6))
+        _ToolTip(self._full_report_btn,
+                 "One interactive HTML file with the whole migration in tabs: "
+                 "how the backup went, how the restore went, every failure "
+                 "with the fix, what landed, what is still missing, and the "
+                 "next steps.")
         self._export_btn = _ghost_button(
             after, "📋  Restore report", command=self._export, width=140,
             state="disabled")
-        self._export_btn.grid(row=0, column=1, padx=(0, 6))
+        self._export_btn.grid(row=0, column=2, padx=(0, 6))
         _ToolTip(self._export_btn,
                  "Save the full HTML report of the last restore: every node, "
                  "every element, every error.")
         self._explain_btn = _ghost_button(
             after, "🛟  Explain errors", command=self._show_errors_dialog,
             width=140, state="disabled")
-        self._explain_btn.grid(row=0, column=2, padx=(0, 6))
+        self._explain_btn.grid(row=0, column=3, padx=(0, 6))
         _ToolTip(self._explain_btn,
                  "Plain-English explanations of every failure — what it "
                  "means, why it happened, what to do, and how to copy the "
@@ -5575,7 +5672,7 @@ class RestorePage(ctk.CTkFrame):
         self._gap_btn = _ghost_button(
             after, "🧩  Gap report", command=self._export_gap_report,
             width=124, state="disabled")
-        self._gap_btn.grid(row=0, column=3, padx=(0, 6))
+        self._gap_btn.grid(row=0, column=4, padx=(0, 6))
         _ToolTip(self._gap_btn,
                  "Item-by-item reconciliation of the last restore, one tab "
                  "per element (Exclusions, Blocklist, Firewall Rules, …). "
@@ -5585,7 +5682,7 @@ class RestorePage(ctk.CTkFrame):
         self._gap_csv_btn = _ghost_button(
             after, "⬇  CSV", command=self._export_gap_csv, width=76,
             state="disabled")
-        self._gap_csv_btn.grid(row=0, column=4)
+        self._gap_csv_btn.grid(row=0, column=5)
         _ToolTip(self._gap_csv_btn,
                  "The gap report as one flat, filterable CSV row per item.")
         self._after_row = after
@@ -5765,6 +5862,7 @@ class RestorePage(ctk.CTkFrame):
         _grid_visible(self.progress, running or finished)
         _grid_visible(self._after_row, finished)
         if finished:
+            _configure_changed(self._full_report_btn, state="normal")
             _configure_changed(self._export_btn, state="normal")
             _grid_visible(self._explain_btn, failures)
             _configure_changed(self._explain_btn,
@@ -5798,6 +5896,10 @@ class RestorePage(ctk.CTkFrame):
                                text_color=TEXT_MUTED)
         self._run_mode = "idle"
         self._run_failed = False
+        self._run_history = []
+        self._item_ledger = []
+        self._last_preflight = None
+        self._last_preview = None
         self.progress.set(0)
         self._update_scope_summary()
 
@@ -5997,6 +6099,9 @@ class RestorePage(ctk.CTkFrame):
                 return
             self.backup_data = res["data"]
             self._load_state = "ready"
+            self._loaded_backup_path = fp
+            self._backup_integrity = res["rep"]
+            self._renames = []
             # Populate the diff panel so the operator can browse the
             # backup contents *before* clicking restore.
             if hasattr(self, "diff_panel"):
@@ -6294,6 +6399,11 @@ class RestorePage(ctk.CTkFrame):
             sym = {"pass": "✓", "warn": "⚠", "fail": "✗", "info": "•"}
             lines = [f"{sym.get(c.status, '•')} {c.name}: {c.detail}"
                      for c in checks]
+            self._last_preflight = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "verdict": verdict, "dest": getattr(api, "base_url", ""),
+                "checks": [{"name": c.name, "status": c.status,
+                            "detail": c.detail} for c in checks]}
             self._operation_log.append("— Pre-flight —")
             self._operation_log.extend(lines)
             for c in checks:
@@ -6446,6 +6556,15 @@ class RestorePage(ctk.CTkFrame):
                 c, e = res["per_element"][cat]
                 if c or e:
                     lines.append(f"  • {_cat_label(cat)}: {c} new / {e} exist")
+            self._last_preview = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "dest": getattr(api, "base_url", ""),
+                "create": res["create"], "exists": res["exists"],
+                "missing": res["missing"], "nodes": res["nodes"],
+                "per_element": [
+                    {"label": _cat_label(cat), "create": c, "exists": e}
+                    for cat, (c, e) in sorted(res["per_element"].items())
+                    if c or e]}
             self._operation_log.append("— Dry-run preview —")
             self._operation_log.extend(lines)
             cli_log("Dry-run preview complete (nothing was written).",
@@ -6555,6 +6674,10 @@ class RestorePage(ctk.CTkFrame):
                 node["path"] = new_path
                 count += 1
 
+        if not hasattr(self, "_renames"):
+            self._renames = []
+        self._renames.append({"from": source, "to": target, "count": count,
+                              "at": datetime.now(timezone.utc).isoformat()})
         self.mangle_status.configure(
             text=f"Renamed {count} node(s)", text_color=GREEN)
         cli_log(f"Mangle rename: '{source}' → '{target}' — "
@@ -6644,7 +6767,8 @@ class RestorePage(ctk.CTkFrame):
         self.app.set_busy(running, allow=(
             self._start_btn, self._resume_btn,
             self._stop_btn, self._skip_btn, self._export_btn,
-            self._explain_btn, self._gap_btn, self._gap_csv_btn))
+            self._explain_btn, self._gap_btn, self._gap_csv_btn,
+            self._full_report_btn))
         if running:
             self._run_mode = "running"
             self._run_failed = False
@@ -6812,6 +6936,15 @@ class RestorePage(ctk.CTkFrame):
 
         elements = [k for k, v in self.restore_vars.items() if v.get()]
         import time as _time
+        if getattr(self, "_is_resuming", False) and \
+                getattr(self, "_report_meta", None):
+            self._run_history = list(getattr(self, "_run_history", [])) + [{
+                "meta": dict(self._report_meta),
+                "nodes": list(getattr(self, "_report_nodes", [])),
+                "ledger": list(getattr(self, "_item_ledger", [])),
+                "log": list(getattr(self, "_operation_log", []))}]
+        else:
+            self._run_history = []
         self.ptable.clear()
         self._operation_log = []
         self._skip_make_default_ids: set = set()  # sites created as Scenario B (no default override)
@@ -6851,6 +6984,12 @@ class RestorePage(ctk.CTkFrame):
             "filters": scope_filters,
             "levels": levels,
             "start_time": datetime.now(timezone.utc).isoformat(),
+            "unattended": bool(auto),
+            "resumed": bool(_was_resuming),
+            "snapshot_requested": bool(
+                getattr(self, "_snapshot_var", None) is not None
+                and self._snapshot_var.get() and not _was_resuming),
+            "app_version": APP_VERSION,
         }
         # get source URL from backup metadata
         for n in self.backup_data:
@@ -6904,6 +7043,7 @@ class RestorePage(ctk.CTkFrame):
                         f"⚠ Destination snapshot FAILED: {exc} — "
                         f"rollback will not be available.")
                     cli_log(f"Destination snapshot failed: {exc}", "error")
+                    self._report_meta["snapshot_error"] = str(exc)[:300]
                 # A Skip clicked during the (potentially long) snapshot phase
                 # leaves _skip_element set and the button disabled. Clear both
                 # so the restore itself stays fully skippable; the partial
@@ -6973,6 +7113,10 @@ class RestorePage(ctk.CTkFrame):
             api.disable_scope_cache()
             self._timer_running = False
             self._run_failed = True
+            self._report_meta["end_time"] = \
+                datetime.now(timezone.utc).isoformat()
+            self._report_meta["run_failed"] = True
+            self._report_meta["error"] = str(e)[:500]
             self._set_ui_running(False)
             self._timer_lbl.configure(text="✗ failed", text_color=ACCENT)
             self._status_lbl.configure(text=f"Error: {str(e)[:40]}",
@@ -7041,7 +7185,7 @@ class RestorePage(ctk.CTkFrame):
         win.title("Migration Complete")
         win.configure(fg_color=CARD_ELEVATED)
         win.resizable(False, False)
-        w, h = 560, 600
+        w, h = 560, 650
 
         # ── Header banner ──
         accent = GREEN if clean else WARN
@@ -7139,6 +7283,12 @@ class RestorePage(ctk.CTkFrame):
                 fg_color=WARN, hover_color=WARN_HOVER,
                 command=self._show_errors_dialog).pack(
                 side="right", padx=(8, 0))
+        ctk.CTkButton(
+            win, text="📊  Open the full migration report", height=40,
+            font=(UI_FONT, 13, "bold"), fg_color=BRAND,
+            hover_color=BRAND_HOVER,
+            command=self._export_full_report).pack(
+            side="bottom", fill="x", padx=20, pady=(0, 10))
 
         # ── Detail card (fills the space between banner and buttons) ──
         card = ctk.CTkFrame(win, fg_color=CARD, corner_radius=12)
@@ -7245,6 +7395,7 @@ class RestorePage(ctk.CTkFrame):
             ntype = node.get("type", "?")
             npath = node.get("path", "?")
             data = node.get("data", {})
+            node_t0 = _time.time()
 
             # cancellation
             if self._cancelled:
@@ -9011,6 +9162,8 @@ class RestorePage(ctk.CTkFrame):
                 "path": npath, "type": ntype, "status": "done",
                 "summary": summary, "elements": {},
                 "failed_items": failed_items,
+                "index": i, "dest_id": dest_id, "started_at": node_t0,
+                "seconds": round(_time.time() - node_t0, 2),
             }
             for rname, rval in results:
                 self._operation_log.append(f"  {rname}: {rval}")
@@ -10164,6 +10317,82 @@ class RestorePage(ctk.CTkFrame):
             return
         export_gap_csv(self._build_gap_report(),
                        default_name=self._gap_default_name())
+
+    def _full_report_inputs(self):
+        current = {"meta": dict(getattr(self, "_report_meta", {}) or {}),
+                   "nodes": list(getattr(self, "_report_nodes", []) or []),
+                   "ledger": list(getattr(self, "_item_ledger", []) or []),
+                   "log": list(getattr(self, "_operation_log", []) or [])}
+        validation = None
+        pages_map = getattr(self.app, "pages", None) or {}
+        vp = pages_map.get("Migration Validation")
+        if vp is not None and getattr(vp, "_results", None):
+            validation = {"results": list(vp._results),
+                          "meta": dict(getattr(vp, "_meta", {}) or {})}
+        try:
+            progress = self.ptable.export_rows()
+        except Exception:
+            progress = []
+        backup_path = (getattr(self, "_loaded_backup_path", "")
+                       or self.file_entry.get().strip())
+        return {
+            "runs": list(getattr(self, "_run_history", []) or []) + [current],
+            "backup": self.backup_data or [],
+            "backup_file": _backup_file_info(backup_path),
+            "integrity": getattr(self, "_backup_integrity", None),
+            "secret_count": getattr(self, "_nsec", 0) or 0,
+            "renames": list(getattr(self, "_renames", []) or []),
+            "progress": progress,
+            "preflight": getattr(self, "_last_preflight", None),
+            "preview": getattr(self, "_last_preview", None),
+            "validation": validation,
+            "environment": {"app_version": APP_VERSION,
+                            "platform": platform.platform(),
+                            "python": platform.python_version()},
+        }
+
+    def _export_full_report(self):
+        from export_utils import _open_path
+        from migration_report import (build_migration_report,
+                                      render_migration_report_html)
+        inputs = self._full_report_inputs()
+        if not any(r["nodes"] or r["ledger"] or r["log"]
+                   for r in inputs["runs"]):
+            messagebox.showinfo(
+                "No Restore Data",
+                "Run a restore first — the full report is built from the "
+                "backup and the restore that used it.")
+            return
+        try:
+            report = build_migration_report(
+                explain=explain_error, summarize=_summarize_node_payload,
+                cat_label=_cat_label, **inputs)
+            html = render_migration_report_html(report)
+        except Exception as exc:
+            cli_log(f"Full migration report failed: {exc}", "error")
+            messagebox.showerror("Report Error", str(exc))
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Full Migration Report",
+            initialfile=self._gap_default_name().replace("-gaps-", "-report-",
+                                                         1),
+            defaultextension=".html",
+            filetypes=[("HTML Report (tabbed)", "*.html")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+        except OSError as exc:
+            cli_log(f"Full migration report export error: {exc}", "error")
+            messagebox.showerror("Export Error", str(exc))
+            return
+        cli_log(f"Full migration report saved → {os.path.basename(path)} "
+                f"({report['verdict']['label']})", "success")
+        cli_log(f"File saved to: {path}", "info")
+        if messagebox.askyesno("Open report?",
+                               f"Saved to:\n{path}\n\nOpen it now?"):
+            _open_path(path)
 
     def _show_errors_dialog(self):
         """Open a window that groups every restore failure by error type,

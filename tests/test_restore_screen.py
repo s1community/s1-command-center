@@ -381,8 +381,68 @@ def test_more_options_make_room_and_a_run_brings_progress_back(screen,
 
 def test_buttons_reach_their_handlers(screen):
     assert screen._gap_csv_btn.cget("command") == screen._export_gap_csv
+    assert screen._full_report_btn.cget("command") == \
+        screen._export_full_report
     assert screen._choose_btn.cget("command") == screen._choose_restore_sites
     assert screen._rollback_btn.cget("command") == screen._load_last_snapshot
+
+
+def _finish_a_restore(page, tmp_path):
+    _load(page, tmp_path, _backup())
+    page._set_ui_running(True)
+    page.ptable.add_node("n1", f"{ACCT}/FAO-TEST", "site", 4)
+    page.ptable.add_node("n2", f"{ACCT}/FAO-TEST/Servers", "group", 6)
+    page.ptable.set_done("n1", "2 created")
+    page.ptable.set_error("n2", "Group create failed")
+    page._report_meta = {
+        "dest_url": "https://dst.example.net", "dest_console": "DST",
+        "customer": ACCT, "elements": ["excl"],
+        "start_time": "2026-10-08T09:00:00+00:00",
+        "end_time": "2026-10-08T09:05:00+00:00"}
+    page._report_nodes = [{"path": f"{ACCT}/FAO-TEST", "type": "site",
+                           "status": "done", "seconds": 2.5,
+                           "failed_items": []}]
+    page._item_ledger = [
+        {"node": f"{ACCT}/FAO-TEST", "scope": "site", "element": "excl",
+         "kind": "path", "item": f"C:\\app{i}.exe", "status": "created",
+         "reason": ""} for i in range(2)]
+    page._operation_log = ["✓ FAO-TEST done", "✗ Servers failed"]
+    page._set_ui_running(False)
+
+
+def test_the_full_report_uses_what_the_screen_holds(screen, tmp_path):
+    from migration_report import build_migration_report
+    _finish_a_restore(screen, tmp_path)
+    assert screen._full_report_btn.cget("state") == "normal"
+    report = build_migration_report(
+        explain=pages.explain_error, summarize=pages._summarize_node_payload,
+        cat_label=pages._cat_label, **screen._full_report_inputs())
+    assert report["backup"]["file"]["name"] == "s1-backup-x.json"
+    assert len(report["backup"]["file"]["sha256"]) == 64
+    assert report["backup"]["node_count"] == 6
+    assert {n["path"]: n["outcome"] for n in report["restore"]["nodes"]} == {
+        f"{ACCT}/FAO-TEST": "restored",
+        f"{ACCT}/FAO-TEST/Servers": "failed"}
+    assert report["restore"]["nodes"][0]["seconds"] == 2.5
+    assert report["kpis"]["created"] == 2
+    assert report["verdict"]["key"] == "warnings"
+
+
+def test_the_full_report_button_saves_a_utf8_html_file(screen, tmp_path,
+                                                        monkeypatch):
+    _finish_a_restore(screen, tmp_path)
+    out = tmp_path / "report.html"
+    monkeypatch.setattr(pages.filedialog, "asksaveasfilename",
+                        lambda **k: str(out))
+    monkeypatch.setattr(pages.messagebox, "askyesno", lambda *a, **k: False)
+    monkeypatch.setattr(pages.messagebox, "showerror",
+                        lambda *a, **k: pytest.fail(f"export failed: {a}"))
+    monkeypatch.setattr(pages, "cli_log", lambda *a, **k: None)
+    screen._export_full_report()
+    html = out.read_text(encoding="utf-8")
+    assert html.startswith("<!DOCTYPE html>")
+    assert "s1-backup-x.json" in html and "Group create failed" in html
+    assert "→" in html
 
 
 def test_scope_line_without_names_counts_the_ticked_levels():

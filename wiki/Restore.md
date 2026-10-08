@@ -131,7 +131,11 @@ Each node shows a detailed summary: `policy, excl:12, block:5, fw:3, star:8, …
 
 ## Export Report
 
-When a restore finishes, step 3 shows its results buttons: **📋 Restore report**, **🛟 Explain errors** (only when something failed), and **🧩 Gap report** / **⬇ CSV** (item by item: what landed and what didn't). Restore report formats:
+When a restore finishes, step 3 shows its results buttons: **📊 Full report**, **📋 Restore report**, **🛟 Explain errors** (only when something failed), and **🧩 Gap report** / **⬇ CSV** (item by item: what landed and what didn't).
+
+**📊 Full report** — also offered by the pop-up at the end of a restore — is one interactive HTML file covering the whole migration in tabs: how the backup went, how the restore went, every failure with the fix, what landed, what is still missing, the pre-flight and preview, Migration Validation when it ran, and the next steps. A stopped-and-resumed restore is reported as one migration. See [[Reports#Full Migration Report (HTML)]].
+
+Restore report formats:
 
 - **HTML** — Professional dark-themed report (recommended)
 - **JSON** — Structured data for automation

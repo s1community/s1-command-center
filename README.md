@@ -82,6 +82,7 @@ Moves the agents themselves between consoles, so each source group's endpoints l
 - **Migration status report** — Counts per console-migration status and decommissioned agents. An opt-in **Include passphrases** switch fetches each agent's uninstall passphrase from the source — it warns (and asks to confirm) that this is one API call per agent (slow on a large scope), that **SentinelOne records every fetch in the source console's activity log**, and that the exported report becomes sensitive
 
 ### Reports
+- **📊 Full migration report** — After a restore, one interactive, self-contained HTML file covering the whole migration in tabs: **Overview** (verdict, success rate, clickable headline numbers, charts, key findings, timeline, copy-ready summary), **Backup** (file and SHA-256, timing, operator, what the file holds, how every element read went, integrity, structure), **Restore** (a card per site with its groups, every scope, timing, each run of a resumed restore), **Failures** (grouped by cause, with why and how to fix, and *Copy for support*), **What landed**, **Gaps**, **Readiness** (pre-flight, preview vs actual), **Validation**, **Next steps** (prioritised, plus a sign-off checklist), **Log** and **About**. Light/dark, print-ready, opens offline
 - **HTML Restore Report** — Professional dark-themed report with:
   - Summary statistics cards (nodes restored, skipped, errors, elements created)
   - Connection info (source/destination URLs, timestamps, duration)
@@ -90,7 +91,7 @@ Moves the agents themselves between consoles, so each source group's endpoints l
   - Errors & warnings section
   - Collapsible full operation log
 - **JSON Export** — Structured data for programmatic analysis
-- **📋 Restore report** — Appears under step 3 as soon as a restore finishes, next to **Explain errors**, **Gap report** and **CSV**
+- **📋 Restore report** — Appears under step 3 as soon as a restore finishes, next to **📊 Full report**, **Explain errors**, **Gap report** and **CSV**
 - **Agent Migration Report** — The same dark-themed, self-contained HTML (plus Excel/CSV/JSON) for the agent live run, the match plan and the status report, so both the configuration migration *and* the agent migration hand back a proper report
 - **Interactive tables** — every table in every report is **searchable**, **sortable**, and deeply **filterable**: click a stat card (e.g. *Migrated*) to show only those rows, toggle colour-coded **status chips**, or pick from auto-generated **per-column dropdowns** (Site, OS, Group, …). A *Clear filters* button resets everything and the count reads *N of M*. Inline vanilla JS, no external assets, so the saved `.html` still works offline. After an export the app offers to **open the file** for you
 
@@ -127,7 +128,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.7.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v2.8.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -209,7 +210,7 @@ Navigate to **Backup Source**:
 Navigate to **Restore to Dest** — three numbered steps, top to bottom:
 1. **Backup file** — the latest backup loads automatically (or **Browse…**)
 2. **What to restore** — leave the fields blank for everything, or name accounts, sites or groups (**Choose…** lists the backup's sites). The line underneath states exactly what will be restored. Renaming and element choices are under **More options**
-3. **Restore** — click **▶ Restore N nodes**, then **📋 Restore report** for the detailed HTML report
+3. **Restore** — click **▶ Restore N nodes**, then **📊 Full report** for the whole migration in one tabbed HTML report
 
 ### 4. Move the Agents
 
@@ -316,6 +317,7 @@ s1-command-center/
 ├── s1_api.py         # SentinelOne REST API client
 ├── config.py         # Configuration/context manager (saved connections)
 ├── export_utils.py   # HTML & Excel report generation
+├── migration_report.py # Full migration report (tabbed HTML) — pure model + renderer
 ├── migtools.py       # Pure migration logic (preflight, reconciliation, diffs)
 ├── tag_audit.py      # Tag audit & endpoint-tag write probe (Tags page core)
 ├── theme.py          # Colour palette, fonts, widget theming
@@ -386,6 +388,13 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v2.8.0 — 2026-10-08
+#### Added
+- **📊 Full migration report** — after a restore, one interactive HTML file with the whole migration in eleven tabs: overview, backup, restore (site by site), failures with the fix, what landed, gaps, readiness, validation, next steps, log and about. Searchable, filterable tables; light/dark; print-ready; self-contained. A stopped-and-resumed restore is reported as one migration.
+- **Backups record how they went** — timing, operator, tool version, planned vs saved scopes, failed scopes and every element read's result, shown in the report's Backup tab (older files still load).
+#### Tests
+- 717 total (+25): the report model and HTML, and the Restore screen building and saving it. Checked end-to-end in headless Chrome.
 
 ### v2.7.0 — 2026-10-07
 #### Changed

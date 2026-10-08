@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.8.0 — 2026-10-08
+
+### Added
+- **The full migration report.** After a restore, **📊 Full report** (in the results, and in the pop-up when the restore finishes) saves the whole migration as one interactive HTML file in eleven tabs: **Overview** (verdict, success rate, source → backup → destination, clickable headline numbers, outcome charts, key findings, a timeline and a copy-ready summary), **Backup** (file and SHA-256, timing, operator, console version, what the file holds, how every element read went, scopes that failed to back up, integrity, renames, and the structure coloured by restore outcome), **Restore** (run details, rollback snapshot, a card per site with its groups, every scope, the slowest scopes and time per site, each run of a stopped-and-resumed restore), **Failures** (grouped by cause with why and how to fix, and **Copy for support**), **What landed**, **Gaps** (item-by-item reconciliation), **Readiness** (pre-flight, and the preview against what actually happened), **Validation** (when it ran; flagged when it predates the restore), **Next steps** (prioritised, each linked to its tab, plus a sign-off checklist), **Log** (filter by level, search, copy) and **About**. Every table searches, filters and sorts; the file follows light/dark mode, prints every section, and is self-contained — it opens offline and attaches to a ticket as is.
+- **Backups now record how they went.** A new backup stores its start and finish time, duration, who ran it, the tool version, the planned vs saved scope counts, the scopes that failed and why, and every element read's result — the report's Backup tab is built from it. Older backup files still work; the tab says those details weren't recorded.
+- The restore keeps per-scope timing, the pre-flight and preview results, renames and every run of a stopped-and-resumed restore, so the report can show them.
+
+### Tests
+- 717 total (+25): the report model (counts, scope outcomes, verdicts, resumed runs counted once, failures grouped and de-duplicated, scope-creation and other failed scopes called out, backup run record and read results, validation staleness, recommendations, timeline order, log levels and caps) and the HTML (one panel per tab, escaping, self-contained, every in-page link has a target, an empty restore still renders), the real Restore screen building the report from its own data and saving it as UTF-8, and a guard that the screen only passes inputs the report accepts. Checked end-to-end in headless Chrome on a 59-scope, two-run sample: every tab and link, search, chips, the log filter, keyboard tab navigation, deep links, theme switching, print layout, no console errors, and no horizontal overflow from 360 px phones up; the tab bar fits on one row from 1180 px.
+
 ## v2.7.0 — 2026-10-07
 
 ### Changed
