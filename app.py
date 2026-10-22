@@ -16,6 +16,7 @@ from s1_api import S1API, S1APIError
 from config import (ConfigManager, ProfileManager, CONFIG_DIR, APP_VERSION,
                     SettingsManager)
 from migtools import AuditLog
+from migration_guide import GuideController, GUIDED_PAGES
 import theme
 
 # Apply the brand design system (dark mode + violet primary) before any
@@ -332,7 +333,8 @@ class ConnectionsPage(ctk.CTkFrame):
                       command=lambda: self._delete(
                           entries[0], status)).pack(side="right")
 
-        return {"entries": entries, "status": status, "ssl_var": ssl_var}
+        return {"entries": entries, "status": status, "ssl_var": ssl_var,
+                "frame": card}
 
     def _test(self, url_e, tok_e, status, ssl_var=None):
         url, tok = url_e.get().strip(), tok_e.get().strip()
@@ -957,11 +959,13 @@ class App(ctk.CTk):
         self._console_visible = False   # OUTPUT drawer starts collapsed
         self._busy = False              # a backup/restore is in progress
         self._saved_btn_states = {}
+        self.guide = GuideController(self)
 
         self._build()
         self._startup_banner()
         self.connect("source")
         self.connect("destination")
+        self.guide.start()
 
         # Apply the saved "start in fullscreen" preference once the window is up.
         if self.settings.get("start_fullscreen"):
@@ -1133,8 +1137,7 @@ class App(ctk.CTk):
         self._active_lbl.pack(fill="x", padx=14, pady=(0, 6))
 
         # import pages lazily here to avoid circular issues
-        from pages import (BackupPage, RestorePage, ValidationPage,
-                           MigrationRunbookPage)
+        from pages import BackupPage, RestorePage, ValidationPage
         from agent_migrator import AgentMigratorPage
         from pages_extra import (
             AccountsSitesPage, AgentsPage, ThreatsPage, UsersRolesPage,
@@ -1153,11 +1156,10 @@ class App(ctk.CTk):
 
         nav_migration = [
             ("Connections", ConnectionsPage),
-            ("Migration Runbook", MigrationRunbookPage),
             ("Backup Source", BackupPage),
             ("Restore to Dest", RestorePage),
-            ("Agent Migration", AgentMigratorPage),
             ("Migration Validation", ValidationPage),
+            ("Agent Migration", AgentMigratorPage),
         ]
         if is_admin:
             try:
@@ -1209,7 +1211,7 @@ class App(ctk.CTk):
                          text_color=color, anchor="w").pack(
                 anchor="w", padx=pad, pady=(top, 4))
 
-        def _nav_item(parent, label, hover):
+        def _nav_item(parent, label, hover, mark=False):
             # Row = thin active-indicator bar + button, so the selected page
             # gets a violet accent strip down its left edge.
             row = ctk.CTkFrame(parent, fg_color="transparent", height=36)
@@ -1218,6 +1220,12 @@ class App(ctk.CTk):
             bar = ctk.CTkFrame(row, width=3, fg_color="transparent",
                                corner_radius=2)
             bar.pack(side="left", fill="y", padx=(2, 0), pady=5)
+            if mark:
+                tick = ctk.CTkLabel(row, text="", width=30,
+                                    font=(UI_FONT, 11, "bold"),
+                                    text_color=TEXT_FAINT)
+                tick.pack(side="right", padx=(0, 6))
+                self.guide.add_nav_mark(label, tick)
             btn = ctk.CTkButton(
                 row, text=label, anchor="w", height=34, font=(UI_FONT, 12),
                 fg_color="transparent", text_color=TEXT_MUTED,
@@ -1264,9 +1272,11 @@ class App(ctk.CTk):
                                corner_radius=theme.RADIUS_MD,
                                border_width=1, border_color=MIG_BORDER)
         mig_box.pack(fill="x", padx=8, pady=(2, 8))
-        _eyebrow(mig_box, "MIGRATION", BRAND_LIGHT, 8, 14)
+        self.guide.build_header(mig_box)
         for label, cls in nav_migration:
-            _nav_item(mig_box, label, SIDEBAR_HOVER)
+            _nav_item(mig_box, label, SIDEBAR_HOVER,
+                      mark=label in GUIDED_PAGES)
+        self.guide.build_card(mig_box)
         ctk.CTkFrame(mig_box, fg_color="transparent", height=4).pack()
 
         _eyebrow(nav_scroll, "OPERATIONS", TEXT_FAINT, 6, 18)
@@ -1361,6 +1371,9 @@ class App(ctk.CTk):
         self._console.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         self._console.configure(state="disabled")
 
+        self.guide.build_bar(right, before=self.content)
+        self.guide.build_toast(right, over=self.content)
+
         # create pages
         for label, cls in nav:
             p = cls(self.content, self)
@@ -1375,6 +1388,7 @@ class App(ctk.CTk):
         if self._current:
             self._current.pack_forget()
         p = self.pages[label]
+        self.guide.on_page(label)
         p.pack(fill="both", expand=True)
         self._current = p
         # Auto-expand the operations category that owns this page so its
@@ -1461,6 +1475,7 @@ class App(ctk.CTk):
             self.dest_api = api
             self.dst_lbl.configure(
                 text=f"{ctx.name}\n{ctx.display_url}", text_color=ACCENT)
+        self.guide.refresh()
 
     def log_audit(self, action, **fields):
         """Append one operation to the audit history (best-effort)."""

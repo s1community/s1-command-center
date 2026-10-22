@@ -38,6 +38,15 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Reset All** — Clear all fields and start a fresh migration in one click
 - **Settings Page** — A ⚙ Settings panel (sidebar footer) for theme (Light / Dark / System), UI scale, start-in-fullscreen, OUTPUT-console-on-launch, default snapshot-first, OS-keychain storage, and default ignore-SSL; preferences persist across restarts **and app updates**
 
+### Migration Guide
+The steps of a migration follow you instead of waiting on a page of their own:
+- **Sidebar progress** — the MIGRATION pages are listed in the order the work happens, each marked ✓ done, ● next, ! needs a look or … still running, under an *N of 9* bar and a card naming the next step (**Go ▸**, **Mark done**). **All 9 steps** opens the checklist
+- **Next-step strip** — above every migration page: what to do next and which button does it; **Show me** lights the button up
+- **Hand-offs** — when a step finishes, a toast says so and names the next one; a failed pre-flight or a stopped restore says what to do instead
+- **Running means running** — a backup, check, restore or validation still in progress shows *RUNNING*, never done, and the guide moves on by itself when it finishes
+- **Warnings before the risky steps** — once per migration, before restoring without Pre-flight or Preview, or migrating agents before Validation (never for Unattended, Resume, scheduled or site-token-file runs)
+- **Kept per migration** — progress is stored per SOURCE → DESTINATION pair in `~/.s1-command-center/migration_guide.json` (owner-only, no tokens), so it survives a restart; **Start over…** for the next wave
+
 ### Backup
 - **Full Configuration Backup** — Captures policies, exclusions, blocklist, firewall rules, device control, STAR rules, tags, threat intel, settings, and more
 - **26 Element Types** — Comprehensive coverage of all SentinelOne configuration elements
@@ -53,8 +62,9 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Smart Auto-load** — Automatically loads the latest backup file, passing over restore reports and other JSON that isn't a backup
 - **Backup-file check** — A restore report or any other non-backup JSON is turned away in plain words ("This is a restore report, not a backup") instead of failing with a Python error
 - **Restore exactly what you name** — Put one or several sites in the Site field (or tick them with **Choose…**, which lists the sites in the loaded backup) and only those sites and their groups are restored, plus their account when **Accounts** is ticked. No other site or account is resolved, listed or written; a name that isn't in the backup stops the restore before anything is touched, and the confirmation shows the exact scope
+- **Compare with destination** (step 2) — Every account, site and group the restore touches, as a tree beside what the destination has in the same place: *✓ exists* (restored into it), *+ will be created* (from the backup file), *≈ other case* (the exact-name restore would miss it) or *✕ skipped* (name held by an expired or deleted account, parent missing, level not ticked) — with the reason, every destination scope in that place and the backup scope already restoring into each, **Needs a look / All / Renamed** filters and a search over both sides. Rename backup scopes to match an existing destination scope (or to a new name) before restoring; a name another backup scope already uses is refused. Renames change the loaded backup only, never the file or the console. When the destination has no accounts it says so plainly: *this restore will create everything from the backup file*
 - **Rename in the backup** (More options) — Rename accounts, sites, or groups in the backup before restoring
-- **Account-name guard** — Warns before restoring if the backup's account name isn't on the destination console and offers to open **Rename in the backup**, so you don't accidentally create a brand-new account
+- **Account-name guard** — Warns before restoring if the backup's account name isn't on the destination console and offers to open **Compare with destination**, so you don't accidentally create a brand-new account. When the destination has no accounts at all, the confirmation says the restore creates everything from the backup file
 - **Unattended** — A switch next to the Restore button: the run creates missing accounts and answers every prompt itself. You still confirm once before it starts
 - **Auto Target Context** — Automatically sets the restore target on start
 - **SKU Mismatch Detection** — Detects license bundle conflicts and offers to fix them automatically
@@ -67,15 +77,17 @@ Built with Python and CustomTkinter, it delivers a modern UI with **light & dark
 - **Detailed Error Reporting** — Shows exact API errors for every failed item
 
 ### Agent Migration
-Moves the agents themselves between consoles, so each source group's endpoints land in the **same-named** group on the destination, using that group's own registration token. A guided three-step flow — each step unlocks the next.
+Moves the agents themselves between consoles, so each source group's endpoints land in the **same-named** group on the destination, using that group's own registration token — or, when nobody has API access to the destination, the site tokens a partner sends in a sheet. One screen, three steps; the next thing to do is always the only filled button.
 
-- **1 · Read destination** — Walks the destination's accounts, sites and groups and saves them with their registration tokens to a map file
-- **2 · Match scopes** — Lists every one of *your* source accounts, sites and groups beside the destination scope it pairs with, so you can see what was found before anything moves. **Nothing is sent.** Anything that can't migrate says why — a name that differs between the consoles, a missing registration token, agents that already moved — and name mismatches get a one-click **Fix name**
-- **3 · Migrate** — Sends the move per group with that group's own token and names **every machine as it goes**, with the console's own reason when one doesn't make it
+- **1 · What to move** — Accounts and sites (blank = everything, **Choose…** to tick them from a list) and where they go: the **Destination console** or a **Site-token file**. The line underneath says exactly what will happen, or what is missing
+- **2 · Check** — Reads both sides and lists every source group beside the destination group it lands in. **Nothing is sent.** Only the destination accounts — and sites, when you name some — whose names match your source scope are read, so moving one account out of sixty reads one. Anything that can't migrate says why. **Fix names** shows the source as an account › site › group tree next to what the destination has in the same place, with search and filters. Select a scope to see why it didn't pair, every destination scope there and what it already pairs with, and whether the name exists elsewhere on the destination. A scope that's already paired can't be taken, and a name typed by hand is flagged when the destination read didn't include it. Fixes are re-applied every time the destination is read again
+- **3 · Migrate** — The button names how many agents it moves, and only the rows the check marked ready are sent, each group with its own token. **Every machine is listed as it goes**, with the console's own reason when one doesn't make it
+- **A stale plan can't run** — Change what to move or where it goes and step 3 locks until you check again; after a run, **Check again** shows what's left before anything else can be sent
+- **Site-token file** — Load the partner's sheet (CSV, TSV or Excel) or paste its two columns; a destination map saved earlier (.json) works too. Each source site pairs with the file row of the same name. Nothing is guessed: a name that matches in more than one place is refused, so is a token for the source console itself, and every row that can't be used says why (**View rows**). When the file spells a site differently (`shira-telecom` for *Shira Telecom*), **✎ Pair sites** lets you choose its row from the file — closest names first, the same name spelt differently on top, also when you chose a single site — and a row's token goes to one site only
 - **Per-agent confirmation** — The move endpoint only replies with a count, so each agent is read back afterwards; that's what turns "the console accepted 400" into *moved*, *pending* or *failed* per machine
 - **Pick scopes from a list** — **Choose…** on the account and site fields lets you tick what you want instead of hunting for ids to paste. Built for big consoles: the search runs **on the console**, one bounded page at a time, so a tenant with thousands of sites opens as fast as one with five. Ticks survive searching, and the site list is narrowed to whichever accounts you picked
-- **Live API view** — The actual requests going out (endpoint, filter, batch size, masked token) and what came back
-- **Remembers the plan** — Step 2's result is cached, so reopening the app doesn't re-walk the console; the plan's age is shown with a **Match again** button
+- **Results in tabs** — **Plan** (everything / will migrate / can't migrate / already done; click a row for the full reason), **Agents** (moved / pending / failed), **API calls** (the requests going out and what came back, tokens masked) and **Status report**. The lists draw from a fixed pool of 60 rows, so a 5,000-agent run builds no more widgets than a 50-agent one
+- **Remembers the plan** — Reopening the app restores the last check, with its age, when it was made for the same two consoles. The destination read behind it is kept owner-only because it holds registration tokens; the plan cache never does
 - **No dry-run switch** — Step 2 physically cannot move anything, and step 3's button names the number of agents it is about to move
 - **Scheduling** — Arm a live run for a chosen date and time
 - **Full HTML report** — Every export (match plan, live run, status) writes a polished, self-contained HTML report: stat cards, source/destination info, colour-coded status badges, a *did-not-migrate* section with the console's own reason per machine, and the complete agent list. Excel, flat CSV and JSON come from the same **Export** button
@@ -128,7 +140,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v2.8.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v3.0.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -182,6 +194,8 @@ python main.py
 
 ## Quick Start
 
+> The sidebar's **MIGRATION** panel tracks these steps for the two connected consoles — what's done, what's running and what's next — and the strip above each migration page names the button to press.
+
 ### 1. Connect Consoles
 
 Launch the app and go to **Connections**. Enter your SOURCE and DESTINATION console details:
@@ -209,17 +223,17 @@ Navigate to **Backup Source**:
 
 Navigate to **Restore to Dest** — three numbered steps, top to bottom:
 1. **Backup file** — the latest backup loads automatically (or **Browse…**)
-2. **What to restore** — leave the fields blank for everything, or name accounts, sites or groups (**Choose…** lists the backup's sites). The line underneath states exactly what will be restored. Renaming and element choices are under **More options**
+2. **What to restore** — leave the fields blank for everything, or name accounts, sites or groups (**Choose…** lists the backup's sites). The line underneath states exactly what will be restored. **⇄ Compare with destination…** shows what already exists there and what will be created, and lets you rename backup scopes to match first. Element choices are under **More options**
 3. **Restore** — click **▶ Restore N nodes**, then **📊 Full report** for the whole migration in one tabbed HTML report
 
 ### 4. Move the Agents
 
-Once the destination has the sites and groups, navigate to **Agent Migration**:
-1. **Read destination** — writes a map file of the destination's scopes and their registration tokens
-2. **Match scopes** — lists each source scope beside the destination scope it pairs with. Nothing moves; fix any name mismatches here
-3. **Migrate** — the red button names how many agents it will move. Each machine is reported as it goes, and the **Failed** filter shows any that didn't make it, with the console's reason
+Once the destination has the sites and groups, navigate to **Agent Migration** — one screen, three steps:
+1. **What to move** — leave Accounts and Sites blank for everything, or **Choose…** them. *Into* is the destination console, or a site-token file when there is no API access to it
+2. **Check** — **Check what will move** lists every source group beside the destination group it lands in. Nothing moves; **Fix names** pairs up names that differ between the consoles
+3. **Migrate** — the button names how many agents it will move. Each machine is reported as it goes, and the **Agents** tab's **Failed** filter shows any that didn't make it, with the console's reason
 
-> Agents move on their next check-in, so some will sit at *pending*. Re-run the **Status report** later to confirm they arrived.
+> Agents move on their next check-in, so some will sit at *pending*. Run the **Status report** tab later to confirm they arrived.
 
 ## Backup & Restore
 
@@ -318,6 +332,7 @@ s1-command-center/
 ├── config.py         # Configuration/context manager (saved connections)
 ├── export_utils.py   # HTML & Excel report generation
 ├── migration_report.py # Full migration report (tabbed HTML) — pure model + renderer
+├── migration_guide.py  # The migration guide — steps, progress per console pair, sidebar / strip / hand-off
 ├── migtools.py       # Pure migration logic (preflight, reconciliation, diffs)
 ├── tag_audit.py      # Tag audit & endpoint-tag write probe (Tags page core)
 ├── theme.py          # Colour palette, fonts, widget theming
@@ -388,6 +403,24 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v3.0.0 — 2026-10-22
+#### Added
+- **⇄ Compare with destination** (Restore, step 2) — every account, site and group the restore touches, beside what the destination has: *✓ exists*, *+ will be created*, *≈ other case* or *✕ skipped*, with the reason, the destination scopes in that place and what already restores into each. Rename backup scopes to match before restoring (the loaded backup only — never the file or the console). An empty destination is named as such: *this restore will create everything from the backup file*.
+- **Site-token file** — move agents into a destination nobody has API access to, using the partner's sheet of site names and registration tokens (CSV, TSV, Excel or pasted). When the file spells a site differently (`shira-telecom` for *Shira Telecom*), **✎ Pair sites** lets you choose its row — closest names first, also when one site is chosen.
+- **The migration guide replaces the Migration Runbook page** — a checklist you had to remember to open got forgotten, so the steps now follow you: ✓ / ● / ! / … beside each MIGRATION page with an *N of 9* bar and a next-step card in the sidebar, a strip above every migration page naming the button (**Show me** lights it up), a hand-off when a step finishes, and a warning before restoring without Pre-flight or Preview or migrating agents before Validation. A step still running shows *RUNNING*, never done. Kept per SOURCE → DESTINATION pair across restarts.
+- **Choose… for Account, Site and Group** — on Backup Source the names come from the console (a searchable checkbox list; sites follow the Account field, groups the Site field, and a name like *Default site* that every account repeats is one row); on Restore, Account and Group join Site, listed from the loaded backup.
+#### Changed
+- **The MIGRATION section is in the order the work happens** — Connections, Backup Source, Restore to Dest, Migration Validation, Agent Migration. Pre-flight now comes after the backup it reads (the old runbook listed it first).
+- **A new Agent Migration screen** — three steps (What to move → Check → Migrate), one filled button at a time; checking reads only the destination accounts it needs, and a plan can't run stale or twice.
+- **Fix names compares both consoles side by side** — an account › site › group tree with reasons, destination candidates and what already pairs with each, filters and search; fixes stick across destination reads.
+- **The restore's account-name warning opens Compare with destination**, and the restore confirmation says when the destination has no accounts yet.
+- **Lists that don't freeze** — the migration lists draw 5,000 rows on the same 60 widgets as 50.
+- **Account / Site / Group take several names** on Backup Source (and ⭐ STAR → Excel) and on Restore. On Backup Source a name that exists anywhere at its level now matches exactly everywhere — *Servers* no longer also takes another site's *Linux Servers* — and each scope is listed once.
+#### Fixed
+- **Fix names no longer freezes the app** when you select a scope or resize the window — the text beside the tree used to re-wrap back and forth forever.
+#### Tests
+- 951 total (+234): the Fix names freeze; the restore comparison, renames and window; the Restore screen and confirmation; site-token files and pairing a site the file spells differently; the Agent Migration page end-to-end against fake consoles; the migration guide — step order, progress per console pair, steps still running, hand-offs, the two warnings and the page flags it reads; the Choose… lists on Backup Source and Restore and the several-name Account / Site / Group fields.
 
 ### v2.8.0 — 2026-10-08
 #### Added

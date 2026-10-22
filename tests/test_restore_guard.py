@@ -4,7 +4,7 @@ If NONE of the backup's account names exist on the destination console, the
 operator most likely forgot to Mangle Rename the account (Structure
 Operations), and a restore would silently create a brand-new account instead of
 landing on the intended one. `_check_account_name_match` must:
-  * return "abort" and offer the Structure-Operations redirect in that case,
+  * return "abort" and open the backup-vs-destination comparison in that case,
   * but NOT nag when a name matches, when the destination has no accounts, or
     for global-only backups.
 
@@ -39,8 +39,11 @@ def _fake_self(backup):
     s.backup_data = backup
     s._console_var = types.SimpleNamespace(get=lambda: "DESTINATION")
     s._redirected = None
+    s._compared = None
     s._open_structure_ops_for_rename = (
         lambda src, dst="": setattr(s, "_redirected", (src, dst)))
+    s._compare_with_destination = (
+        lambda api=None: setattr(s, "_compared", api))
     return s
 
 
@@ -55,6 +58,14 @@ def test_empty_destination_does_not_nag():
     assert check(s, FakeAPI([])) == "ok"
 
 
+def test_empty_destination_is_flagged_for_the_confirmation():
+    s = _fake_self([{"type": "account", "account": {"name": "Acme"}}])
+    check(s, FakeAPI([]))
+    assert s._dest_empty is True
+    check(s, FakeAPI(["Acme"]))
+    assert s._dest_empty is False
+
+
 def test_global_only_backup_does_not_nag():
     s = _fake_self([{"type": "global"}])
     assert check(s, FakeAPI(["Acme"])) == "ok"
@@ -65,24 +76,26 @@ def test_mismatch_continue(monkeypatch):
                         lambda *a, **k: False)
     s = _fake_self([{"type": "account", "account": {"name": "Acme"}}])
     assert check(s, FakeAPI(["Other"])) == "ok"
-    assert s._redirected is None
+    assert s._redirected is None and s._compared is None
 
 
-def test_mismatch_redirect_prefills_single_dest(monkeypatch):
+def test_mismatch_yes_opens_the_comparison(monkeypatch):
     monkeypatch.setattr(pages.messagebox, "askyesnocancel",
                         lambda *a, **k: True)
     s = _fake_self([{"type": "account", "account": {"name": "Acme"}}])
-    assert check(s, FakeAPI(["Other"])) == "abort"
-    # exactly one destination account → prefilled as the rename target
-    assert s._redirected == ("Acme", "Other")
+    api = FakeAPI(["Other"])
+    assert check(s, api) == "abort"
+    # the same console: the comparison doesn't ask for the direction again
+    assert s._compared is api
 
 
-def test_mismatch_redirect_no_prefill_multiple_dest(monkeypatch):
+def test_mismatch_yes_with_several_destination_accounts(monkeypatch):
     monkeypatch.setattr(pages.messagebox, "askyesnocancel",
                         lambda *a, **k: True)
     s = _fake_self([{"type": "account", "account": {"name": "Acme"}}])
-    assert check(s, FakeAPI(["X", "Y"])) == "abort"
-    assert s._redirected == ("Acme", "")
+    api = FakeAPI(["X", "Y"])
+    assert check(s, api) == "abort"
+    assert s._compared is api
 
 
 def test_mismatch_cancel(monkeypatch):
@@ -90,7 +103,7 @@ def test_mismatch_cancel(monkeypatch):
                         lambda *a, **k: None)
     s = _fake_self([{"type": "account", "account": {"name": "Acme"}}])
     assert check(s, FakeAPI(["Other"])) == "abort"
-    assert s._redirected is None
+    assert s._redirected is None and s._compared is None
 
 
 def test_site_node_keys_off_account_name(monkeypatch):

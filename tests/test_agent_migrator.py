@@ -361,6 +361,22 @@ def test_a_renamed_group_is_skipped_and_named_not_mis_migrated():
     assert again["unmatched"] == [] and again["agents"] == 4
 
 
+def test_a_fixed_scope_lands_in_the_destination_s_own_name():
+    """After a fix the plan says where agents really land — the
+    destination's 'Server Group' — not the source's spelling of it."""
+    data = _map()
+    data[0]["sites"][0]["groups"][0]["name"] = "Server Group"
+    am.rename_in_map(data, "group", "Server Group", "Servers")
+    plan = _plan_for(_source_console(), data)
+    row = next(r for r in plan["rows"] if r["Group"] == "Servers")
+    assert row["state"] == "ready" and row["token"] == "tok-servers"
+    assert row["Destination"] == "Acme / HQ / Server Group"
+    assert row["dest_group"] == "Servers"           # how the map finds it
+    row["token"] = ""                               # as a restored plan has
+    am.rehydrate_tokens(plan, data)
+    assert row["state"] == "ready" and row["token"] == "tok-servers"
+
+
 def test_a_renamed_site_skips_only_that_site():
     api = _source_console()
     data = _map()
@@ -549,6 +565,288 @@ def test_a_subset_of_accounts_can_be_migrated_from_a_full_map():
     assert plan["accounts"] == 2
     assert {r["Account"] for r in plan["rows"]} == {"Customer 2",
                                                     "Customer 5"}
+
+
+# ── reading only the destination the source scope needs ─────────────────
+
+class CountingConsole(MultiConsole):
+    """A MultiConsole that remembers which scopes were read."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.site_reads, self.group_reads = [], []
+
+    def get_sites(self, params=None, **kw):
+        self.site_reads.append(str((params or {}).get("accountId", "")))
+        return super().get_sites(params, **kw)
+
+    def get_groups(self, params=None, **kw):
+        self.group_reads.append(str((params or {}).get("siteIds", "")))
+        return super().get_groups(params, **kw)
+
+
+def test_only_the_destination_twins_of_the_source_scope_are_read():
+    """Moving two accounts out of 64 must not walk all 64 on the
+    destination — that walk was the slow half of the old step 1."""
+    dst = CountingConsole(n_accounts=64)
+    map_data, names = am.read_destination(MultiConsole(n_accounts=64), dst,
+                                          "A3, A7")
+    assert [a["name"] for a in map_data] == ["Customer 3", "Customer 7"]
+    assert sorted(set(dst.site_reads)) == ["A3", "A7"]
+    assert len(dst.group_reads) == 4                 # 2 accounts × 2 sites
+    assert len(names) == 64                          # offered by the fixer
+
+    plan = am.build_match_plan(MultiConsole(n_accounts=64), map_data,
+                               "A3, A7")
+    assert plan["ready"] == 12 and plan["blocked"] == 0
+
+
+def test_a_source_site_filter_narrows_the_destination_by_name():
+    src = _source_console()
+    dst = _dest_console()
+    reads = []
+    plain = dst.get_groups
+    dst.get_groups = lambda params=None, **kw: (
+        reads.append(str((params or {}).get("siteIds"))),
+        plain(params=params, **kw))[1]
+
+    map_data, _names = am.read_destination(src, dst, "100", "S2")
+
+    assert [s["name"] for s in map_data[0]["sites"]] == ["Branch"]
+    assert reads == ["s2"]                       # HQ's groups were never read
+    plan = am.build_match_plan(src, map_data, "100", "S2")
+    assert [r["Group"] for r in plan["rows"]] == ["Default Group"]
+    assert plan["ready"] == 1
+
+
+def test_a_destination_with_no_twin_is_not_walked_at_all():
+    src = MultiConsole(n_accounts=2)
+    dst = CountingConsole(n_accounts=2)
+    for acct in dst.accounts:
+        acct["name"] = acct["name"].replace("Customer", "Client")
+
+    map_data, names = am.read_destination(src, dst, "")
+
+    assert map_data == [] and dst.site_reads == []
+    assert names == ["Client 1", "Client 2"]
+    plan = am.build_match_plan(src, map_data, "")
+    assert [r["Status"] for r in plan["rows"]] == [am.NO_MATCH_ACCOUNT] * 2
+
+
+def test_a_name_fix_survives_reading_the_destination_again():
+    src = _source_console()
+    dst = _dest_console()
+    dst.account["name"] = "Acme Holdings"
+    dst.sites[0]["groups"][0]["name"] = "Server Group"
+
+    map_data, names = am.read_destination(src, dst, "100")
+    assert map_data == [] and names == ["Acme Holdings"]
+
+    renames = [{"kind": "account", "old": "Acme Holdings", "new": "Acme",
+                "within": []}]
+    map_data, _ = am.read_destination(src, dst, "100", renames=renames)
+    plan = am.build_match_plan(src, map_data, "100")
+    assert plan["ready"] == 2
+    unmatched = plan["unmatched"][0]
+    assert (unmatched["kind"], unmatched["within"]) == ("group",
+                                                        ["Acme", "HQ"])
+
+    renames.append({"kind": "group", "old": "Server Group", "new": "Servers",
+                    "within": unmatched["within"]})
+    map_data, _ = am.read_destination(src, dst, "100", renames=renames)
+    plan = am.build_match_plan(src, map_data, "100")
+    assert plan["ready"] == 3 and plan["unmatched"] == []
+    servers = plan["rows"][0]
+    assert servers["token"] == "tok-servers"         # the real group's token
+
+
+def test_a_group_fix_renames_only_inside_its_own_site():
+    data = _map()
+    data[0]["sites"][1]["groups"].append(
+        {"name": "Laptops", "id": "g4", "token": "tok-branch-laptops",
+         "type": "group"})
+    assert am.rename_in_map(data, "group", "Laptops", "Notebooks",
+                            within=["Acme", "Branch"]) is True
+    hq, branch = data[0]["sites"]
+    assert [g["name"] for g in hq["groups"]] == ["Servers", "Laptops"]
+    assert [g["name"] for g in branch["groups"]] == ["Default Group",
+                                                     "Notebooks"]
+    assert am.rename_in_map(data, "group", "Laptops", "X",
+                            within=["Acme", "Nowhere"]) is False
+
+
+def test_fixes_are_reapplied_accounts_first_and_only_once():
+    data = _map()
+    data[0]["name"] = "Acme Holdings"
+    data[0]["sites"][0]["name"] = "Head Office"
+    renames = [{"kind": "site", "old": "Head Office", "new": "HQ",
+                "within": ["Acme"]},
+               {"kind": "account", "old": "Acme Holdings", "new": "Acme",
+                "within": []}]
+    assert am.apply_renames(data, renames) == 2
+    assert data[0]["name"] == "Acme" and data[0]["sites"][0]["name"] == "HQ"
+    assert am.apply_renames(data, renames) == 0      # already applied
+
+
+# ── fixing names: the source beside the destination ─────────────────────
+
+def _respelt(site=None, group=None):
+    """The test destination, with HQ and/or its Servers group spelt
+    differently from the source."""
+    data = _map()
+    hq = data[0]["sites"][0]
+    if site:
+        hq["name"] = site
+    if group:
+        hq["groups"][0]["name"] = group
+    return data
+
+
+def test_the_comparison_is_the_source_as_a_tree_beside_the_destination():
+    data = _respelt(group="Server Group")
+    cmp = am.NameComparison(_plan_for(_source_console(), data), data)
+    acct, hq = cmp.key("Acme"), cmp.key("Acme", "HQ")
+    servers = cmp.key("Acme", "HQ", "Servers")
+    assert cmp.roots == [acct]
+    assert cmp.nodes[acct]["children"] == [hq, cmp.key("Acme", "Branch")]
+    assert cmp.nodes[hq]["children"] == [servers,                # "Empty"
+                                         cmp.key("Acme", "HQ", "Laptops")]
+    assert [cmp.state(k) for k in (acct, hq, servers)] == ["same", "same",
+                                                           "missing"]
+    assert (cmp.agents(servers), cmp.agents(hq), cmp.agents(acct)) == (2, 3, 4)
+    assert cmp.dest_text(servers) == "✕ not found"
+    # what the destination has in that place, and who already pairs with it
+    first, *rest = cmp.candidates(servers)
+    assert (first["shown"], first["taken_by"]) == ("Server Group", "")
+    assert [(c["shown"], c["taken_by"]) for c in rest] == [("Laptops",
+                                                            "Laptops")]
+    reason = cmp.reason(servers)
+    assert "site “HQ” has no group named “Servers”" in reason
+    assert "It has 2 groups — 1 not paired" in reason
+
+
+def test_a_pick_another_scope_already_pairs_with_is_refused():
+    data = _respelt(group="Server Group")
+    cmp = am.NameComparison(_plan_for(_source_console(), data), data)
+    servers = cmp.key("Acme", "HQ", "Servers")
+    # a fix renames the destination entry, so taking Laptops would strand
+    # the source's own Laptops group
+    assert cmp.check(servers, "Laptops") == ("taken", "Laptops")
+    assert cmp.choose(servers, "Laptops") is False
+    assert cmp.choose(servers, "Nope") is False          # never read there
+    assert cmp.choose(servers, "server group") is True   # case is ignored
+    assert cmp.state(servers) == "chosen"
+    assert cmp.dest_text(servers) == "→ “Server Group”"
+    [(item, dest)] = cmp.chosen()
+    assert (item["kind"], item["name"], item["within"], dest) == (
+        "group", "Servers", ["Acme", "HQ"], "Server Group")
+    am.apply_renames(data, cmp.renames())
+    assert _plan_for(_source_console(), data)["unmatched"] == []
+
+
+def test_picking_a_site_compares_its_groups_straight_away():
+    data = _respelt(site="Head Office")
+    data[0]["sites"][0]["groups"][1]["name"] = "Notebooks"
+    cmp = am.NameComparison(_plan_for(_source_console(), data), data)
+    hq = cmp.key("Acme", "HQ")
+    servers = cmp.key("Acme", "HQ", "Servers")
+    laptops = cmp.key("Acme", "HQ", "Laptops")
+    # its groups are read from the source, but there is nothing to compare
+    # them with until the site is paired
+    assert cmp.state(hq) == "missing" and cmp.agents(hq) == 3
+    assert cmp.state(servers) == cmp.state(laptops) == "waiting"
+    assert cmp.candidates(servers) == []
+    assert cmp.choose(hq, "Head Office")
+    assert cmp.state(servers) == "same" and cmp.state(laptops) == "missing"
+    assert cmp.candidates(laptops)[0]["shown"] == "Notebooks"
+    assert cmp.choose(laptops, "Notebooks")
+    cmp.unchoose(hq)                     # a different site: picks inside go
+    assert cmp.state(laptops) == "waiting" and cmp.choices == {}
+    assert cmp.choose(hq, "Head Office") and cmp.choose(laptops, "Notebooks")
+    am.apply_renames(data, cmp.renames())
+    assert _plan_for(_source_console(), data)["unmatched"] == []
+
+
+def test_the_comparison_says_where_else_a_name_is_and_what_was_fixed():
+    data = _respelt(group="Server Group")
+    data[0]["sites"][1]["groups"].append(
+        {"name": "Servers", "id": "g8", "token": "tok-x", "type": "group"})
+    cmp = am.NameComparison(_plan_for(_source_console(), data), data)
+    servers = cmp.key("Acme", "HQ", "Servers")
+    assert cmp.elsewhere(servers) == ["Acme › Branch"]
+    # a name the destination read never showed can still be typed — flagged
+    assert cmp.choose(servers, "Srv-01", allow_unknown=True)
+    assert cmp.typed(servers)
+    assert "only pairs if one exists" in cmp.reason(servers)
+
+    fix = {"kind": "group", "old": "Server Group", "new": "Servers",
+           "within": ["Acme", "HQ"]}
+    fixed = _respelt(group="Server Group")
+    am.apply_renames(fixed, [fix])
+    again = am.NameComparison(_plan_for(_source_console(), fixed), fixed,
+                              renames=[fix])
+    assert again.state(servers) == "fixed"
+    assert again.dest_text(servers) == "✎ “Server Group” · fixed earlier"
+    assert again.unfix(servers) and again.removed() == [fix]
+    assert again.state(servers) == "unfixed"
+
+
+def test_an_account_with_no_twin_is_offered_every_destination_account():
+    data = _map()
+    data[0]["name"] = "Acme Holdings"
+    cmp = am.NameComparison(_plan_for(_source_console(), data), data,
+                            ["Globex", "Acme Holdings"])
+    acct = cmp.key("Acme")
+    assert cmp.state(acct) == "missing" and cmp.nodes[acct]["children"] == []
+    assert [c["shown"] for c in cmp.candidates(acct)] == ["Acme Holdings",
+                                                          "Globex"]
+    assert "compared once it is paired" in cmp.reason(acct)
+
+
+def test_the_tree_filters_to_what_needs_fixing_and_searches_both_sides():
+    data = _respelt(group="Server Group")
+    cmp = am.NameComparison(_plan_for(_source_console(), data), data)
+    acct, hq = cmp.key("Acme"), cmp.key("Acme", "HQ")
+    branch = cmp.key("Acme", "Branch")
+    servers = cmp.key("Acme", "HQ", "Servers")
+    assert len(cmp.visible("all")) == 6
+    # only what needs fixing, under the scopes that give it context
+    assert cmp.visible("fix") == [(acct, 0), (hq, 1), (servers, 2)]
+    assert cmp.choose(servers, "Server Group")
+    # a destination name finds the source scope that will use it
+    assert [k for k, _d in cmp.visible("all", "server group")] == [
+        acct, hq, servers]
+    assert cmp.visible("done") == [(acct, 0), (hq, 1), (servers, 2)]
+    # a folded branch hides what is under it — unless searching
+    assert [k for k, _d in cmp.visible("all", "", {hq})] == [
+        acct, hq, branch, cmp.key("Acme", "Branch", "Default Group")]
+    assert servers in [k for k, _d in cmp.visible("all", "serv", {hq})]
+
+
+def test_the_last_destination_read_is_kept_owner_only(tmp_path):
+    path = str(tmp_path / "dest.json")
+    renames = [{"kind": "site", "old": "A", "new": "B", "within": ["X"]}]
+    am.save_destination(_map(), "https://dst.sentinelone.net", renames, path)
+    if os.name == "posix":
+        assert oct(os.stat(path).st_mode & 0o777) == oct(0o600)
+    saved = am.load_destination(path)
+    assert saved["destination"] == "https://dst.sentinelone.net"
+    assert saved["renames"] == renames and saved["map"] == _map()
+
+    (tmp_path / "junk.json").write_text("{nope", encoding="utf-8")
+    assert am.load_destination(str(tmp_path / "junk.json")) == {}
+    assert am.load_destination(str(tmp_path / "missing.json")) == {}
+
+
+def test_the_cached_plan_says_which_scope_it_was_built_for(tmp_path):
+    data = _map()
+    path = str(tmp_path / "plan.json")
+    am.save_plan(am.build_match_plan(_source_console(), data, "100"),
+                 _fp(data, account_ids="100, 200"), path)
+    scope = am.cached_plan_scope(path)
+    assert scope["accounts"] == "100 200"
+    assert scope["source"] == "https://src.sentinelone.net"
+    assert am.cached_plan_scope(str(tmp_path / "none.json")) == {}
 
 
 # ── status report ───────────────────────────────────────────────────────
@@ -1174,13 +1472,19 @@ def test_the_chooser_returns_what_was_ticked():
 
 
 def test_every_scope_field_can_be_chosen_from_a_list():
+    """One scope drives the check, the migration and the status report,
+    and both of its fields open the chooser."""
     src = inspect.getsource(am.AgentMigratorPage)
-    for entry in ("map_account", "map_site", "match_account", "match_site",
-                  "status_account", "status_site"):
-        assert f"self.{entry} = form.field(" in src
-    # three panels × two fields, each wired to a chooser
-    assert src.count("self._choose_accounts(") == 3
-    assert src.count("self._choose_sites(") == 3
+    for entry in ("src_accounts", "src_sites"):
+        assert f"self.{entry} = ctk.CTkEntry(" in src
+    assert "self._choose_accounts(self.src_accounts)" in src
+    assert "self._choose_sites(self.src_accounts, self.src_sites)" in src
+    # …and every action reads that same scope, not fields of its own
+    for fn in (am.AgentMigratorPage._run_match,
+               am.AgentMigratorPage._run_status):
+        body = inspect.getsource(fn)
+        assert "self.src_accounts.get()" in body
+        assert "self.src_sites.get()" in body
 
 
 # ── the chooser on a console with thousands of scopes ───────────────────
@@ -1385,13 +1689,18 @@ def test_bounded_lookups_ask_for_one_page_only():
 # fix without needing a display.
 
 def test_the_live_feed_never_grows_a_widget_per_agent():
-    src = inspect.getsource(am._LiveFeed)
+    # the agents feed and the plan list share one pooled implementation
+    assert issubclass(am._LiveFeed, am._VirtualTable)
+    assert issubclass(am._PlanList, am._VirtualTable)
+    src = inspect.getsource(am._VirtualTable)
     assert "VISIBLE" in src
     # rows come from a fixed pool built once in __init__
     assert "self._pool = [self._make_row(i) for i in range(self.VISIBLE)]" \
         in src
     # …and _make_row is never called anywhere else
     assert src.count("_make_row(") == 2        # the definition and that line
+    for cls in (am._LiveFeed, am._PlanList):
+        assert "_make_row(" not in inspect.getsource(cls)
     # put() records data; it must not build or configure widgets
     put = inspect.getsource(am._LiveFeed.put)
     assert "configure" not in put and "tk." not in put
@@ -1406,7 +1715,7 @@ def test_the_live_feed_rows_are_plain_tk_not_customtkinter():
 
 
 def test_repaints_are_skipped_when_nothing_changed():
-    for fn in (am._LiveFeed.render, am._Stats.show, am._StepBar.set):
+    for fn in (am._LiveFeed.render, am._Stats.show, am._StepCard.set):
         src = inspect.getsource(fn)
         assert "sig" in src or "painted" in src, (
             f"{fn.__qualname__} must not reconfigure widgets blindly")
@@ -1543,26 +1852,28 @@ def test_reading_the_destination_again_invalidates_the_old_plan():
     """A new destination file must not leave step 3 armed with counts from
     the previous one."""
     src = inspect.getsource(am.AgentMigratorPage._set_map)
-    assert "self._plan = None" in src
-    assert "self._report = None" in src
+    assert "self._forget_plan_view()" in src
+    forget = inspect.getsource(am.AgentMigratorPage._forget_plan_view)
+    assert "self._plan = None" in forget
+    assert "self._report = None" in forget
+    # a check reads the destination afresh, so it starts from nothing too
+    check = inspect.getsource(am.AgentMigratorPage._run_match)
+    assert "self._forget_plan_view()" in check
+    assert "self._report = None" in check
 
 
 def test_the_runbook_sequences_the_agent_move_after_the_config():
     """Endpoints should only be pointed at a destination that has been
     restored and validated."""
-    with open(os.path.join(ROOT, "pages.py"), encoding="utf-8") as f:
-        source = f.read()
-    steps = source.split("STEPS = [", 1)[1].split("\n    ]", 1)[0]
-    order = [s for s in ("Restore to destination", "Validate the migration",
-                         "Match the agent scopes", "Migrate the agents",
-                         "Manifest & close ticket") if s in steps]
-    assert order == ["Restore to destination", "Validate the migration",
-                     "Match the agent scopes", "Migrate the agents",
-                     "Manifest & close ticket"]
-    assert steps.count('"Agent Migration"') == 2
+    import migration_guide as guide
+    order = [s.key for s in guide.STEPS]
+    assert order[order.index("restore"):] == [
+        "restore", "validate", "agents_matched", "agents_moved", "manifest"]
+    assert [s.page for s in guide.STEPS].count("Agent Migration") == 2
     # …and both are detected from this page rather than ticked by hand
-    assert "agents_matched" in source and "agents_moved" in source
-    assert '"_plan" if key == "agents_matched" else "_report"' in source
+    source = inspect.getsource(guide.observe)
+    assert 'getattr(agents, "_plan", None)' in source
+    assert 'getattr(agents, "_report", None)' in source
 
 
 def test_the_page_is_reachable_from_the_migration_nav():
@@ -1583,6 +1894,377 @@ def test_the_old_flat_token_page_is_gone():
     assert "class AgentMigrationPage" not in pages_src
     nav = app_src.split("nav_migration = [", 1)[1].split("]", 1)[0]
     assert nav.count('"Agent Migration"') == 1
+
+
+# ── the page itself, driven end to end (needs a display) ────────────────────
+
+class _App:
+    """Just what the page needs from the main window."""
+
+    def __init__(self, source=None, dest=None):
+        self.source_api, self.dest_api = source, dest
+        self.lines, self.audit = [], []
+
+    def cli_log(self, msg, level="info"):
+        self.lines.append(msg)
+
+    def log_audit(self, action, **fields):
+        self.audit.append((action, fields))
+
+
+@pytest.fixture
+def new_page(monkeypatch, tmp_path):
+    """Build pages on a hidden window; the plan cache lives in tmp_path."""
+    monkeypatch.setattr(am.config, "CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(am.messagebox, "askyesno", lambda *a, **k: True)
+    monkeypatch.setattr(am.messagebox, "showinfo", lambda *a, **k: None)
+    roots = []
+
+    def make(source=None, dest=None):
+        try:
+            root = am.ctk.CTk()
+        except Exception as exc:                  # no display available
+            pytest.skip(f"Tk unavailable: {exc}")
+        root.withdraw()
+        roots.append(root)
+        app = _App(source, dest)
+        pg = am.AgentMigratorPage(root, app)
+        pg.grid(row=0, column=0, sticky="nsew")
+        return pg, app
+
+    yield make
+    for root in roots:
+        root.destroy()
+
+
+def _consoles():
+    src, dst = _source_console(), _dest_console()
+    src.base_url = "https://src.sentinelone.net"
+    dst.base_url = "https://dst.sentinelone.net"
+    return src, dst
+
+
+def _settle(page, until, timeout=10.0):
+    """Run the Tk main loop until `until()` holds. The worker reports back
+    with after(), which Tkinter only accepts from another thread while the
+    main thread is inside mainloop — as it is in the app."""
+    deadline = time.monotonic() + timeout
+
+    def poll():
+        if until() or time.monotonic() > deadline:
+            page.quit()
+        else:
+            page.after(20, poll)
+
+    page.after(20, poll)
+    page.mainloop()
+    assert until(), "the page never finished"
+
+
+def _check(page, accounts="100"):
+    if accounts is not None:
+        page.src_accounts.delete(0, "end")
+        page.src_accounts.insert(0, accounts)
+    page._run_match()
+    _settle(page, lambda: page._busy is None)
+    return page._plan
+
+
+def test_the_page_checks_then_migrates_exactly_the_plan(new_page):
+    src, dst = _consoles()
+    pg, app = new_page(src, dst)
+    assert [c.step_state for c in pg.cards] == ["done", "active", "locked"]
+    assert pg.live_btn.cget("state") == "disabled"
+
+    plan = _check(pg)
+    assert src.moves == []                       # checking moved nothing
+    assert (plan["ready"], plan["agents"]) == (3, 4)
+    assert pg.plan_list.counts() == (3, 3)
+    assert [c.step_state for c in pg.cards] == ["done", "done", "todo"]
+    assert pg.live_btn.cget("state") == "normal"
+    assert "4 agents" in pg.live_btn.cget("text")
+
+    pg._run_live()
+    _settle(pg, lambda: pg._busy is None)
+    assert {m["filter"]["groupIds"][0]: m["token"] for m in src.moves} == {
+        "G1": "tok-servers", "G2": "tok-hq", "G3": "tok-default"}
+    assert pg._report["moved"] == 4 and pg._report["failed"] == 0
+    assert pg.live_feed.counts() == (4, 4)
+    assert pg.cards[2].step_state == "done"
+    assert any(action == "agent_mapped_migrate" for action, _f in app.audit)
+
+    # the plan is spent: migrating again needs a fresh check first
+    assert pg.live_btn.cget("state") == "disabled"
+    pg._run_live()
+    assert len(src.moves) == 3
+    assert pg.live_export_btn.winfo_manager()
+    _check(pg, accounts=None)
+    assert pg._report is None and pg.live_btn.cget("state") == "normal"
+    assert pg.live_export_btn.winfo_manager()       # the last run still exports
+    assert pg.live_feed.counts() == (4, 4)
+
+
+def test_only_the_destination_the_scope_needs_is_read_by_a_check(new_page):
+    src, dst = _consoles()
+    reads = []
+    plain = dst.get_groups
+    dst.get_groups = lambda params=None, **kw: (
+        reads.append((params or {}).get("siteIds")),
+        plain(params=params, **kw))[1]
+    pg, _app = new_page(src, dst)
+    pg.src_sites.insert(0, "S2")
+    plan = _check(pg)
+    assert reads == ["s2"]
+    assert [r["Group"] for r in plan["rows"]] == ["Default Group"]
+
+
+def test_changing_the_scope_after_checking_locks_the_migration(new_page,
+                                                               monkeypatch):
+    src, dst = _consoles()
+    pg, _app = new_page(src, dst)
+    _check(pg)
+
+    pg.src_sites.insert(0, "S2")
+    pg._refresh_gates()
+    assert pg._plan_stale()
+    assert pg.cards[1].step_state == "warn"
+    assert pg.cards[2].step_state == "locked"
+    assert pg.live_btn.cget("state") == "disabled"
+    warned = []
+    monkeypatch.setattr(am.messagebox, "showwarning",
+                        lambda *a, **k: warned.append(a))
+    pg._run_live()
+    assert warned and src.moves == []
+
+    pg.src_sites.delete(0, "end")                # back to what was checked
+    pg._refresh_gates()
+    assert not pg._plan_stale()
+    assert pg.live_btn.cget("state") == "normal"
+
+
+def test_losing_the_destination_locks_a_checked_plan(new_page):
+    src, dst = _consoles()
+    pg, app = new_page(src, dst)
+    _check(pg)
+    app.dest_api = None
+    pg._refresh_gates()
+    assert pg.cards[0].step_state == "error"
+    assert pg.live_btn.cget("state") == "disabled"
+
+
+def test_a_name_fixed_on_the_page_survives_checking_again(new_page):
+    src, dst = _consoles()
+    dst.sites[0]["groups"][0]["name"] = "Server Group"
+    pg, _app = new_page(src, dst)
+    plan = _check(pg)
+    assert plan["ready"] == 2 and pg._fixable()
+    assert pg.fix_btn.winfo_manager()                   # Fix names is offered
+
+    item = plan["unmatched"][0]
+    pg._after_fix([(item, "Server Group")])            # what the dialog returns
+    _settle(pg, lambda: pg._busy is None)
+    assert pg._plan["ready"] == 3
+
+    again = _check(pg, accounts=None)                   # re-reads the destination
+    assert again["ready"] == 3 and again["unmatched"] == []
+    assert again["rows"][0]["token"] == "tok-servers"
+
+
+def test_the_fix_dialog_compares_the_tree_and_hands_back_the_picks(new_page):
+    src, dst = _consoles()
+    dst.sites[0]["name"] = "Head Office"
+    pg, _app = new_page(src, dst)
+    plan = _check(pg)
+    cmp = am.NameComparison(plan, pg._map_data, pg._dest_accounts,
+                            pg._renames)
+    hq = cmp.key("Acme", "HQ")
+    got = []
+    dlg = am._NameFixDialog(pg, cmp, lambda *picks: got.append(picks))
+    try:
+        assert dlg._selected == hq                  # opens on the first ✕
+        assert {r["node"]: r["state"]
+                for r in dlg.tree.records()}[hq] == "missing"
+        taken = [r["shown"] for r in dlg._c_list.records() if not r["_free"]]
+        assert taken == ["Branch"]              # already the source Branch's
+        pick = next(r for r in dlg._c_list.records()
+                    if r["shown"] == "Head Office")
+        dlg._on_candidate(pick)
+        assert dlg._use_btn.cget("state") == "normal"
+        dlg._use()
+        assert cmp.state(hq) == "chosen"
+        assert cmp.state(cmp.key("Acme", "HQ", "Servers")) == "same"
+        assert dlg._apply_btn.cget("state") == "normal"
+        dlg._apply()
+    finally:
+        if dlg.winfo_exists():
+            dlg.destroy()
+    [(chosen, removed)] = got
+    assert [(i["kind"], i["name"], d) for i, d in chosen] == [
+        ("site", "HQ", "Head Office")] and removed == []
+    pg._after_fix(chosen, removed)
+    _settle(pg, lambda: pg._busy is None)
+    assert pg._plan["ready"] == 3 and pg._plan["unmatched"] == []
+
+
+def test_the_fix_dialog_lists_every_mismatch_on_a_fixed_pool(new_page):
+    """The old dialog stopped at 60 rows of CustomTkinter widgets."""
+    pg, _app = new_page()
+    rows = [am._plan_row("Acme", "HQ", f"Group {i:03}", kind="group",
+                         Total=1, Status=am.NO_MATCH_GROUP)
+            for i in range(150)]
+    plan = {"rows": rows, "unmatched": [
+        {"kind": "group", "name": r["Group"], "path": "Acme / HQ",
+         "within": ["Acme", "HQ"], "candidates": []} for r in rows]}
+    data = [{"name": "Acme", "id": "1", "type": "account", "sites": [
+        {"name": "HQ", "id": "s1", "token": "t", "type": "site",
+         "groups": [{"name": "Workstations", "id": "g1", "token": "",
+                     "type": "group"}]}]}]
+    dlg = am._NameFixDialog(pg, am.NameComparison(plan, data),
+                            lambda *picks: None)
+    try:
+        assert len(dlg.tree.records()) == 152       # Acme, HQ and all 150
+        assert len(dlg.tree._pool) == am._VirtualTable.VISIBLE
+        dlg._search.insert(0, "group 14")
+        dlg._refresh()
+        assert len(dlg.tree.records()) == 2 + 10    # Group 140–149
+    finally:
+        dlg.destroy()
+
+
+def test_reopening_the_page_brings_the_last_plan_back(new_page):
+    src, dst = _consoles()
+    pg, _app = new_page(src, dst)
+    _check(pg)
+
+    reopened, _app = new_page(src, dst)                 # as after a restart
+    reopened.on_show()
+    plan = reopened._plan
+    assert plan is not None and plan["ready"] == 3
+    assert reopened.src_accounts.get() == "100"
+    assert reopened._plan_saved_at and not reopened._plan_stale()
+    assert reopened.live_btn.cget("state") == "normal"
+    # tokens came back from the kept destination read, not from the cache
+    assert {r["token"] for r in plan["rows"]} == {"tok-servers", "tok-hq",
+                                                   "tok-default"}
+
+    elsewhere = _dest_console()
+    elsewhere.base_url = "https://elsewhere.sentinelone.net"
+    other, _app = new_page(src, elsewhere)
+    other.on_show()
+    assert other._plan is None, "a plan was restored for another destination"
+
+
+def test_lists_draw_any_number_of_rows_from_a_fixed_pool(new_page):
+    pg, _app = new_page()
+    feed = pg.live_feed
+    before = len(feed._body.winfo_children())
+    for i in range(5000):
+        feed.put({"id": f"a{i}", "Computer": f"PC-{i}", "Site": "S",
+                  "Group": "G", "Result": "failed" if i % 3 == 0
+                  else "moved", "Detail": ""})
+    started = time.perf_counter()
+    feed.render()
+    assert time.perf_counter() - started < 0.5
+    assert len(feed._body.winfo_children()) == before
+    assert feed.counts() == (5000, 5000)
+
+    feed.set_filter("failed")
+    assert feed.counts() == (1667, 5000)
+    feed._fit = 20
+    feed.scroll(100)
+    assert feed._offset == 100
+    feed.scroll(10 ** 6)
+    assert feed._offset == 1667 - 20
+    assert len(feed._body.winfo_children()) == before
+
+
+def test_the_page_never_asks_for_more_height_than_the_window_has(new_page):
+    """At 700px tall the page asked for 752 and pushed the app's status
+    bar off the bottom. The results area absorbs the slack instead."""
+    src, dst = _consoles()
+    pg, _app = new_page(src, dst)
+    _check(pg)
+    pg.update_idletasks()
+    assert pg.winfo_reqheight() < 400, (
+        f"the page asks for {pg.winfo_reqheight()}px — set grid_propagate("
+        f"False) before building it")
+
+
+def test_lists_follow_the_apps_ui_scaling(new_page):
+    """The app scales its widgets with the window (up to 1.35×); the
+    plain-Tk lists must grow with it or their text shrinks beside the
+    rest of the page."""
+    pg, _app = new_page()
+    table = pg.plan_list
+    row_h = table._row_h
+    font = table._pool[0]["cells"][1].cget("font")
+    old = am.ctk.ScalingTracker.get_widget_scaling(pg)
+    try:
+        am.ctk.set_widget_scaling(old * 1.3)
+        assert table._row_h > row_h
+        assert table._pool[0]["cells"][1].cget("font") != font
+    finally:
+        am.ctk.set_widget_scaling(old)
+    assert table._row_h == row_h
+
+
+def test_drawing_a_list_never_runs_a_nested_update(new_page):
+    pg, _app = new_page()
+    table = pg.plan_list
+    nested = []
+    real = am.tk.Misc.update_idletasks
+    am.tk.Misc.update_idletasks = lambda self: nested.append(self)
+    try:
+        table.set_rows([{"key": i, "Site": f"Site {i}"} for i in range(500)])
+        table.scroll(40)
+    finally:
+        am.tk.Misc.update_idletasks = real
+    assert nested == []
+    _settle(pg, lambda: table._bar.get() != (0.0, 1.0))
+    first, last = table._bar.get()
+    assert 0 < first < last < 1
+
+
+def test_a_wrapped_label_does_not_chase_a_one_pixel_wobble():
+    class Frame:
+        def bind(self, _sequence, handler, add=None):
+            self.handler = handler
+
+    class Label:
+        def __init__(self):
+            self.wraps = []
+
+        def configure(self, **kw):
+            self.wraps.append(kw["wraplength"])
+
+    class Event:
+        def __init__(self, width):
+            self.width = width
+
+    frame, label = Frame(), Label()
+    am._wrap(frame, label, pad=32)
+    for width in (507, 506, 507, 506, 507, 506):
+        frame.handler(Event(width))
+    assert label.wraps == [475, 474]
+    frame.handler(Event(520))
+    assert label.wraps[-1] == 488
+    frame.handler(Event(300))
+    assert label.wraps[-1] == 268
+
+
+def test_a_queued_scrollbar_update_waits_for_the_event_loop(new_page):
+    pg, _app = new_page()
+    calls = []
+
+    class Bar:
+        def set(self, *pos):
+            calls.append(pos)
+    queue = am._queued_set(pg, Bar())
+    queue("0.0", "0.5")
+    queue("0.25", "0.75")
+    assert calls == []
+    _settle(pg, lambda: calls)
+    assert calls == [("0.25", "0.75")]
 
 
 def test_the_map_file_round_trips_as_utf8_json(tmp_path):

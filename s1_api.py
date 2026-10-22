@@ -369,7 +369,7 @@ class S1API:
         return self.get_all("/accounts", params=params, limit=n, max_items=n)
 
     def search_sites(self, query: str = "", account_ids: str = "",
-                     limit: int = 50) -> list[dict]:
+                     limit: int = 50, states: str = "") -> list[dict]:
         """At most `limit` sites, matched console-side.
 
         Single request, no cursor loop — the caller wants a page to show,
@@ -381,6 +381,8 @@ class S1API:
             q["query"] = query
         if account_ids:
             q["accountIds"] = account_ids
+        if states:
+            q["states"] = states
         body = self._get("/sites", q)
         data = body.get("data", {})
         if isinstance(data, dict) and data.get("sites"):

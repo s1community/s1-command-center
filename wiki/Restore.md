@@ -7,7 +7,7 @@ The Restore page pushes backup data to the DESTINATION console, recreating the e
 The screen is three numbered steps, top to bottom. Each step's badge turns **✓** when it is done and **!** when something needs fixing, and the next thing to do is the only filled button.
 
 1. **Backup file** — Auto-loads the latest backup, or **Browse…** (or paste a path and press Enter). The line underneath says what the file holds, e.g. `1 account · 2 sites · 4 groups · from fao.sentinelone.net`. **↩ Rollback** loads the last pre-restore snapshot instead — see [Snapshot & Rollback](#snapshot--rollback)
-2. **What to restore** — Leave the fields blank for everything, or name accounts, sites or groups — see [Restore Scope](#restore-scope). A live line states exactly what will be restored. **More options** holds the element choices, [Rename in the backup](#rename-in-the-backup) and [Defaults & licenses](#defaults--licenses-dialog)
+2. **What to restore** — Leave the fields blank for everything, or name accounts, sites or groups — see [Restore Scope](#restore-scope). A live line states exactly what will be restored. **⇄ Compare with destination…** shows every account, site and group of that scope beside what the destination already has, and lets you rename backup scopes to match — see [Compare with the Destination](#compare-with-the-destination). **More options** holds the element choices, [Rename in the backup](#rename-in-the-backup) and [Defaults & licenses](#defaults--licenses-dialog)
 3. **Restore** — **▶ Restore N nodes** resolves the structure, then pushes config node by node. **✈ Pre-flight** and **🔍 Preview changes** check first without writing anything
 
 While a restore runs, only **■ Stop** and **⏭ Skip** are offered. When it finishes, step 3 shows the results buttons — see [Export Report](#export-report) — and **↻ Resume (N left)** if it was stopped or nodes failed.
@@ -59,6 +59,36 @@ Under the steps, two tabs share the space:
 
 The tabs keep working while a restore runs. They are hidden while **More options** is open, to give the options the room; starting a restore or a preview brings them back.
 
+## Compare with the Destination
+
+The restore finds accounts, sites and groups on the destination by their **exact** name: a backup scope with a twin there is restored into it, and one without is created from the backup file. **⇄ Compare with destination…** (step 2) shows that before anything is written. It reads the destination — its accounts, and the sites and groups of every account a backup account could land in — and opens a window with two panes.
+
+**Left: the tree.** What this restore touches, account › site › group, beside what the destination has in the same place. Scopes that are only shown because something under them is restored say so. *Items* counts the settings each scope carries in the backup.
+
+| Mark | Meaning |
+|------|---------|
+| ✓ exists | The destination has it by that exact name — the backup's settings are restored into it |
+| + will be created | Not on the destination — created from the backup file |
+| ≈ other case | There under another case or spacing (`acme corp` vs `Acme Corp`). The exact-name restore would miss it and try to create a near-duplicate |
+| → | You renamed it — into an existing scope, or to a new name it is created under |
+| ✕ skipped | Not restored, and nor is anything under it: its name is held by an expired or deleted account, its parent won't exist, or its level isn't ticked in step 2 |
+
+**Needs a look** (the opening filter when there is something to look at) keeps the near matches, the skipped scopes and the scopes that would be created beside others — with the scopes above them for context. **All** shows everything; **Renamed** shows your renames. The search box matches backup and destination names.
+
+**Right: the selected scope.** Why it is restored into something, created or skipped, in a sentence or two; every destination scope in its place, closest name first, with the backup scope already restoring into each; where else on the destination its name turns up; and what the restore will ask when it gets there — for example that it will offer to put a new site on the account's default site, and to answer No when another backup site already restores into that one.
+
+**Renaming.** Pick a destination scope and **Restore into “…”** to rename the backup scope to it, or type a new name and **Rename to “…”** to have it created under that name. A name another backup scope in the same place already uses is refused — two scopes would merge in the backup — and so is a name with `/`. Renaming an account or site resets the renames under it, because its children are then compared with a different place. Picking a destination account that wasn't read yet reads its sites and groups in the background.
+
+**Apply.** **Rename N scopes in the backup** renames them in the loaded backup the way [Rename in the backup](#rename-in-the-backup) does (parents first), points the Account / Site / Group fields at the new names, and logs each rename. The file on disk is left as it is, and nothing is sent to the console. The line beside the button then says what was renamed; compare again to check.
+
+**When the destination has nothing.** If the destination has no accounts, the window and the line beside the button say so: *The DESTINATION console has no accounts yet — this restore will create everything from the backup file: 2 accounts, 4 sites, 8 groups.* When it has accounts but none of this restore's, the line says *Nothing in this restore is on the DESTINATION console yet — it will create all of it from the backup file*. The Restore confirmation says the same instead of *This will OVERWRITE settings*. A destination that couldn't be read is reported as *Couldn't read the DESTINATION console* — never as empty.
+
+A few more things it accounts for:
+
+- **Ticket account ID** — after **Paste from Ticket**, accounts and sites go to the ticket's account whatever their name, but groups look their account up by name; the window shows that and suggests renaming the account to match.
+- **Scope changes** — change the fields, levels or console afterwards and the line asks you to compare again.
+- **Global settings only** — nothing to compare; the line says so without reading the console.
+
 ## Rename in the Backup
 
 **More options → Rename in the backup** (the CLI's *mangle rename*) renames account/site/group paths in the loaded backup before restoring:
@@ -68,7 +98,7 @@ The tabs keep working while a restore runs. They are hidden while **More options
 | `OldCorp/Production` | `NewCorp/Production` |
 | `OldCorp` | `NewCorp` |
 
-The fields are auto-filled when you use **Paste from Ticket**. If none of the backup's accounts exists on the destination, the restore asks first and can open this section for you with the names filled in.
+The fields are auto-filled when you use **Paste from Ticket**. If none of the backup's accounts exists on the destination, the restore asks first and can open [Compare with the Destination](#compare-with-the-destination) for you, to rename the account (and anything else) before restoring.
 
 ## Snapshot & Rollback
 

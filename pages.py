@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re as _re
+import threading
 import unicodedata
 from collections import Counter
 from tkinter import filedialog, messagebox
@@ -1964,6 +1965,15 @@ def _select_by_names(items, filt, key=None):
     return [items[i] for i in picked]
 
 
+def _name_filter(labels, filt):
+    if not _split_scope_names(filt):
+        return (lambda _name: True), []
+    labels = _unique_names(labels)
+    picked, missing = _match_scope_names(labels, filt)
+    keep = {_norm_name(labels[i]) for i in picked}
+    return (lambda name: _norm_name(name) in keep), missing
+
+
 def _node_scope_names(node):
     """(account, site, group) names a backup node sits under, read the way
     the restore resolves it: ancestors come from the PATH (Mangle Rename
@@ -2020,7 +2030,7 @@ def _restore_scope(backup, levels=None, filters=None):
     active = {k: bool(_split_scope_names(filters.get(k) or ""))
               for k in ("account", "site", "group")}
 
-    def _pick(labels, field, multi=False):
+    def _pick(labels, field, multi=True):
         labels = _unique_names(labels)
         hit, missing = _match_scope_names(labels, filters.get(field) or "",
                                           multi=multi)
@@ -2112,7 +2122,7 @@ def _backup_sites(backup, account_filter=""):
     blank or matches nothing."""
     rows = [(n.get("type"),) + _node_scope_names(n) for n in backup]
     accts = _unique_names(a for _t, a, _s, _g in rows)
-    hit, _miss = _match_scope_names(accts, account_filter or "", multi=False)
+    hit, _miss = _match_scope_names(accts, account_filter or "")
     keep = ({_norm_name(accts[i]) for i in hit}
             or {_norm_name(a) for a in accts})
     sites = {}
@@ -2126,6 +2136,45 @@ def _backup_sites(backup, account_filter=""):
         if ntype == "group":
             entry["groups"] += 1
     return list(sites.values())
+
+
+def _backup_accounts(backup):
+    accounts = {}
+    for node in backup:
+        acct, site, _group = _node_scope_names(node)
+        if not acct:
+            continue
+        entry = accounts.setdefault(_norm_name(acct), {
+            "name": acct, "sites": [], "groups": 0})
+        if site and _norm_name(site) not in entry["sites"]:
+            entry["sites"].append(_norm_name(site))
+        if node.get("type") == "group":
+            entry["groups"] += 1
+    return [{"name": e["name"], "sites": len(e["sites"]),
+             "groups": e["groups"]} for e in accounts.values()]
+
+
+def _backup_groups(backup, account_filter="", site_filter=""):
+    rows = [_node_scope_names(n) for n in backup if n.get("type") == "group"]
+    accts = _unique_names(a for a, _s, _g in rows)
+    hit, _miss = _match_scope_names(accts, account_filter or "")
+    keep_a = ({_norm_name(accts[i]) for i in hit}
+              or {_norm_name(a) for a in accts})
+    sites = _unique_names(s for a, s, _g in rows if _norm_name(a) in keep_a)
+    hit, _miss = _match_scope_names(sites, site_filter or "")
+    keep_s = ({_norm_name(sites[i]) for i in hit}
+              or {_norm_name(s) for s in sites})
+    picked = [(a, s, g) for a, s, g in rows
+              if g and _norm_name(a) in keep_a and _norm_name(s) in keep_s]
+    several = len({_norm_name(a) for a, _s, _g in picked}) > 1
+    groups = {}
+    for a, s, g in picked:
+        entry = groups.setdefault(_norm_name(g), {"name": g, "sites": []})
+        place = f"{a} / {s}" if several else s
+        if place not in entry["sites"]:
+            entry["sites"].append(place)
+    return [{"name": e["name"], "where": _places_text(e["sites"], "sites")}
+            for e in groups.values()]
 
 
 def _restore_scope_problem(backup, scope):
@@ -2145,12 +2194,13 @@ def _restore_scope_problem(backup, scope):
         return text
 
     if miss.get("account"):
-        return (f"No account in this backup matches "
-                f"'{miss['account'][0]}'.\n\n"
+        names = ", ".join(f"'{n}'" for n in miss["account"])
+        return (f"No account in this backup matches {names}.\n\n"
                 f"Accounts in the backup: "
                 f"{_listing(a for a, _s, _g in named)}\n\n"
-                "Fix or clear the Account field, or rename the backup's "
-                "account first (More options → Rename in the backup).")
+                "Fix or clear the Account field, use Choose… to tick the "
+                "accounts from the backup, or rename the backup's account "
+                "first (More options → Rename in the backup).")
     if miss.get("site"):
         chosen = {_norm_name(a) for a in scope.get("accounts") or []}
         names = ", ".join(f"'{n}'" for n in miss["site"])
@@ -2162,8 +2212,10 @@ def _restore_scope_problem(backup, scope):
                 "Fix the Site field, or use Choose… to tick the sites "
                 "from the backup.")
     if miss.get("group"):
-        return (f"No group in the chosen site(s) matches "
-                f"'{miss['group'][0]}'.\n\nFix or clear the Group field.")
+        names = ", ".join(f"'{n}'" for n in miss["group"])
+        return (f"No group in the chosen site(s) matches {names}.\n\n"
+                "Fix or clear the Group field, or use Choose… to tick the "
+                "groups from the backup.")
     if not scope.get("indices"):
         return ("Nothing to restore: no backup node matches the ticked "
                 "restore levels and the Account / Site / Group fields.")
@@ -2194,6 +2246,13 @@ def _describe_restore_scope(scope, total):
     what = " · ".join(bits) if bits else (
         "everything in the backup" if count == total else "the ticked levels")
     return f"{what} — {count} of {total} backup node(s)"
+
+
+def _node_item_count(node) -> int:
+    """How many settings items a backup node carries — what the restore's
+    comparison window shows beside each scope."""
+    return sum(n for _cat, n, _names in
+               _summarize_node_payload(node.get("data") or {}))
 
 
 def _backup_file_problem(data):
@@ -2845,8 +2904,8 @@ def _collect_star_rules(api, acct_filter: str = "",
     account/global rules carry no siteName."""
     accounts = api.get_accounts() or []
     if acct_filter:
-        accounts = _select_by_name(accounts, acct_filter,
-                                   lambda a: a.get("name", ""))
+        accounts = _select_by_names(accounts, acct_filter,
+                                    lambda a: a.get("name", ""))
         if not accounts:
             return []
 
@@ -2864,8 +2923,8 @@ def _collect_star_rules(api, acct_filter: str = "",
 
     rules = list(by_id.values())
     if site_filter:
-        rules = _select_by_name(rules, site_filter,
-                                lambda r: r.get("siteName") or "")
+        rules = _select_by_names(rules, site_filter,
+                                 lambda r: r.get("siteName") or "")
     return rules
 
 
@@ -3352,8 +3411,8 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
     except Exception as e:
         accounts = []
         cli_log(f"Could not list accounts: {e}", "error")
-    for acct in _select_by_name(accounts, acct_f,
-                                key=lambda a: a.get("name", "?")):
+    for acct in _select_by_names(accounts, acct_f,
+                                 key=lambda a: a.get("name", "?")):
         aname = acct.get("name", "?")
         aid = acct.get("id", "")
         if levels.get("accounts"):
@@ -3385,8 +3444,8 @@ def _enumerate_tree(api, filters: dict, levels: dict) -> list:
                 groups = []
                 cli_log(f"Could not list groups under {aname}/{sname}: {e}",
                         "warning")
-            for g in _select_by_name(groups, group_f,
-                                      key=lambda x: x.get("name", "?")):
+            for g in _select_by_names(groups, group_f,
+                                       key=lambda x: x.get("name", "?")):
                 gname = g.get("name", "?")
                 gid = g.get("id", "")
                 out.append({"type": "group",
@@ -3445,6 +3504,189 @@ def _explain_diff(cat: str, src: int, dst: int,
             "Open both consoles and reconcile the duplicates manually.")
 
 
+_CHOOSER_PAGE = 200
+_CHOOSER_BATCH = 100
+
+
+class _Choices(list):
+    more = False
+
+
+def _id_batches(items):
+    if items is None:
+        return [""]
+    ids = [str(it.get("id")) for it in items if it.get("id")]
+    return [",".join(ids[i:i + _CHOOSER_BATCH])
+            for i in range(0, len(ids), _CHOOSER_BATCH)]
+
+
+def _places_text(spots, where):
+    if len(spots) > 1:
+        extra = f" +{len(spots) - 3} more" if len(spots) > 3 else ""
+        return f"in {len(spots)} {where}: {', '.join(spots[:3])}{extra}"
+    return spots[0] if spots else ""
+
+
+def _distinct_choices(items, place, where):
+    seen = {}
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        _first, spots = seen.setdefault(_norm_name(name), (name, []))
+        spot = place(item)
+        if spot and spot not in spots:
+            spots.append(spot)
+    rows = [(name, _places_text(spots, where)) for name, spots in seen.values()]
+    return sorted(rows, key=lambda row: _norm_name(row[0]))
+
+
+def _site_label(site):
+    name = site.get("name") or "?"
+    account = site.get("accountName")
+    return f"{account} / {name}" if account else name
+
+
+def _site_labels(api, groups, sites=None):
+    known = {str(s.get("id", "")): s for s in sites or []}
+    unknown = sorted({str(g.get("siteId")) for g in groups
+                      if g.get("siteId")} - set(known))
+    for i in range(0, len(unknown), _CHOOSER_BATCH):
+        try:
+            found = api.get_sites(params={
+                "siteIds": ",".join(unknown[i:i + _CHOOSER_BATCH])}) or []
+        except Exception:
+            break
+        for s in found:
+            known[str(s.get("id", ""))] = s
+    if len({s.get("accountName") for s in known.values()}) > 1:
+        return {sid: _site_label(s) for sid, s in known.items()}
+    return {sid: s.get("name") or "?" for sid, s in known.items()}
+
+
+def _chooser_accounts(api, account, acct_id=""):
+    if acct_id:
+        try:
+            hit = api.get_account_by_id(acct_id)
+        except Exception:
+            hit = None
+        if hit:
+            return [hit]
+    names = _split_scope_names(account)
+    if not names:
+        return None
+    found = {}
+    for name in names:
+        for acct in api.search_accounts(name, _CHOOSER_PAGE) or []:
+            found.setdefault(str(acct.get("id", "")), acct)
+    picked = _select_by_names(list(found.values()), account,
+                              key=lambda a: a.get("name", ""))
+    if not picked:
+        raise ValueError(f"no account on this console matches "
+                         f"'{account.strip()}' — fix or clear the Account "
+                         f"Name field first")
+    return picked
+
+
+def _chooser_sites(api, site, accounts):
+    names = _split_scope_names(site)
+    if not names:
+        return None
+    found = {}
+    for batch in _id_batches(accounts):
+        for name in names:
+            for s in api.search_sites(name, batch, _CHOOSER_PAGE,
+                                      states="active") or []:
+                found.setdefault(str(s.get("id", "")), s)
+    picked = _select_by_names(list(found.values()), site,
+                              key=lambda s: s.get("name", ""))
+    if not picked:
+        where = "" if accounts is None else " in the chosen account(s)"
+        raise ValueError(f"no active site{where} matches '{site.strip()}' — "
+                         f"fix or clear the Site Name field first")
+    return picked
+
+
+def _scope_chooser(api, kind, account="", site="", acct_id=""):
+    lock = threading.Lock()
+    scope = {}
+    spelling = {}
+
+    def resolve():
+        with lock:
+            if not scope:
+                accounts = (None if kind == "account"
+                            else _chooser_accounts(api, account, acct_id))
+                sites = (_chooser_sites(api, site, accounts)
+                         if kind == "group" else None)
+                scope.update(accounts=accounts, sites=sites)
+            return scope
+
+    def fetch(query, limit):
+        got = resolve()
+        raw, more = [], False
+        if kind == "account":
+            raw = list(api.search_accounts(query, limit) or [])
+            more = len(raw) >= limit
+            rows = _distinct_choices(
+                raw, lambda a: f"id {a.get('id', '?')}", "accounts")
+        elif kind == "site":
+            for batch in _id_batches(got["accounts"]):
+                page = list(api.search_sites(query, batch, _CHOOSER_PAGE,
+                                             states="active") or [])
+                more = more or len(page) >= _CHOOSER_PAGE
+                raw += page
+            rows = _distinct_choices(
+                raw, lambda s: s.get("accountName") or "", "accounts")
+        else:
+            owners, key = ((got["sites"], "siteIds")
+                           if got["sites"] is not None
+                           else (got["accounts"], "accountIds"))
+            for batch in _id_batches(owners):
+                params = {"sortBy": "name", "sortOrder": "asc"}
+                if query:
+                    params["query"] = query
+                if batch:
+                    params[key] = batch
+                page = list(api.get_groups(params=params, limit=_CHOOSER_PAGE,
+                                           max_items=_CHOOSER_PAGE) or [])
+                more = more or len(page) >= _CHOOSER_PAGE
+                raw += page
+            where = _site_labels(api, raw, got["sites"])
+            rows = _distinct_choices(
+                raw, lambda g: where.get(str(g.get("siteId"))) or "", "sites")
+        out = _Choices()
+        for name, detail in rows[:limit]:
+            spelling[_norm_name(name)] = name
+            out.append((_norm_name(name), name, detail))
+        out.more = more
+        return out
+
+    return fetch, spelling
+
+
+def _chooser_note(kind, account="", site=""):
+    if kind == "account":
+        return ("Only the ticked accounts are backed up. Tick none to back "
+                "up every account.")
+    if kind == "site":
+        if account:
+            return ("Active sites in the account(s) named above. One name "
+                    "stands for that site in each of them. Tick none to back "
+                    "up every site.")
+        return ("Active sites from every account — choose the account first "
+                "to narrow the list. Tick none to back up every site.")
+    if site:
+        return ("Groups in the site(s) named above. One name stands for that "
+                "group in each of them. Tick none to back up every group.")
+    if account:
+        return ("Groups in every site of the account(s) named above — choose "
+                "the sites first to narrow the list. Tick none to back up "
+                "every group.")
+    return ("Groups from the whole console — choose the account and sites "
+            "first to narrow the list. Tick none to back up every group.")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Backup Page
 # ═══════════════════════════════════════════════════════════════════════
@@ -3495,18 +3737,27 @@ class BackupPage(ctk.CTkFrame):
 
         # scope filters (hidden when Global is checked)
         self._scope_widgets = []
-        for row_i, (lbl_text, ph, attr) in enumerate([
-            ("Account Name:", "(blank = all accounts)", "acct_filter"),
-            ("Site Name:", "(blank = all sites)", "site_filter"),
-            ("Group Name:", "(blank = all groups)", "group_filter"),
+        self._choose_btns = {}
+        for row_i, (lbl_text, ph, attr, kind) in enumerate([
+            ("Account Name:", "(blank = all accounts)", "acct_filter",
+             "account"),
+            ("Site Name:", "(blank = all sites)", "site_filter", "site"),
+            ("Group Name:", "(blank = all groups)", "group_filter", "group"),
         ], start=1):
             lbl = ctk.CTkLabel(opts, text=lbl_text,
                                font=(UI_FONT, 13))
             lbl.grid(row=row_i, column=0, padx=12, pady=6, sticky="w")
             entry = ctk.CTkEntry(opts, placeholder_text=ph, height=32)
-            entry.grid(row=row_i, column=1, padx=12, pady=6, sticky="ew")
+            entry.grid(row=row_i, column=1, padx=(12, 6), pady=6, sticky="ew")
             setattr(self, attr, entry)
-            self._scope_widgets.extend([lbl, entry])
+            btn = _ghost_button(opts, "Choose…",
+                                lambda k=kind: self._choose_scope(k),
+                                width=84, height=32)
+            btn.grid(row=row_i, column=2, padx=(0, 12), pady=6)
+            _ToolTip(btn, f"Tick the {kind}s to back up from the list on the "
+                          f"console — or type several names, comma-separated.")
+            self._choose_btns[kind] = btn
+            self._scope_widgets.extend([lbl, entry, btn])
 
         self._elem_hdr, self.elem_vars = _build_elements_section(
             opts, row=4, title="Backup Elements")
@@ -3859,6 +4110,40 @@ class BackupPage(ctk.CTkFrame):
             else:
                 w.grid()
 
+    def _choose_scope(self, kind):
+        console = self._console_var.get()
+        api = self.app.source_api if console == "SOURCE" else self.app.dest_api
+        if not api:
+            messagebox.showwarning(
+                "Not connected",
+                f"Connect the {console} console on the Connections page "
+                f"first — the {kind} names come from it.")
+            return
+        entry = {"account": self.acct_filter, "site": self.site_filter,
+                 "group": self.group_filter}[kind]
+        typed = {_norm_name(n): n for n in _split_scope_names(entry.get())}
+        account = self.acct_filter.get().strip()
+        site = self.site_filter.get().strip()
+        acct_id = (getattr(self, "_acct_id", "") or "").strip()
+        fetch, spelling = _scope_chooser(api, kind, account=account,
+                                         site=site, acct_id=acct_id)
+        from agent_migrator import _ChoiceDialog
+        picked = _ChoiceDialog(
+            self, f"{kind.capitalize()}s to back up", fetch,
+            chosen=list(typed), noun=kind,
+            source=f"the {console.lower()} console",
+            note=_chooser_note(kind, account or acct_id, site)).ask()
+        if picked is None:
+            return
+        names = [spelling.get(k) or typed.get(k) or k for k in picked]
+        entry.delete(0, "end")
+        if names:
+            entry.insert(0, _join_scope_names(names))
+        if (kind == "account" and acct_id
+                and {_norm_name(n) for n in names} != set(typed)):
+            self._acct_id = ""
+        cli_log(f"Backup {kind}s: {', '.join(names) or 'all'}", "info")
+
     def _update_indicator(self):
         choice = self._console_var.get()
         if choice == "SOURCE":
@@ -3999,6 +4284,7 @@ class BackupPage(ctk.CTkFrame):
             except OSError:
                 pass
             self.app._last_backup_path = path  # share with Restore page
+            self.app._last_backup_url = getattr(api, "base_url", "")
             self._operation_log.append(
                 f"Backup saved to {path} ({len(backup_data)} nodes, "
                 f"{m}m {s}s)")
@@ -4113,12 +4399,14 @@ class BackupPage(ctk.CTkFrame):
             else:
                 cli_log(f"  ✓ Backup: account ID {acct_id_f} → "
                         f"'{id_match[0].get('name')}' confirmed", "success")
+        acct_miss = []
         if id_match:
             _selected_acct_ids = {str(a.get("id", "")) for a in id_match}
         else:
-            _selected_acct_ids = {
-                str(a.get("id", "")) for a in _select_by_name(
-                    accounts, acct_f, key=lambda a: a.get("name", ""))}
+            acct_ok, acct_miss = _name_filter(
+                [a.get("name", "") for a in accounts], acct_f)
+            _selected_acct_ids = {str(a.get("id", "")) for a in accounts
+                                  if acct_ok(a.get("name", ""))}
         matched_accounts = [a for a in accounts if _acct_selected(a)]
         if acct_f and not matched_accounts:
             names = ", ".join(str(a.get("name", "?")) for a in accounts[:10])
@@ -4127,13 +4415,8 @@ class BackupPage(ctk.CTkFrame):
                     f"on {api.base_url}. Visible API accounts: {names}{more}. "
                     f"Check the selected SOURCE connection and token scope.",
                     "warning")
-        node_count = 0
-        for acct in accounts:
-            aname = acct.get("name", "?")
-            aid = acct.get("id", "")
-            if not _acct_selected(acct):
-                continue
-            node_count += 1
+
+        def _list_sites(aid):
             try:
                 sites = api.get_sites(params={
                     "accountIds": aid, "states": "active",
@@ -4144,45 +4427,46 @@ class BackupPage(ctk.CTkFrame):
                         "sortBy": "name", "sortOrder": "asc"})
             except Exception:
                 sites = []
-            for site in _select_by_name(sites, site_f,
-                                         key=lambda s: s.get("name", "")):
-                sname = site.get("name", "?")
-                sid = site.get("id", "")
-                node_count += 1
-                try:
-                    groups = api.get_groups(params={
-                        "siteIds": sid, "sortBy": "name",
-                        "sortOrder": "asc"})
-                except Exception:
-                    groups = []
-                node_count += len(_select_by_name(
-                    groups, group_f, key=lambda g: g.get("name", "?")))
+            return sites
+
+        def _list_groups(sid):
+            try:
+                return api.get_groups(params={
+                    "siteIds": sid, "sortBy": "name",
+                    "sortOrder": "asc"})
+            except Exception:
+                return []
+
+        tree = [(a, _list_sites(a.get("id", ""))) for a in matched_accounts]
+        site_ok, site_miss = _name_filter(
+            [s.get("name", "") for _a, sites in tree for s in sites], site_f)
+        tree = [(a, [(s, _list_groups(s.get("id", ""))) for s in sites
+                     if site_ok(s.get("name", ""))])
+                for a, sites in tree]
+        group_ok, group_miss = _name_filter(
+            [g.get("name", "") for _a, sites in tree
+             for _s, groups in sites for g in groups], group_f)
+        for level, missing, looked in (
+                ("Account", acct_miss, matched_accounts),
+                ("Site", site_miss, matched_accounts),
+                ("Group", group_miss, any(sites for _a, sites in tree))):
+            if missing and looked:
+                cli_log(f"No {level.lower()} matched "
+                        f"{', '.join(repr(m) for m in missing)} on "
+                        f"{api.base_url} — check the {level} Name field.",
+                        "warning")
 
         # ── add all rows as pending first ──
         row_map = []  # (nid, type, path, obj, scope_id)
         idx = 0
-        for acct in accounts:
+        for acct, sites in tree:
             aname = acct.get("name", "?")
             aid = acct.get("id", "")
-            if not _acct_selected(acct):
-                continue
             nid = f"acct-{aid}"
             ui(lambda n=nid, p=f"{aname}/": pt.add_node(n, p, "account"))
             row_map.append((nid, "account", f"{aname}/", acct, aid))
 
-            try:
-                sites = api.get_sites(params={
-                    "accountIds": aid, "states": "active",
-                    "sortBy": "name", "sortOrder": "asc"})
-                if not sites:
-                    sites = api.get_sites(params={
-                        "accountIds": aid,
-                        "sortBy": "name", "sortOrder": "asc"})
-            except Exception:
-                sites = []
-
-            for site in _select_by_name(sites, site_f,
-                                         key=lambda s: s.get("name", "")):
+            for site, groups in sites:
                 sname = site.get("name", "?")
                 sid = site.get("id", "")
                 nid = f"site-{sid}"
@@ -4190,19 +4474,13 @@ class BackupPage(ctk.CTkFrame):
                 ui(lambda n=nid, p=sp: pt.add_node(n, p, "site"))
                 row_map.append((nid, "site", sp, site, sid))
 
-                try:
-                    groups = api.get_groups(params={
-                        "siteIds": sid, "sortBy": "name",
-                        "sortOrder": "asc"})
-                except Exception:
-                    groups = []
                 # Enrich dynamic-group payloads with the saved filter's
                 # NAME (resolved from the source console) so restore can
                 # map it to the destination filter by name. Some S1
                 # versions don't include `filterName` in /groups responses.
                 _src_filter_name_by_id: dict = {}
-                for grp in _select_by_name(groups, group_f,
-                                            key=lambda g: g.get("name", "?")):
+                for grp in (g for g in groups
+                            if group_ok(g.get("name", ""))):
                     gname = grp.get("name", "?")
                     gid = grp.get("id", "")
                     fid = (grp.get("filterId")
@@ -5263,6 +5541,8 @@ class RestorePage(ctk.CTkFrame):
         self._run_mode = "idle"
         self._run_failed = False
         self._badges, self._badge_state = {}, {}
+        self._comparing = False
+        self._compare_sig = None
 
         self._build_header()
         self._build_backup_card()
@@ -5407,29 +5687,31 @@ class RestorePage(ctk.CTkFrame):
                                      "Blank fields = everything")
         names = ctk.CTkFrame(body, fg_color="transparent")
         names.grid(row=0, column=0, sticky="ew")
-        col = 0
-        for label, attr, hint in (("Account", "restore_acct", "all accounts"),
-                                  ("Site", "restore_site", "all sites"),
-                                  ("Group", "restore_group", "all groups")):
+        names.grid_columnconfigure(1, weight=1)
+        self._choose_btns = {}
+        for row, (label, attr, hint, kind, pick) in enumerate((
+                ("Account", "restore_acct", "all accounts", "account",
+                 self._choose_restore_accounts),
+                ("Site", "restore_site", "all sites", "site",
+                 self._choose_restore_sites),
+                ("Group", "restore_group", "all groups", "group",
+                 self._choose_restore_groups))):
+            gap = (0 if row == 0 else 6, 0)
             ctk.CTkLabel(names, text=label, font=(UI_FONT, 12),
                          text_color=TEXT_MUTED).grid(
-                row=0, column=col, sticky="w", padx=(0 if col == 0 else 16, 6))
+                row=row, column=0, sticky="w", padx=(0, 12), pady=gap)
             entry = ctk.CTkEntry(names, height=32, placeholder_text=hint)
-            entry.grid(row=0, column=col + 1, sticky="ew")
-            names.grid_columnconfigure(col + 1, weight=1)
+            entry.grid(row=row, column=1, sticky="ew", pady=gap)
             for seq in ("<KeyRelease>", "<FocusOut>"):
                 entry.bind(seq, self._schedule_scope_summary)
             setattr(self, attr, entry)
-            col += 2
-            if attr == "restore_site":
-                self._choose_btn = _ghost_button(
-                    names, "Choose…", command=self._choose_restore_sites,
-                    width=84, height=32)
-                self._choose_btn.grid(row=0, column=col, padx=(6, 0))
-                _ToolTip(self._choose_btn,
-                         "Tick the sites to restore from the list in this "
-                         "backup — or type several names, comma-separated.")
-                col += 1
+            btn = _ghost_button(names, "Choose…", command=pick,
+                                width=84, height=32)
+            btn.grid(row=row, column=2, padx=(6, 0), pady=gap)
+            _ToolTip(btn, f"Tick the {kind}s to restore from the list in this "
+                          f"backup — or type several names, comma-separated.")
+            self._choose_btns[kind] = btn
+        self._choose_btn = self._choose_btns["site"]
         self._global_note = ctk.CTkLabel(
             body, text="Global settings is ticked: the console-wide settings "
                        "are restored too, and the Account / Site / Group "
@@ -5472,12 +5754,42 @@ class RestorePage(ctk.CTkFrame):
         self._scope_summary.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self._wrap_label(body, self._scope_summary)
 
+        row = self._compare_row = ctk.CTkFrame(body, fg_color="transparent")
+        row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        row.grid_columnconfigure(1, weight=1)
+        self._compare_btn = _ghost_button(
+            row, "⇄  Compare with destination…",
+            command=self._compare_with_destination, width=236)
+        self._compare_btn.grid(row=0, column=0, sticky="nw")
+        _ToolTip(self._compare_btn,
+                 "See every account, site and group this restore touches "
+                 "beside what the destination already has — what is restored "
+                 "into an existing scope and what is created from the backup "
+                 "file — and rename backup scopes to match before you "
+                 "restore. Read-only: renames change the loaded backup only.")
+        self._compare_lbl = ctk.CTkLabel(
+            row, text="", anchor="w", justify="left", font=(UI_FONT, 12),
+            text_color=TEXT_MUTED)
+        self._compare_lbl.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+
+        def wrap(event, label=self._compare_lbl, btn=self._compare_btn):
+            try:
+                scale = ctk.ScalingTracker.get_widget_scaling(label)
+            except Exception:
+                scale = 1.0
+            width = max(200, int((event.width - btn.winfo_width()) / scale)
+                        - 20)
+            if getattr(label, "_wrap_px", None) != width:
+                label._wrap_px = width
+                label.configure(wraplength=width)
+        row.bind("<Configure>", wrap, add="+")
+
         self._adv_btn = ctk.CTkButton(
             body, text="", anchor="w", width=10, height=26,
             fg_color="transparent", hover_color=theme.GHOST_HOVER,
             text_color=theme.BRAND_LIGHT, font=(UI_FONT, 12, "bold"),
             command=self._toggle_advanced)
-        self._adv_btn.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self._adv_btn.grid(row=4, column=0, sticky="w", pady=(6, 0))
         self._build_advanced(card)
 
     def _build_advanced(self, card):
@@ -5797,6 +6109,12 @@ class RestorePage(ctk.CTkFrame):
             scope = _restore_scope(self.backup_data, levels,
                                    self._scope_filters(levels))
             problem = _restore_scope_problem(self.backup_data, scope)
+            now = (self._console_var.get(), tuple(scope["indices"]))
+            if self._compare_sig not in (None, now):
+                self._compare_sig = None
+                self._show_compare("The scope changed since the last "
+                                   "comparison — compare again to see it "
+                                   "against the destination.")
             if problem:
                 text, color = "✕  " + problem.replace("\n\n", "\n"), ACCENT
             else:
@@ -5858,6 +6176,13 @@ class RestorePage(ctk.CTkFrame):
         checks = ready and not running and not can_resume
         _grid_visible(self._preflight_btn, checks)
         _grid_visible(self._preview_btn, checks)
+        _grid_visible(self._compare_row, ready and not running)
+        _configure_changed(
+            self._compare_btn,
+            state=("normal" if ready and self._scope_ok and not running
+                   and not self._comparing else "disabled"),
+            text=("⇄  Reading the destination…" if self._comparing
+                  else "⇄  Compare with destination…"))
         _grid_visible(self._options_row, not running)
         _grid_visible(self.progress, running or finished)
         _grid_visible(self._after_row, finished)
@@ -5928,6 +6253,52 @@ class RestorePage(ctk.CTkFrame):
         _grid_visible(self._global_note, is_global)
         self._schedule_scope_summary()
 
+    def _tick_from_backup(self, entry, rows, title, noun, note):
+        def fetch(query, limit):
+            q = _norm_name(query)
+            return [r for r in rows if not q or q in _norm_name(r[1])
+                    or q in _norm_name(r[2])][:limit]
+
+        current = entry.get()
+        chosen = []
+        if _split_scope_names(current):
+            hit, _missing = _match_scope_names([r[0] for r in rows], current)
+            chosen = [rows[i][0] for i in hit]
+        from agent_migrator import _ChoiceDialog
+        picked = _ChoiceDialog(self, title, fetch, chosen=chosen, noun=noun,
+                               source="this backup", note=note).ask()
+        if picked is None:
+            return None
+        picked = set(picked)
+        return [r[0] for r in rows if r[0] in picked]
+
+    def _choose_restore_accounts(self):
+        if not self.backup_data:
+            messagebox.showinfo("No backup loaded",
+                                "Load a backup file first — the list of "
+                                "accounts comes from it.")
+            return
+        accounts = _backup_accounts(self.backup_data)
+        if not accounts:
+            messagebox.showinfo("No accounts in this backup",
+                                "This backup holds no account, site or "
+                                "group nodes.")
+            return
+        rows = [(a["name"], a["name"],
+                 f"{a['sites']} site(s) · {a['groups']} group(s)")
+                for a in accounts]
+        names = self._tick_from_backup(
+            self.restore_acct, rows, "Accounts to restore", "account",
+            "Only the ticked accounts are restored, with their sites and "
+            "groups — no other account is touched. Tick none to restore "
+            "every account.")
+        if names is None:
+            return
+        self.restore_acct.delete(0, "end")
+        if names:
+            self.restore_acct.insert(0, _join_scope_names(names))
+        self._update_scope_summary()
+
     def _choose_restore_sites(self):
         """Tick the site(s) to restore from the loaded backup file; the picks
         go into the Site field, comma-separated, in backup order."""
@@ -5944,33 +6315,41 @@ class RestorePage(ctk.CTkFrame):
         rows = [(s["name"], s["name"],
                  f"{', '.join(s['accounts'])} · {s['groups']} group(s)")
                 for s in sites]
-
-        def fetch(query, limit):
-            q = _norm_name(query)
-            return [r for r in rows if not q or q in _norm_name(r[1])
-                    or q in _norm_name(r[2])][:limit]
-
-        current = self.restore_site.get()
-        chosen = []
-        if _split_scope_names(current):
-            hit, _missing = _match_scope_names([s["name"] for s in sites],
-                                               current)
-            chosen = [sites[i]["name"] for i in hit]
-        from agent_migrator import _ChoiceDialog
-        picked = _ChoiceDialog(
-            self, "Sites to restore", fetch, chosen=chosen, noun="site",
-            source="this backup",
-            note="Only the ticked sites and their groups are restored (plus "
-                 "their account, if Accounts is ticked) — no other site or "
-                 "account is touched. Tick none to restore every site.").ask()
-        if picked is None:
+        names = self._tick_from_backup(
+            self.restore_site, rows, "Sites to restore", "site",
+            "Only the ticked sites and their groups are restored (plus "
+            "their account, if Accounts is ticked) — no other site or "
+            "account is touched. Tick none to restore every site.")
+        if names is None:
             return
-        picked = set(picked)
-        text = _join_scope_names(s["name"] for s in sites
-                                 if s["name"] in picked)
         self.restore_site.delete(0, "end")
-        if text:
-            self.restore_site.insert(0, text)
+        if names:
+            self.restore_site.insert(0, _join_scope_names(names))
+        self._update_scope_summary()
+
+    def _choose_restore_groups(self):
+        if not self.backup_data:
+            messagebox.showinfo("No backup loaded",
+                                "Load a backup file first — the list of "
+                                "groups comes from it.")
+            return
+        groups = _backup_groups(self.backup_data, self.restore_acct.get(),
+                                self.restore_site.get())
+        if not groups:
+            messagebox.showinfo("No groups in this backup",
+                                "This backup holds no group nodes.")
+            return
+        rows = [(g["name"], g["name"], g["where"]) for g in groups]
+        names = self._tick_from_backup(
+            self.restore_group, rows, "Groups to restore", "group",
+            "Only the ticked groups are restored (plus their site and "
+            "account, if those levels are ticked). One name stands for that "
+            "group in every chosen site. Tick none to restore every group.")
+        if names is None:
+            return
+        self.restore_group.delete(0, "end")
+        if names:
+            self.restore_group.insert(0, _join_scope_names(names))
         self._update_scope_summary()
 
     def _update_indicator(self):
@@ -6102,6 +6481,8 @@ class RestorePage(ctk.CTkFrame):
             self._loaded_backup_path = fp
             self._backup_integrity = res["rep"]
             self._renames = []
+            self._compare_sig = None
+            self._show_compare("")
             # Populate the diff panel so the operator can browse the
             # backup contents *before* clicking restore.
             if hasattr(self, "diff_panel"):
@@ -6684,6 +7065,123 @@ class RestorePage(ctk.CTkFrame):
                 f"{count} nodes updated", "success")
         self._update_scope_summary()
 
+    # ── Compare with the destination (read-only until a rename) ───────────
+    def _show_compare(self, text, color=TEXT_MUTED):
+        _configure_changed(self._compare_lbl, text=text, text_color=color)
+
+    def _compare_with_destination(self, api=None):
+        """Read the destination and open the backup-vs-destination window:
+        every account, site and group this restore touches beside what the
+        destination has, what each is restored into or created as — and
+        renames that make a backup scope match. Nothing is written: renames
+        change the loaded backup, and only when they are applied."""
+        if not self.backup_data or self._comparing:
+            return
+        levels = {k: v.get() for k, v in self.restore_level_vars.items()}
+        scope = _restore_scope(self.backup_data, levels,
+                               self._scope_filters(levels))
+        problem = _restore_scope_problem(self.backup_data, scope)
+        if problem:
+            messagebox.showwarning("Check the restore scope", problem)
+            return
+        from restore_compare import (RestoreComparison, RestoreCompareDialog,
+                                     backup_accounts, describe, read_account,
+                                     read_destination)
+        names = backup_accounts(self.backup_data, scope["indices"])
+        if not names:
+            self._show_compare("Only global settings are in this restore — "
+                               "there is no account, site or group to "
+                               "compare.")
+            return
+        api = api or self._get_restore_api()
+        if not api:
+            return
+        console = self._console_var.get()
+        ticket = (getattr(self, "_acct_id", "") or "").strip()
+        backup, indices = self.backup_data, list(scope["indices"])
+        self._comparing = True
+        self._show_compare(f"Reading the {console} console…", INFO)
+        self._apply_state()
+
+        def done(dest):
+            self._comparing = False
+            self._apply_state()
+            if self.backup_data is not backup:
+                self._show_compare("")
+                return
+            cmp = RestoreComparison(backup, indices, dest, account_id=ticket,
+                                    items=_node_item_count)
+            line, tone = describe(cmp, console)
+            self._compare_sig = (console, tuple(indices))
+            self._show_compare(line, {"info": INFO, "warn": WARN}.get(tone,
+                                                                    GREEN))
+            cli_log(f"Restore compare — {line}", "info")
+            RestoreCompareDialog(self, cmp, self._after_compare,
+                                 loader=lambda acct: read_account(api, acct),
+                                 console=console)
+
+        def fail(exc):
+            self._comparing = False
+            self._apply_state()
+            detail = str(getattr(exc, "detail", "") or exc)
+            self._show_compare(f"✕  Couldn't read the {console} console, so "
+                               f"nothing was compared: {detail[:200]}", ACCENT)
+
+        run_async(self, lambda: read_destination(api, names,
+                                                 account_id=ticket),
+                  done, fail)
+
+    def _after_compare(self, renames):
+        """Apply the comparison's renames to the loaded backup — the edit
+        Rename in the backup makes — and keep the Account / Site / Group
+        fields on the renamed scopes."""
+        if not self.backup_data or not renames:
+            return
+        from restore_compare import rename_in_backup
+        done = rename_in_backup(self.backup_data, renames)
+        when = datetime.now(timezone.utc).isoformat()
+        if not hasattr(self, "_renames"):
+            self._renames = []
+        for r in done:
+            self._renames.append({"from": r["from"], "to": r["to"],
+                                  "count": r["count"], "at": when})
+            cli_log(f"  {r['kind']}: {r['from']} → {r['to']} "
+                    f"({r['count']} node(s))", "info")
+        self._follow_renames(done)
+        nodes = sum(r["count"] for r in done)
+        cli_log(f"Compare renames: {len(done)} scope(s) renamed in the backup "
+                f"— {nodes} node(s) updated", "success")
+        self._compare_sig = None
+        self._show_compare(
+            f"✓  Renamed {len(done)} scope{'' if len(done) == 1 else 's'} in "
+            f"the backup ({nodes} node{'' if nodes == 1 else 's'}). Compare "
+            f"again to check, then restore.", GREEN)
+        self._update_scope_summary()
+
+    def _follow_renames(self, done):
+        """Point the Account / Site / Group fields at the new names of the
+        scopes they named, so the restore still picks them."""
+        fields = {"account": self.restore_acct, "site": self.restore_site,
+                  "group": self.restore_group}
+        for r in done:
+            entry = fields[r["kind"]]
+            old, new = r["from"].split("/")[-1], r["to"].split("/")[-1]
+            text = entry.get().strip()
+            if not text:
+                continue
+            if _norm_name(text) == _norm_name(old):
+                names = [new]
+            else:
+                parts = _split_scope_names(text)
+                if not any(_norm_name(n) == _norm_name(old) for n in parts):
+                    continue
+                names = [new if _norm_name(n) == _norm_name(old) else n
+                         for n in parts]
+            value = _join_scope_names(names)
+            if value != text:
+                entry.delete(0, "end")
+                entry.insert(0, value)
+
     def _set_target_context(self):
         """Set restoreToContext in all backup nodes to the selected console."""
         if not self.backup_data:
@@ -6807,6 +7305,7 @@ class RestorePage(ctk.CTkFrame):
         Mangle Rename the source account to the destination account name, and a
         restore would create a brand-new account instead of landing on the
         intended one. Returns "abort" if the restore should stop, else "ok"."""
+        self._dest_empty = False
         # Distinct account names referenced by non-global nodes in the backup.
         backup_accts = []
         for n in self.backup_data:
@@ -6822,6 +7321,7 @@ class RestorePage(ctk.CTkFrame):
         except Exception:
             return "ok"   # network hiccup — don't block the restore
         dest_names = [a.get("name") for a in dest if a.get("name")]
+        self._dest_empty = not dest_names
         if not dest_names:
             return "ok"   # nothing to rename into; the account will be created
         # If ANY backup account already exists on the destination, assume the
@@ -6838,23 +7338,22 @@ class RestorePage(ctk.CTkFrame):
             f'The backup\'s account "{src}" doesn\'t exist on the '
             f"{self._console_var.get()} console.\n\n"
             f"Destination account(s): {dest_list}\n\n"
-            "If you meant to restore INTO an existing account, you likely need "
-            "to rename it in the backup first (More options → Rename in the "
-            f'backup) so the names match — otherwise a NEW account named '
-            f'"{src}" will be created.\n\n'
-            "Open the rename tools now?\n\n"
-            "  • Yes — open Rename in the backup\n"
+            "If you meant to restore INTO an existing account, rename it in "
+            "the backup first so the names match — otherwise a NEW account "
+            f'named "{src}" will be created.\n\n'
+            "Compare the backup with the destination now?\n\n"
+            "  • Yes — compare, and rename before restoring\n"
             "  • No — continue and create it as-is\n"
             "  • Cancel — stop")
         ans = messagebox.askyesnocancel("Account name mismatch", msg)
         if ans is None:
             return "abort"                      # Cancel
         if ans:                                 # Yes → redirect to rename
-            self._open_structure_ops_for_rename(src, dst_preview)
+            self._compare_with_destination(api)
             cli_log(
-                f'Restore paused — account "{src}" isn\'t on the destination. '
-                "Rename it under More options → Rename in the backup, then "
-                "Restore again.",
+                f'Restore paused — account "{src}" isn\'t on the destination '
+                f'(closest: "{dst_preview or dest_names[0]}"). Compare, rename '
+                "it to the destination's account, then Restore again.",
                 "warning")
             return "abort"
         return "ok"                             # No → continue as-is
@@ -6906,6 +7405,10 @@ class RestorePage(ctk.CTkFrame):
         if confirm is None:
             confirm = not auto
         if confirm:
+            guide = getattr(self.app, "guide", None)
+            if (guide is not None and not auto and target == "DESTINATION"
+                    and not guide.allow("restore")):
+                return
             # Guard: if none of the backup's account names exist on the
             # destination, the operator probably forgot to Mangle Rename the
             # account (Structure Operations). Offer to jump there.
@@ -6923,9 +7426,15 @@ class RestorePage(ctk.CTkFrame):
                 "Unattended: it won't stop to ask — missing accounts are "
                 "created and every prompt is answered for you.\n\n"
                 if auto else "")
+            lead = (f"The {target} console has no accounts yet — this "
+                    f"restore will create everything from the backup file"
+                    + (" and overwrite its global settings"
+                       if levels.get("global") else "") + "."
+                    if getattr(self, "_dest_empty", False) else
+                    f"This will OVERWRITE settings on the {target} console.")
             if not messagebox.askyesno(
                     "⚠️ Confirm Restore",
-                    f"This will OVERWRITE settings on the {target} console.\n\n"
+                    f"{lead}\n\n"
                     f"Restoring: {scope_line}\n\n{unattended}"
                     "This is potentially destructive. Only do this on a target "
                     "you intend to configure.\n\nProceed?"):
@@ -11056,6 +11565,7 @@ class ValidationPage(ctk.CTkFrame):
 
     # ── UI state ────────────────────────────────────────────────────────
     def _set_running(self, running: bool):
+        self._running = running
         self._run_btn.configure(state="disabled" if running else "normal")
         self._stop_btn.configure(state="normal" if running else "disabled")
         if running:
@@ -11622,6 +12132,9 @@ class ValidationPage(ctk.CTkFrame):
             cli_log(f"Manifest export error: {e}", "error")
             messagebox.showerror("Export Error", str(e))
             return
+        self._manifest_exported = {
+            "path": path, "at": datetime.now(timezone.utc).isoformat(),
+            "dest": self._meta.get("dst_url", "")}
 
         # Copy the PSO comment to the clipboard so it can be pasted straight
         # into the ticket (or handed to the Jira automation).
@@ -11636,159 +12149,3 @@ class ValidationPage(ctk.CTkFrame):
             "Manifest Exported",
             f"Migration manifest saved to:\n{path}\n\n"
             f"The PSO ticket comment was copied to your clipboard.")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Migration Runbook — guided, ordered workflow
-# ═══════════════════════════════════════════════════════════════════════
-
-class MigrationRunbookPage(ctk.CTkFrame):
-    """A guided checklist that sequences the whole migration: each step opens
-    the relevant page and tracks completion. Some steps auto-detect done;
-    the rest are operator-confirmed. Keeps the workflow repeatable and
-    hard to skip a step."""
-
-    # (title, target page label, guidance, auto-detect key)
-    STEPS = [
-        ("Connect both consoles", "Connections",
-         "Add SOURCE and DESTINATION and connect to each.", "connected"),
-        ("Pre-flight check", "Restore to Dest",
-         "Load the source backup, then click ✈ Pre-flight to confirm the "
-         "destination is reachable, the token is valid/scoped, and the target "
-         "scope exists.", None),
-        ("Back up the source", "Backup Source",
-         "Pick the scope + elements (or load a profile) and run the backup.",
-         "backup"),
-        ("Preview vs destination", "Restore to Dest",
-         "Load the backup and click 🔍 Preview changes — a dry run showing "
-         "what would be created vs already exists. Nothing is written.", None),
-        ("Restore to destination", "Restore to Dest",
-         "With 📸 Snapshot first enabled (default), run the restore. The "
-         "snapshot lets you ↩ Rollback if needed.", None),
-        ("Validate the migration", "Migration Validation",
-         "Compare SOURCE vs DESTINATION across every element.", "validated"),
-        ("Match the agent scopes", "Agent Migration",
-         "Now the config is in place, move the endpoints. Read the "
-         "destination, then Match scopes — it lists every source account, "
-         "site and group beside the destination scope it pairs with. "
-         "Nothing moves; fix any name mismatches here.", "agents_matched"),
-        ("Migrate the agents", "Agent Migration",
-         "Run step 3. Each machine is reported as it goes; the Failed "
-         "filter carries the console's own reason. Agents that were "
-         "offline move on their next check-in.", "agents_moved"),
-        ("Manifest & close ticket", "Migration Validation",
-         "Export 🧾 Migration Manifest — the PSO comment is copied to your "
-         "clipboard for the ticket-closing workflow.", None),
-    ]
-
-    def __init__(self, master, app, **kw):
-        super().__init__(master, fg_color="transparent", **kw)
-        self.app = app
-        self._manual_done = set()      # step indices the user marked done
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
-
-        ctk.CTkLabel(self, text="Migration Runbook",
-                     font=(UI_FONT, 22, "bold")).grid(
-            row=0, column=0, sticky="w", padx=20, pady=(20, 2))
-        ctk.CTkLabel(
-            self,
-            text="A guided, ordered checklist for a console migration. Open "
-                 "each step, do the work on that page, then mark it done.",
-            font=(UI_FONT, 13), text_color=TEXT_MUTED).grid(
-            row=1, column=0, sticky="w", padx=20, pady=(0, 8))
-
-        self._progress = ctk.CTkProgressBar(self, height=10)
-        self._progress.set(0)
-        self._progress.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 8))
-
-        self._steps_frame = ctk.CTkScrollableFrame(
-            self, fg_color="transparent")
-        self._steps_frame.grid(row=3, column=0, sticky="nsew",
-                                padx=16, pady=(0, 12))
-        self._render()
-
-    # ── completion detection ──────────────────────────────────────────
-    def _auto_done(self, key) -> bool:
-        if key == "connected":
-            return bool(self.app.source_api and self.app.dest_api)
-        if key == "backup":
-            return bool(getattr(self.app, "_last_backup_path", None))
-        if key == "validated":
-            vp = self.app.pages.get("Migration Validation")
-            return bool(getattr(vp, "_results", None))
-        if key in ("agents_matched", "agents_moved"):
-            ap = self.app.pages.get("Agent Migration")
-            attr = "_plan" if key == "agents_matched" else "_report"
-            return bool(getattr(ap, attr, None))
-        return False
-
-    def _is_done(self, i, key) -> bool:
-        return i in self._manual_done or self._auto_done(key)
-
-    def _render(self):
-        for w in self._steps_frame.winfo_children():
-            w.destroy()
-        done_count = 0
-        for i, (title, target, guide, key) in enumerate(self.STEPS):
-            done = self._is_done(i, key)
-            auto = self._auto_done(key)
-            if done:
-                done_count += 1
-            card = ctk.CTkFrame(self._steps_frame, fg_color=CARD,
-                                corner_radius=10)
-            card.pack(fill="x", padx=4, pady=5)
-            card.grid_columnconfigure(1, weight=1)
-
-            badge = "✅" if done else f"{i + 1}"
-            ctk.CTkLabel(card, text=badge, width=34,
-                         font=(UI_FONT, 16, "bold"),
-                         text_color=GREEN if done else TEXT_MUTED).grid(
-                row=0, column=0, rowspan=2, padx=(12, 6), pady=10)
-            ctk.CTkLabel(card, text=title, anchor="w",
-                         font=(UI_FONT, 14, "bold"),
-                         text_color=TEXT if not done else GREEN).grid(
-                row=0, column=1, sticky="ew", padx=4, pady=(10, 0))
-            ctk.CTkLabel(card, text=guide, anchor="w", justify="left",
-                         font=(UI_FONT, 11), text_color=TEXT_MUTED,
-                         wraplength=620).grid(
-                row=1, column=1, sticky="ew", padx=4, pady=(0, 10))
-
-            btns = ctk.CTkFrame(card, fg_color="transparent")
-            btns.grid(row=0, column=2, rowspan=2, padx=10)
-            ctk.CTkButton(btns, text=f"Open ▸", width=90, height=32,
-                          fg_color=BRAND, hover_color=BRAND_HOVER,
-                          command=lambda t=target: self._open(t)).pack(
-                side="left", padx=4)
-            if auto:
-                ctk.CTkLabel(btns, text="auto", width=70,
-                             font=(UI_FONT, 11), text_color=GREEN).pack(
-                    side="left", padx=4)
-            else:
-                ctk.CTkButton(
-                    btns, text="✓ Done" if i in self._manual_done else "○ Mark",
-                    width=84, height=32,
-                    fg_color=GREEN if i in self._manual_done else NEUTRAL,
-                    hover_color=GREEN_HOVER if i in self._manual_done
-                    else NEUTRAL_HOVER,
-                    command=lambda ii=i: self._toggle(ii)).pack(
-                    side="left", padx=4)
-
-        self._progress.set(done_count / len(self.STEPS))
-
-    def _open(self, target):
-        try:
-            self.app._show(target)
-        except Exception as e:
-            cli_log(f"Could not open '{target}': {e}", "error")
-
-    def _toggle(self, i):
-        if i in self._manual_done:
-            self._manual_done.discard(i)
-        else:
-            self._manual_done.add(i)
-        self._render()
-
-    def on_show(self):
-        # Re-evaluate auto-detected steps each time the runbook is shown.
-        self._render()

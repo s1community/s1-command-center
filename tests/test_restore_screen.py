@@ -182,6 +182,26 @@ def test_a_normal_restore_confirms_with_the_scope(monkeypatch):
     page, asked = _start(monkeypatch, [True], auto=False)
     assert len(asked) == 1 and "FAO-TEST" in asked[0]
     assert "Unattended" not in asked[0] and page.started
+    assert "OVERWRITE" in asked[0]
+
+
+def test_an_empty_destination_is_named_in_the_confirmation(monkeypatch):
+    asked = []
+    monkeypatch.setattr(pages.messagebox, "askyesno",
+                        lambda _t, message, **_k: asked.append(message) or True)
+    monkeypatch.setattr(pages, "run_async", lambda *a, **kw: None)
+    page = Starter()
+
+    def empty(_api):
+        page._dest_empty = True
+        return "ok"
+
+    page._check_account_name_match = empty
+    page._start_restore(auto=False, confirm=True)
+    assert asked[0].startswith("The DESTINATION console has no accounts yet "
+                               "— this restore will create everything from "
+                               "the backup file.")
+    assert "OVERWRITE" not in asked[0] and "FAO-TEST" in asked[0]
 
 
 # ── the screen itself (real widgets) ───────────────────────────────────

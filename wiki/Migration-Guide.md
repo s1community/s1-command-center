@@ -80,6 +80,8 @@ For a complete permission reference, see [[API Token Permissions]].
 
 ## 3. Migration Procedure
 
+> **The app keeps track of these steps for you.** The sidebar's **MIGRATION** section lists its pages in the order the work happens — validation (section 4) before moving the agents — and marks each one ✓ done, ● next, ! needs a look or … still running, with an *N of 9* bar and a card naming the next step. A strip above every migration page says which button does it — **Show me** lights the button up — and when a step finishes a toast hands you to the next one. A step still in progress shows *RUNNING*, never done. Before restoring without ✈ Pre-flight or 🔍 Preview, or migrating agents before validating, the app asks once. Progress is kept per SOURCE → DESTINATION pair and survives a restart; tick a step done elsewhere with **Mark done**, and use **All 9 steps → Start over…** for the next wave.
+
 ### Step 1 — Connect Consoles
 
 1. Launch the app → go to **Connections**
@@ -108,9 +110,11 @@ The backup captures all 26 element types, including:
 
 1. Navigate to **Restore to Dest** — step 1, the latest backup file loads automatically
 2. Step 2 — set the restore scope; the line under the fields states exactly what will be restored
-3. If source and destination account/site names differ, use **More options → Rename in the backup** to map them
+3. Click **⇄ Compare with destination…** to see every account, site and group of that scope beside what the destination already has: *✓ exists* is restored into the existing scope, *+ will be created* comes from the backup file, *≈ other case* is there under another spelling and *✕ skipped* won't be restored. Where a name differs, select it and pick the destination scope it really is (or type a new name), then **Rename N scopes in the backup**. If the destination has no accounts yet, the comparison — and the restore confirmation — say the restore will create everything from the backup file. See [[Restore#Compare with the Destination]]
 4. Step 3 — click **▶ Restore N nodes**
 5. After completion, click **📋 Restore report** to save a detailed HTML report
+
+> The renames change the loaded backup only — not the file on disk, and nothing on the console. **More options → Rename in the backup** still takes a typed `Account/Site` path for the same edit.
 
 ### What Happens During Restore (Automatic)
 
@@ -157,12 +161,22 @@ group on the destination and inherit that group's policy.
 > are moved into, so it is much cheaper to fix the destination's
 > structure before they arrive than afterwards.
 
-Navigate to **Agent Migration** — three steps, each unlocking the next:
+Navigate to **Agent Migration**. It is one screen with three steps, top
+to bottom. Each step's badge turns ✓ when it is done and ! when something
+needs fixing, and the next thing to do is always the only filled button.
 
-**1 · Read destination** — walks the destination's accounts, sites and
-groups and saves them, with their registration tokens, to a JSON map
-file. Any site shown as `MISSING` has no token; create one on the
-console and read it again.
+**1 · What to move** — the source accounts and sites to move (blank means
+*everything*), and where they go:
+
+- **Destination console** — the connected destination. Each source group
+  lands in the destination group of the same name, in the account and
+  site of the same name, with that group's own registration token (or
+  its site's, when the group has none).
+- **Site-token file** — for when nobody has API access to the
+  destination; see [Moving Agents with a Site-Token File](#moving-agents-with-a-site-token-file).
+
+The line under the step says in one sentence what will happen, or what is
+missing, with a **Connections…** button when a console isn't connected.
 
 > You don't need to know any ids. **Choose…** beside the account and
 > site fields gives you a list to tick; leaving a field blank means
@@ -176,26 +190,116 @@ console and read it again.
 > out of view. **All** and **None** apply only to what is on screen, so
 > they can never silently select scopes you filtered away.
 
-**2 · Match scopes** — walks the SOURCE and lists every account, site and
-group beside the destination scope it pairs with. **Nothing is sent.**
+**2 · Check** — **Check what will move** reads both sides and lists every
+source group beside the destination group it lands in, in the **Plan**
+tab. **Nothing is sent.** Only the destination accounts whose names match
+the source accounts in scope are read — and, when you name sites, only
+the sites of those names — so moving one account out of sixty reads one
+destination account, not sixty.
+
 Read this list before going further: it is the answer to "did it find my
-scopes, and where is each one going?". Anything that cannot migrate says
-why:
+scopes, and where is each one going?". Filter it to **Will migrate**,
+**Can't migrate** or **Already done**, and click a row for the whole
+reason. Anything that cannot migrate says why:
 
 | Reason | What to do |
 |---|---|
-| *group / site / account not on destination* | The name differs between the consoles. Click **Fix name** on the row to point the map entry at the source's spelling. |
-| *no registration token* | Neither the destination group nor its site has one. Create a token on the destination, then read the destination again. |
+| *group / site / account not on destination* | The name differs between the consoles. Open **Fix names** — see [Fixing names that differ](#fixing-names-that-differ). |
+| *no registration token* | Neither the destination group nor its site has one. Create a token on the destination, then **Check again**. |
 | *already migrated* | Nothing to do — those agents are on the destination already. |
 | *cannot read agents* | The source token cannot list that group's agents; check `Agents.view`. |
 
-The result is cached, so reopening the app does not re-walk the console.
-The plan's age is shown with a **Match again** button.
+The check is remembered: reopening the app restores it, with its age, as
+long as it was made for the same two consoles. **Export plan** saves it
+as a report.
 
-**3 · Migrate** — the red button names how many agents it is about to
-move. Each machine is reported as it goes, with the console's own reason
-when one doesn't make it; the **Failed** filter isolates those. Groups
-are sent with their own token, in batches of 1,000.
+**3 · Migrate** — the button names how many agents it is about to move,
+and only the rows the check marked ready are sent — each group with its
+own token, in batches of 1,000. Every machine is listed in the **Agents**
+tab as it goes, with the console's own reason when one doesn't make it;
+the **Failed** filter isolates those. **Schedule…** arms the same run for
+a date and time instead — keep the app open and the machine awake.
+
+Step 3 only ever runs the plan on screen:
+
+- Change the accounts, sites or destination in step 1 and step 3 locks
+  until you **Check again**.
+- After a run it stays locked until you **Check again**, which shows what
+  is left — failed or pending agents, or new ones — before anything else
+  is sent. **Export results** keeps the run's record, even after the
+  re-check.
+
+### Fixing Names That Differ
+
+**Fix names** shows your source scope as a tree — account › site ›
+group, with agent counts — next to what the destination has in the
+same place:
+
+| Destination column | Meaning |
+|---|---|
+| ✓ same name | The destination has a scope with the same name here. Nothing to do. |
+| ✕ not found | The destination has no scope with this name here. |
+| · pair the site first | A group under a site that wasn't found. Its groups are compared once you pair the site. |
+| → "Branch" | Your pick, applied when you check again. |
+| ✎ "Branch" · fixed earlier | A fix you made earlier. |
+
+Select a scope to see why it didn't pair. The panel lists every
+destination scope in the same place (the destination account for a site,
+the destination site for a group) and what each one already pairs with.
+Closest names come first. A scope that already pairs with another source
+scope is greyed out and can't be picked: a fix renames that destination
+scope in the plan, which would take it away from its current pair. When
+the same name exists elsewhere on the destination, such as a *Kiosks*
+group in another site, the panel says so, because a scope only pairs
+inside its own account or site.
+
+**Needs a fix**, **All** and **Fixed** filter the tree, and the search box
+matches source and destination names. The box above the destination list
+filters it. You can also type an exact destination name there. A name
+that wasn't in the destination read is marked *typed* and shows a
+warning, so use it only when you know the destination has exactly that
+name. When you pair a site, its groups are compared straight away.
+**Fixed** lists earlier fixes, each with a **Remove this fix** button.
+
+Nothing is sent from this window. **Apply & check again** saves your
+picks and runs the check again. The **Plan** then shows each fixed scope
+under the destination's own name. Fixes are stored per account and site,
+and re-applied every time the destination is read again.
+
+### Moving Agents with a Site-Token File
+
+Sometimes the destination belongs to a partner and nobody has API access
+to it. They send a sheet with each new site's name and registration token
+instead (*Site Name / Site Token*) — that is enough to migrate:
+
+1. In step 1 choose **Into: Site-token file**, then **Load file…** (CSV,
+   TSV or Excel) or **Paste** the two columns straight from Excel or an
+   e-mail. A destination map saved earlier (`.json`) loads too.
+2. **Check what will move** pairs every source site with the row of the
+   file that names it. Its agents move with that row's token.
+3. **Migrate** as usual.
+
+Nothing is guessed, because a wrong guess sends one customer's agents
+into another customer's site:
+
+- A name must match exactly, ignoring case and spacing. A name that would
+  match in more than one place is refused.
+- A token for the **source** console itself is refused — nothing would
+  move.
+- Every row is checked before any console is asked, and every row that
+  can't be used says why. **View rows** lists the whole file, showing only
+  enough of each token to tell two apart.
+- When the file spells a site differently — `shira-telecom` for
+  *Shira Telecom* — the plan says so (*Row 4 of the file,
+  'shira-telecom', is the same name spelt differently*) and step 2 shows
+  **✎ Pair sites**. It lists each source site the file doesn't name
+  beside the rows of the file no site uses, closest name first — also
+  when you chose one site in step 1, where the file's other rows aren't
+  otherwise checked. The same name spelt differently is selected for a
+  look, but nothing is paired until you click **Use row N**; a row's
+  token goes to one site only. **Pair & check again** re-runs step 2 with
+  your choices, and the agents land where that row says. The file on
+  disk is left as it is.
 
 ### What to Expect After the Move
 
@@ -207,11 +311,11 @@ are sent with their own token, in batches of 1,000.
 
 `move-to-console` only replies with a count, so the page reads each agent
 back to produce the per-machine result above. Turning **Confirm each
-agent** off halves the API calls, but then "moved" means only that the
-console accepted the request.
+agent arrived** off halves the API calls, but then "moved" means only
+that the console accepted the request.
 
-Re-run the **Status report** (under *ALSO*) later to confirm that the
-pending agents arrived.
+Run the **Status report** tab later to confirm that the pending agents
+arrived.
 
 ---
 

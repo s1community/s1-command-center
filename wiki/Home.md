@@ -34,6 +34,7 @@ Built with Python and CustomTkinter — modern dark-themed UI with real-time pro
 - **Dual Console Connections** — SOURCE + DESTINATION with auto-connect
 - **26 Element Backup/Restore** — Policy, exclusions, blocklist, firewall, STAR, tags, settings, and more
 - **Guided restore** — Three steps (backup file → what to restore → restore) with a live line stating exactly what will be restored
+- **Compare with destination** — Before restoring, see which accounts, sites and groups already exist on the destination, which are created from the backup file and which are skipped — and rename backup scopes to match
 - **Rename in the backup** — Rename accounts/sites in backup before restoring
 - **Auto-create Sites & Groups** — Missing structures created automatically
 - **SKU Mismatch Detection** — Detects and fixes license bundle conflicts
