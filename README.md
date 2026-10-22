@@ -417,10 +417,11 @@ Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki 
 - **The restore's account-name warning opens Compare with destination**, and the restore confirmation says when the destination has no accounts yet.
 - **Lists that don't freeze** — the migration lists draw 5,000 rows on the same 60 widgets as 50.
 - **Account / Site / Group take several names** on Backup Source (and ⭐ STAR → Excel) and on Restore. On Backup Source a name that exists anywhere at its level now matches exactly everywhere — *Servers* no longer also takes another site's *Linux Servers* — and each scope is listed once.
+- **A new app icon** — a modern radar with CC on its hub: vivid violet, a glass bezel, a glowing sweep and a pinging detection, drawn for every size so it still reads at 16 px, with each platform's own layout (the macOS Dock grid, a full Windows tile).
 #### Fixed
 - **Fix names no longer freezes the app** when you select a scope or resize the window — the text beside the tree used to re-wrap back and forth forever.
 #### Tests
-- 951 total (+234): the Fix names freeze; the restore comparison, renames and window; the Restore screen and confirmation; site-token files and pairing a site the file spells differently; the Agent Migration page end-to-end against fake consoles; the migration guide — step order, progress per console pair, steps still running, hand-offs, the two warnings and the page flags it reads; the Choose… lists on Backup Source and Restore and the several-name Account / Site / Group fields.
+- 955 total (+238): the Fix names freeze; the restore comparison, renames and window; the Restore screen and confirmation; site-token files and pairing a site the file spells differently; the Agent Migration page end-to-end against fake consoles; the migration guide — step order, progress per console pair, steps still running, hand-offs, the two warnings and the page flags it reads; the Choose… lists on Backup Source and Restore and the several-name Account / Site / Group fields; the app icons.
 
 ### v2.8.0 — 2026-10-08
 #### Added

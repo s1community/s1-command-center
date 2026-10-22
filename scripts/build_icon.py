@@ -1,326 +1,406 @@
 """
-Build S1 Command Center app icons.
+Build the S1 Command Center app icons.
 
-Concept: a command-center radar scope in SentinelOne brand purple on a deep
-near-black background. Concentric range rings, crosshairs, a sweeping radar
-arc, and three target blips — clearly reads as an ops/console tool with no
-monogram.
+Concept: a modern radar scope on a vivid violet aurora tile — a glass bezel
+around a recessed dark scope, a glowing sweep that fades behind its bright
+leading edge, a pinging blip, and "CC" (Command Center) on the hub at its
+centre. The C's are drawn as round-capped arcs, so no font is needed. Below
+48 px it simplifies to a bright ring, a solid sweep and the blip, so it still
+reads at 16 px in a taskbar, a Finder list or a window title bar.
 
-Produces:
-  s1cc.ico              — Windows multi-size (16/32/48/64/128/256)
-  s1cc.icns             — macOS bundle (16…1024 incl. @2x)
-  scripts/icon_preview.png — 1024×1024 preview
-  scripts/icon_strip.png   — 16/32/64/128/256 preview strip
+Every size is drawn for its own size (supersampled, then reduced) instead of
+being shrunk from one big picture, and the small sizes get heavier strokes.
+Each platform gets the layout its system expects:
 
-Run from repo root:  python3 scripts/build_icon.py
+  macOS    the Big Sur grid: an 824 px rounded plate inside the 1024 px
+           canvas with a soft shadow, so it sits right in the Dock.
+  Windows  the tile fills the canvas, no shadow, crisp at 16-48 px.
+
+Writes:
+  s1cc.ico                  Windows: 16 20 24 32 40 48 64 96 128 256
+  s1cc.icns                 macOS: 16-512 at @1x and @2x (1024 px)
+  scripts/icon_preview.png  the 1024 px macOS icon
+  scripts/icon_strip.png    both platforms at 16-256 on dark and light
+
+Run from the repo root:  venv/bin/python scripts/build_icon.py
+(add --no-cc for a plain hub with a centre dot instead of CC)
 """
 from __future__ import annotations
 
 import math
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 REPO = Path(__file__).resolve().parent.parent
-CANVAS = 1024
 
 # ── SentinelOne-inspired palette ─────────────────────────────────────────────
-BG_TOP        = (16,  10,  34)    # #100A22  near-black with violet tint
-BG_BOT        = (4,   2,   12)    # #04020C  deep black
-PURPLE        = (124, 58,  237)   # #7C3AED  S1 brand purple
-PURPLE_BRIGHT = (167, 100, 255)   # lighter / glow
-PURPLE_DEEP   = (66,  26,  138)   # rim / shadow
-WHITE         = (255, 255, 255)
-LAVENDER      = (220, 200, 255)
-BLIP_HOT      = (240, 230, 255)   # near-white blip core
-BLIP_GLOW     = (180, 130, 255)   # purple glow around blips
+BG_STOPS = [(0.0, (168, 85, 247)),
+            (0.5, (109, 40, 217)),
+            (1.0, (49, 46, 129))]
+AURORA_PINK = (244, 114, 182)
+AURORA_BLUE = (96, 165, 250)
+DISC_IN = (46, 16, 101)
+DISC_OUT = (17, 12, 52)
+SWEEP_TRAIL = (124, 58, 237)
+SWEEP_LEAD = (240, 236, 255)
+SWEEP_GLOW = (167, 139, 250)
+EDGE = (255, 255, 255)
+BLIP = (255, 255, 255)
+BLIP_GLOW = (196, 181, 253)
+RING = (255, 255, 255)
+HUB_IN = (46, 26, 110)
+HUB_OUT = (24, 14, 66)
+HUB_RIM = (221, 214, 254)
+SHADOW = (14, 6, 40)
+
+WINDOWS_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+MAC_SIZES = (16, 32, 64, 128, 256, 512, 1024)
+STRIP_SIZES = (16, 24, 32, 48, 64, 128, 256)
+ICNS_SPEC = (
+    (16, "icon_16x16.png"), (32, "icon_16x16@2x.png"),
+    (32, "icon_32x32.png"), (64, "icon_32x32@2x.png"),
+    (128, "icon_128x128.png"), (256, "icon_128x128@2x.png"),
+    (256, "icon_256x256.png"), (512, "icon_256x256@2x.png"),
+    (512, "icon_512x512.png"), (1024, "icon_512x512@2x.png"),
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def squircle_mask(size: int, radius_ratio: float = 0.225) -> Image.Image:
+def _lerp(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def _ramp(stops, t):
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+        if t <= t1:
+            return _lerp(c0, c1, (t - t0) / (t1 - t0))
+    return stops[-1][1]
+
+
+def _diagonal(w, h, stops):
+    grid = 96
+    small = Image.new("RGB", (grid, grid))
+    px = small.load()
+    for y in range(grid):
+        for x in range(grid):
+            px[x, y] = _ramp(stops, (x + y) / (2 * (grid - 1)))
+    return small.resize((max(1, int(w)), max(1, int(h))), Image.BICUBIC)
+
+
+def _vertical(w, h, top, bottom):
+    grid = 96
+    small = Image.new("RGB", (1, grid))
+    px = small.load()
+    for y in range(grid):
+        px[0, y] = _lerp(top, bottom, y / (grid - 1))
+    return small.resize((max(1, int(w)), max(1, int(h))), Image.BICUBIC)
+
+
+def _squircle(box, n=5.0, steps=720):
+    x0, y0, x1, y1 = box
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    rx, ry = (x1 - x0) / 2, (y1 - y0) / 2
+    pts = []
+    for i in range(steps):
+        a = 2 * math.pi * i / steps
+        c, s = math.cos(a), math.sin(a)
+        pts.append((cx + rx * math.copysign(abs(c) ** (2 / n), c),
+                    cy + ry * math.copysign(abs(s) ** (2 / n), s)))
+    return pts
+
+
+def _mask(size, points):
     m = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(m).rounded_rectangle(
-        [0, 0, size - 1, size - 1],
-        radius=int(size * radius_ratio),
-        fill=255,
-    )
+    ImageDraw.Draw(m).polygon(points, fill=255)
     return m
 
 
-def vertical_gradient(size: int, top, bottom) -> Image.Image:
-    img = Image.new("RGB", (1, size))
-    px = img.load()
-    for y in range(size):
-        t = y / max(1, size - 1)
-        px[0, y] = (
-            int(top[0] + (bottom[0] - top[0]) * t),
-            int(top[1] + (bottom[1] - top[1]) * t),
-            int(top[2] + (bottom[2] - top[2]) * t),
-        )
-    return img.resize((size, size))
+def _disc(size, cx, cy, r):
+    m = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(m).ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+    return m
 
 
-def radial_glow(size, cx_r, cy_r, radius_r, color, peak_alpha):
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    cx, cy = int(size * cx_r), int(size * cy_r)
-    rmax = int(size * radius_r)
-    steps = 60
-    for i in range(steps, 0, -1):
-        r = int(rmax * i / steps)
-        a = int(peak_alpha * (1 - i / steps) ** 1.6)
-        if a <= 0:
-            continue
-        d.ellipse([cx - r, cy - r, cx + r, cy + r],
-                  fill=(color[0], color[1], color[2], a))
-    return img.filter(ImageFilter.GaussianBlur(size * 0.025))
+def _ring(size, cx, cy, r, width):
+    m = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(m).ellipse([cx - r, cy - r, cx + r, cy + r],
+                              outline=255, width=max(1, int(width)))
+    return m
 
 
-# ── radar scope ──────────────────────────────────────────────────────────────
-
-def draw_radar(size: int) -> Image.Image:
-    """A command-center radar scope, sized `size`×`size`."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    cx = cy = size / 2
-    R = size * 0.46   # outer scope radius
-
-    # 1) scope disc — slightly lighter than background, with subtle inner gradient
-    disc = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    dd = ImageDraw.Draw(disc)
-    # outer dark rim
-    rim_w = max(3, int(size * 0.022))
-    dd.ellipse([cx - R, cy - R, cx + R, cy + R],
-               fill=(22, 14, 44, 255))
-    # inner radial brightening at center
-    inner_glow = radial_glow(size, 0.5, 0.5, 0.42,
-                             PURPLE, peak_alpha=70)
-    # mask the glow to the scope disc
-    disc_mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(disc_mask).ellipse(
-        [cx - R + rim_w, cy - R + rim_w, cx + R - rim_w, cy + R - rim_w],
-        fill=255,
-    )
-    disc.paste(inner_glow, (0, 0), disc_mask)
-    img = Image.alpha_composite(img, disc)
-
-    # 2) concentric range rings (3 of them)
-    d = ImageDraw.Draw(img)
-    ring_w = max(2, int(size * 0.006))
-    for frac, alpha in [(1.00, 230), (0.70, 170), (0.42, 140), (0.16, 200)]:
-        rr = R * frac
-        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
-                  outline=(*PURPLE, alpha),
-                  width=ring_w if frac == 1.00 else max(2, int(size * 0.004)))
-
-    # 3) crosshair — horizontal + vertical, with a small gap at center
-    cross_w = max(2, int(size * 0.005))
-    gap = R * 0.06
-    # horizontal
-    d.line([(cx - R, cy), (cx - gap, cy)],
-           fill=(*PURPLE, 200), width=cross_w)
-    d.line([(cx + gap, cy), (cx + R, cy)],
-           fill=(*PURPLE, 200), width=cross_w)
-    # vertical
-    d.line([(cx, cy - R), (cx, cy - gap)],
-           fill=(*PURPLE, 200), width=cross_w)
-    d.line([(cx, cy + gap), (cx, cy + R)],
-           fill=(*PURPLE, 200), width=cross_w)
-
-    # 4) tick marks at the 4 cardinal positions, just outside the rings
-    tick_len = R * 0.06
-    tick_w = max(2, int(size * 0.006))
-    for ang_deg in (0, 90, 180, 270):
-        a = math.radians(ang_deg)
-        x0 = cx + (R + tick_len * 0.4) * math.cos(a)
-        y0 = cy + (R + tick_len * 0.4) * math.sin(a)
-        x1 = cx + (R + tick_len * 1.4) * math.cos(a)
-        y1 = cy + (R + tick_len * 1.4) * math.sin(a)
-        d.line([(x0, y0), (x1, y1)], fill=(*LAVENDER, 160), width=tick_w)
-
-    # 5) sweep arc — gradient sector from 12 o'clock clockwise to ~2 o'clock,
-    #    with brightness peaking at the leading edge.
-    sweep_layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    sl = ImageDraw.Draw(sweep_layer)
-    sweep_span = 70          # degrees
-    sweep_lead = -30         # leading edge angle (PIL convention: 0°=3o'clock, CW)
-    sweep_trail = sweep_lead - sweep_span   # = -100° (~10 o'clock-ish; we want
-                                            # it going from top→right, so flip)
-    # Actually we want sweep going clockwise from 12 (-90°) → 2 (-20°).
-    sweep_trail = -90
-    sweep_lead = -20
-    bbox = [cx - R + rim_w, cy - R + rim_w, cx + R - rim_w, cy + R - rim_w]
-    slices = 36
-    for i in range(slices):
-        a0 = sweep_trail + (sweep_lead - sweep_trail) * (i / slices)
-        a1 = sweep_trail + (sweep_lead - sweep_trail) * ((i + 1) / slices)
-        # brightness ramps up toward the leading edge
-        t = (i + 1) / slices
-        alpha = int(180 * t ** 2.2)
-        if alpha <= 0:
-            continue
-        # color brightens too
-        col = (
-            int(PURPLE[0] + (PURPLE_BRIGHT[0] - PURPLE[0]) * t),
-            int(PURPLE[1] + (PURPLE_BRIGHT[1] - PURPLE[1]) * t),
-            int(PURPLE[2] + (PURPLE_BRIGHT[2] - PURPLE[2]) * t),
-            alpha,
-        )
-        sl.pieslice(bbox, a0, a1, fill=col)
-    # constrain sweep to the scope disc
-    sweep_mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(sweep_mask).ellipse(bbox, fill=255)
-    sweep_masked = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    sweep_masked.paste(sweep_layer, (0, 0), sweep_mask)
-    # add a bright leading-edge line
-    lead_x = cx + R * math.cos(math.radians(sweep_lead))
-    lead_y = cy + R * math.sin(math.radians(sweep_lead))
-    ld = ImageDraw.Draw(sweep_masked)
-    ld.line([(cx, cy), (lead_x, lead_y)],
-            fill=(*PURPLE_BRIGHT, 255), width=max(3, int(size * 0.012)))
-    img = Image.alpha_composite(img, sweep_masked)
-
-    # 6) target blips — soft glow + bright core
-    def blip(px_r, py_r, core_r_ratio=0.018):
-        ax, ay = cx + R * px_r, cy + R * py_r
-        glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        gd = ImageDraw.Draw(glow)
-        for k in range(8, 0, -1):
-            rg = size * 0.045 * (k / 8)
-            ag = int(110 * (1 - k / 8) ** 1.4)
-            gd.ellipse([ax - rg, ay - rg, ax + rg, ay + rg],
-                       fill=(*BLIP_GLOW, ag))
-        glow = glow.filter(ImageFilter.GaussianBlur(size * 0.012))
-        core = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        cd = ImageDraw.Draw(core)
-        rc = size * core_r_ratio
-        cd.ellipse([ax - rc, ay - rc, ax + rc, ay + rc],
-                   fill=(*BLIP_HOT, 255))
-        return Image.alpha_composite(glow, core)
-
-    blip_mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(blip_mask).ellipse(bbox, fill=255)
-    blips = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    blips = Image.alpha_composite(blips, blip(0.45, -0.32))   # upper right (recently swept)
-    blips = Image.alpha_composite(blips, blip(-0.55, 0.18))   # left mid
-    blips = Image.alpha_composite(blips, blip(0.18, 0.55, core_r_ratio=0.014))  # lower
-    blips_masked = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    blips_masked.paste(blips, (0, 0), blip_mask)
-    img = Image.alpha_composite(img, blips_masked)
-
-    # 7) outer rim highlight (top-left arc) for depth
-    rim = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    rd = ImageDraw.Draw(rim)
-    rd.arc([cx - R, cy - R, cx + R, cy + R],
-           start=190, end=320,
-           fill=(*PURPLE_BRIGHT, 200),
-           width=max(2, int(size * 0.006)))
-    img = Image.alpha_composite(img, rim)
-
-    return img
+_conic_cache = {}
 
 
-# ── master ───────────────────────────────────────────────────────────────────
+def _conic(n, trail, lead, power):
+    key = (n, trail, lead, power)
+    if key not in _conic_cache:
+        img = Image.new("L", (n, n), 0)
+        px = img.load()
+        c = (n - 1) / 2
+        span = (lead - trail) % 360
+        for y in range(n):
+            for x in range(n):
+                d = (math.degrees(math.atan2(y - c, x - c)) - trail) % 360
+                if d <= span:
+                    px[x, y] = int(255 * (d / span) ** power)
+        _conic_cache[key] = img
+    return _conic_cache[key]
 
-def draw_master(size: int = CANVAS) -> Image.Image:
-    # 1) squircle background with vertical gradient
-    bg = vertical_gradient(size, BG_TOP, BG_BOT).convert("RGBA")
-    mask = squircle_mask(size)
-    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    canvas.paste(bg, (0, 0), mask)
 
-    # 2) ambient purple glow (top-left) for brand mood
-    glow = radial_glow(size, 0.30, 0.25, 0.65, PURPLE, peak_alpha=80)
-    glow_m = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    glow_m.paste(glow, (0, 0), mask)
-    canvas = Image.alpha_composite(canvas, glow_m)
+def _radial(n, inner, outer, power=1.0):
+    grid = 96
+    small = Image.new("RGB", (grid, grid))
+    px = small.load()
+    c = (grid - 1) / 2
+    for y in range(grid):
+        for x in range(grid):
+            t = min(1.0, math.hypot(x - c, y - c) / c)
+            px[x, y] = _lerp(inner, outer, t ** power)
+    return small.resize((max(1, int(n)), max(1, int(n))), Image.BICUBIC)
 
-    # 3) subtle vignette (darken corners) — masked to squircle
-    vignette = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    vd = ImageDraw.Draw(vignette)
-    steps = 80
-    for i in range(steps):
-        inset = int(size * 0.50 * (i / steps))
-        a = int(60 * (i / steps) ** 2)
-        vd.rectangle([inset, inset, size - inset, size - inset],
-                     outline=(0, 0, 0, a), width=2)
-    vignette = vignette.filter(ImageFilter.GaussianBlur(size * 0.05))
-    vm = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    vm.paste(vignette, (0, 0), mask)
-    canvas = Image.alpha_composite(canvas, vm)
 
-    # 4) the radar — centered, sized to fill most of the canvas
-    radar = draw_radar(size)
-    canvas = Image.alpha_composite(canvas, radar)
+def _blob(size, cx, cy, r, blur):
+    return _disc(size, cx, cy, r).filter(ImageFilter.GaussianBlur(blur))
 
-    # 5) hairline border inside the squircle for crispness
-    border = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    ImageDraw.Draw(border).rounded_rectangle(
-        [2, 2, size - 3, size - 3],
-        radius=int(size * 0.225),
-        outline=(*PURPLE, 50),
-        width=max(1, int(size * 0.004)),
-    )
-    canvas = Image.alpha_composite(canvas, border)
 
-    return canvas
+def _arc_c(size, cx, cy, r, w, opening=52):
+    m = Image.new("L", (size, size), 0)
+    d = ImageDraw.Draw(m)
+    d.arc([cx - r, cy - r, cx + r, cy + r], opening, 360 - opening,
+          fill=255, width=max(1, int(w)))
+    rm = r - w / 2
+    for ang in (opening, 360 - opening):
+        a = math.radians(ang)
+        ex, ey = cx + rm * math.cos(a), cy + rm * math.sin(a)
+        d.ellipse([ex - w / 2, ey - w / 2, ex + w / 2, ey + w / 2], fill=255)
+    return m
+
+
+def _tint(size, color, alpha_mask, strength):
+    layer = Image.new("RGBA", (size, size), (*color, 0))
+    layer.putalpha(alpha_mask.point(lambda v: int(v * strength)))
+    return layer
+
+
+# ── rendering ────────────────────────────────────────────────────────────────
+
+def render(size: int, mac: bool, cc: bool = True) -> Image.Image:
+    ss = 8 if size <= 64 else (4 if size <= 256 else 2)
+    S = size * ss
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+
+    inset = S * 100 / 1024 if mac else math.floor(size * 0.03) * ss
+    box = (inset, inset, S - inset, S - inset)
+    side = box[2] - box[0]
+    outline = _squircle(box)
+    plate = _mask(S, outline)
+    cx = cy = S / 2
+    tiny, small = size <= 20, size <= 32
+    clear = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+
+    def put(mask, color, strength, clip=plate):
+        nonlocal img
+        if clip is not None:
+            mask = ImageChops.multiply(mask, clip)
+        img = Image.alpha_composite(img, _tint(S, color, mask, strength))
+
+    if mac and size >= 32:
+        drop = plate.filter(ImageFilter.GaussianBlur(side * 0.022))
+        drop = ImageChops.offset(drop, 0, int(side * 0.018))
+        put(drop, (0, 0, 0), 0.40, clip=None)
+
+    bg = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    bg.paste(_diagonal(side, side, BG_STOPS).convert("RGBA"),
+             (int(box[0]), int(box[1])))
+    img.paste(bg, (0, 0), plate)
+    if size >= 24:
+        put(_blob(S, box[2] - side * 0.12, box[1] + side * 0.10,
+                  side * 0.42, side * 0.16), AURORA_PINK, 0.55)
+        put(_blob(S, box[0] + side * 0.10, box[3] - side * 0.08,
+                  side * 0.40, side * 0.16), AURORA_BLUE, 0.45)
+
+    rD = side * (0.40 if tiny else 0.38 if small else 0.355)
+    rB = rD + side * (0.0 if tiny else 0.035 if small else 0.045)
+    disc = _disc(S, cx, cy, rD)
+    bezel = ImageChops.subtract(_disc(S, cx, cy, rB), disc)
+
+    if size >= 32:
+        shade = _disc(S, cx, cy, rB).filter(
+            ImageFilter.GaussianBlur(side * 0.03))
+        put(ImageChops.offset(shade, 0, int(side * 0.022)), SHADOW, 0.55)
+
+    if not tiny:
+        glass = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        glass.paste(_vertical(2 * rB, 2 * rB, (255, 255, 255),
+                              (196, 181, 253)).convert("RGBA"),
+                    (int(cx - rB), int(cy - rB)))
+        glass.putalpha(bezel.point(lambda v: int(v * 0.42)))
+        img = Image.alpha_composite(img, glass)
+        if size >= 48:
+            hl = _ring(S, cx, cy, rB, side * 0.006)
+            fade = _vertical(S, S, (255, 255, 255), (0, 0, 0)).convert("L")
+            put(ImageChops.multiply(hl, fade), (255, 255, 255), 0.85)
+
+    face = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    face.paste(_radial(2 * rD, DISC_IN, DISC_OUT, 1.2).convert("RGBA"),
+               (int(cx - rD), int(cy - rD)))
+    img = Image.alpha_composite(img, Image.composite(face, clear, disc))
+    if size >= 48:
+        inner = ImageChops.subtract(
+            disc, _disc(S, cx, cy + side * 0.012, rD - side * 0.018))
+        put(inner.filter(ImageFilter.GaussianBlur(side * 0.01)), SHADOW,
+            0.75, clip=disc)
+        for frac in (0.66, 0.33):
+            put(_ring(S, cx, cy, rD * frac, side * 0.005), RING, 0.16)
+        for deg in (0, 90, 180, 270):
+            line = Image.new("L", (S, S), 0)
+            a = math.radians(deg)
+            ImageDraw.Draw(line).line(
+                [(cx, cy), (cx + rD * math.cos(a), cy + rD * math.sin(a))],
+                fill=255, width=max(1, int(side * 0.004)))
+            put(line, RING, 0.08)
+
+    if small:
+        put(_ring(S, cx, cy, rD, side * (0.09 if tiny else 0.06)),
+            (255, 255, 255), 0.95)
+
+    trail, lead = (-140.0, -35.0) if small else (-125.0, -35.0)
+    d2 = int(2 * rD)
+    mix = _conic(384, trail, lead, 1.0).resize((d2, d2), Image.BICUBIC)
+    alpha = _conic(384, trail, lead, 0.45 if small else 1.5).resize(
+        (d2, d2), Image.BICUBIC)
+    colour = Image.composite(Image.new("RGB", (d2, d2), SWEEP_LEAD),
+                             Image.new("RGB", (d2, d2), SWEEP_TRAIL), mix)
+    sweep = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    sweep.paste(colour.convert("RGBA"), (int(cx - rD), int(cy - rD)))
+    sweep_a = Image.new("L", (S, S), 0)
+    sweep_a.paste(alpha, (int(cx - rD), int(cy - rD)))
+    sweep_a = ImageChops.multiply(sweep_a, disc)
+    if size >= 32:
+        put(sweep_a.filter(ImageFilter.GaussianBlur(side * 0.025)),
+            SWEEP_GLOW, 0.45, clip=disc)
+    sweep.putalpha(sweep_a.point(lambda v: int(v * (1.0 if small else 0.92))))
+    img = Image.alpha_composite(img, sweep)
+
+    hub_r = side * 0.12 if (cc and not small) else 0.0
+    ang = math.radians(lead)
+    tip = (cx + rD * math.cos(ang), cy + rD * math.sin(ang))
+    start = (cx + hub_r * math.cos(ang), cy + hub_r * math.sin(ang))
+    edge = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(edge).line(
+        [start, tip], fill=255,
+        width=max(1, int(side * (0.03 if small else 0.012))))
+    if size >= 32:
+        put(edge.filter(ImageFilter.GaussianBlur(side * 0.012)), EDGE, 0.7,
+            clip=disc)
+    put(edge, EDGE, 1.0, clip=disc)
+
+    def blip(deg, frac, core, strength, pings=()):
+        a = math.radians(deg)
+        bx = cx + rD * frac * math.cos(a)
+        by = cy + rD * frac * math.sin(a)
+        put(_blob(S, bx, by, core * 2.4, core * 1.4), BLIP_GLOW,
+            0.9 * strength, clip=disc)
+        for rr, al in pings:
+            put(_ring(S, bx, by, rr, side * 0.006), BLIP, al * strength,
+                clip=disc)
+        put(_disc(S, bx, by, core), BLIP, strength, clip=disc)
+
+    if small:
+        blip(-70, 0.60, side * (0.085 if tiny else 0.07), 1.0)
+    else:
+        blip(-62, 0.64, side * 0.026, 1.0,
+             ((side * 0.055, 0.55), (side * 0.085, 0.25)))
+        blip(150, 0.52, side * 0.016, 0.55)
+
+    if size >= 48:
+        dome = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(dome).ellipse(
+            [cx - rD * 0.85, cy - rD * 0.98, cx + rD * 0.55, cy - rD * 0.05],
+            fill=255)
+        put(dome.filter(ImageFilter.GaussianBlur(rD * 0.18)),
+            (255, 255, 255), 0.10, clip=disc)
+
+    if cc and not small:
+        hub = _disc(S, cx, cy, hub_r)
+        put(ImageChops.offset(hub.filter(ImageFilter.GaussianBlur(
+            side * 0.02)), 0, int(side * 0.012)), SHADOW, 0.8, clip=disc)
+        hub_face = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        hub_face.paste(_radial(2 * hub_r, HUB_IN, HUB_OUT, 1.0)
+                       .convert("RGBA"), (int(cx - hub_r), int(cy - hub_r)))
+        img = Image.alpha_composite(img, Image.composite(hub_face, clear, hub))
+        fade = _vertical(S, S, (255, 255, 255), (90, 90, 90)).convert("L")
+        put(ImageChops.multiply(_ring(S, cx, cy, hub_r, side * 0.006), fade),
+            HUB_RIM, 0.9)
+        r, w, gap = side * 0.046, side * 0.021, side * 0.008
+        letters = ImageChops.lighter(
+            _arc_c(S, cx - r - gap / 2, cy, r, w),
+            _arc_c(S, cx + r + gap / 2, cy, r, w))
+        put(letters, (255, 255, 255), 1.0, clip=disc)
+    elif not small:
+        put(_blob(S, cx, cy, side * 0.03, side * 0.02), BLIP_GLOW, 0.8,
+            clip=disc)
+        put(_disc(S, cx, cy, side * 0.014), BLIP, 1.0, clip=disc)
+
+    if size >= 64:
+        rim = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(rim).line(outline + [outline[0]], fill=255,
+                                 width=max(2, int(ss * 1.5)))
+        fade = _vertical(S, S, (255, 255, 255), (20, 20, 20)).convert("L")
+        put(ImageChops.multiply(rim, fade), (255, 255, 255), 0.55)
+        sheen = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(sheen).ellipse(
+            [box[0] - side * 0.2, box[1] - side * 0.62,
+             box[2] + side * 0.2, box[1] + side * 0.32], fill=255)
+        put(sheen.filter(ImageFilter.GaussianBlur(side * 0.08)),
+            (255, 255, 255), 0.10)
+
+    return img.convert("RGBa").reduce(ss).convert("RGBA")
 
 
 # ── platform packagers ───────────────────────────────────────────────────────
 
-def write_ico(master: Image.Image, out: Path):
-    sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256)]
-    master.save(out, format="ICO", sizes=sizes)
+def write_ico(icons, out: Path):
+    sizes = sorted(icons)
+    biggest = sizes[-1]
+    icons[biggest].save(out, format="ICO", sizes=[(s, s) for s in sizes],
+                        append_images=[icons[s] for s in sizes[:-1]])
     print(f"  wrote {out}  ({len(sizes)} sizes)")
 
 
-def write_icns(master: Image.Image, out: Path):
+def write_icns(icons, out: Path):
     if not shutil.which("iconutil"):
-        print("  ⚠ iconutil not found — skipping .icns")
+        print("  iconutil not found (macOS only) - skipping .icns")
         return
-    spec = [
-        (16,   "icon_16x16.png"),
-        (32,   "icon_16x16@2x.png"),
-        (32,   "icon_32x32.png"),
-        (64,   "icon_32x32@2x.png"),
-        (128,  "icon_128x128.png"),
-        (256,  "icon_128x128@2x.png"),
-        (256,  "icon_256x256.png"),
-        (512,  "icon_256x256@2x.png"),
-        (512,  "icon_512x512.png"),
-        (1024, "icon_512x512@2x.png"),
-    ]
     with tempfile.TemporaryDirectory() as td:
         iconset = Path(td) / "s1cc.iconset"
         iconset.mkdir()
-        for px, name in spec:
-            master.resize((px, px), Image.LANCZOS).save(
-                iconset / name, format="PNG")
+        for px, name in ICNS_SPEC:
+            icons[px].save(iconset / name, format="PNG")
         subprocess.check_call(
-            ["iconutil", "-c", "icns", "-o", str(out), str(iconset)]
-        )
-    print(f"  wrote {out}  ({len(spec)} entries)")
+            ["iconutil", "-c", "icns", "-o", str(out), str(iconset)])
+    print(f"  wrote {out}  ({len(ICNS_SPEC)} entries)")
 
 
-def write_strip(master: Image.Image, out: Path):
-    """Side-by-side small-size preview strip."""
-    sizes = [16, 32, 64, 128, 256]
-    pad = 24
-    bg_color = (40, 40, 50, 255)
-    total_w = sum(sizes) + pad * (len(sizes) + 1)
-    total_h = max(sizes) + pad * 2
-    strip = Image.new("RGBA", (total_w, total_h), bg_color)
-    x = pad
-    for s in sizes:
-        im = master.resize((s, s), Image.LANCZOS)
-        y = pad + (max(sizes) - s) // 2
-        strip.alpha_composite(im, (x, y))
-        x += s + pad
+def write_strip(rows, out: Path):
+    pad = 20
+    width = sum(STRIP_SIZES) + pad * (len(STRIP_SIZES) + 1)
+    row_h = max(STRIP_SIZES) + pad * 2
+    strip = Image.new("RGBA", (width, row_h * len(rows)), (0, 0, 0, 255))
+    for r, (icons, bg) in enumerate(rows):
+        y0 = r * row_h
+        strip.paste(Image.new("RGBA", (width, row_h), (*bg, 255)), (0, y0))
+        x = pad
+        for s in STRIP_SIZES:
+            strip.alpha_composite(
+                icons[s], (x, y0 + pad + (max(STRIP_SIZES) - s) // 2))
+            x += s + pad
     strip.save(out, format="PNG")
     print(f"  wrote {out}")
 
@@ -328,17 +408,20 @@ def write_strip(master: Image.Image, out: Path):
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"Rendering master @ {CANVAS}×{CANVAS}…")
-    master = draw_master(CANVAS)
-
+    cc = "--no-cc" not in sys.argv
+    print("Rendering every size…")
+    win = {s: render(s, mac=False, cc=cc) for s in WINDOWS_SIZES}
+    mac = {s: render(s, mac=True, cc=cc) for s in MAC_SIZES}
     preview = REPO / "scripts" / "icon_preview.png"
-    master.save(preview, format="PNG")
+    mac[1024].save(preview, format="PNG")
     print(f"  preview → {preview}")
-
     print("Packaging icons…")
-    write_ico(master, REPO / "s1cc.ico")
-    write_icns(master, REPO / "s1cc.icns")
-    write_strip(master, REPO / "scripts" / "icon_strip.png")
+    write_ico(win, REPO / "s1cc.ico")
+    write_icns(mac, REPO / "s1cc.icns")
+    mac_strip = {s: render(s, mac=True, cc=cc) for s in STRIP_SIZES}
+    dark, light = (31, 32, 41), (244, 245, 247)
+    write_strip([(win, dark), (win, light), (mac_strip, dark),
+                 (mac_strip, light)], REPO / "scripts" / "icon_strip.png")
     print("Done.")
 
 

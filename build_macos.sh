@@ -38,7 +38,7 @@ pyinstaller \
     --name "S1 Command Center" \
     --windowed \
     --onedir \
-    --icon s1cc.ico \
+    --icon s1cc.icns \
     --add-data "s1cc.ico:." \
     --add-data "export_utils.py:." \
     --hidden-import customtkinter \
