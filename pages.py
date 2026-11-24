@@ -2500,6 +2500,14 @@ _SITE_CREATE_FIELDS = {
     "unlimitedLicenses", "inherits",
 }
 
+
+def _dest_site_type(src_type, dest_account) -> str:
+    acct = dest_account if isinstance(dest_account, dict) else {}
+    if str(acct.get("accountType") or "").lower() == "trial":
+        return "Trial"
+    return src_type or ""
+
+
 _GROUP_CREATE_FIELDS = {
     "name", "description", "inherits", "rank", "policy",
 }
@@ -7966,6 +7974,14 @@ class RestorePage(ctk.CTkFrame):
                     npath, ntype, "(node)", npath, "failed",
                     f"destination {ntype} could not be resolved/created "
                     f"({reason}) — NOTHING from this scope was restored")
+                self._report_nodes.append({
+                    "path": npath, "type": ntype, "status": "error",
+                    "summary": reason, "elements": {},
+                    "failed_items": [{"element": "(node)", "name": npath,
+                                      "error": reason[:500]}],
+                    "index": i, "dest_id": None, "started_at": node_t0,
+                    "seconds": round(_time.time() - node_t0, 2),
+                })
                 # An account that cannot be created is fatal: every site and
                 # group below it would fail too, producing hundreds of
                 # meaningless errors that bury the real cause. Stop here and
@@ -10372,8 +10388,15 @@ class RestorePage(ctk.CTkFrame):
             create_data = {"name": sname}
             site_obj = node.get("site", {})
             is_scenario_b = src_site_is_default  # new site created instead of overwriting default
-            if site_obj.get("siteType"):
-                create_data["siteType"] = site_obj["siteType"]
+            site_type = _dest_site_type(site_obj.get("siteType"),
+                                        acct_match[0])
+            if site_type:
+                create_data["siteType"] = site_type
+                if site_type != site_obj.get("siteType"):
+                    self._operation_log.append(
+                        f"  ℹ Destination account is {site_type} — creating "
+                        f"'{sname}' as a {site_type} site (source site: "
+                        f"{site_obj.get('siteType') or '—'})")
             if site_obj.get("suite"):
                 create_data["suite"] = site_obj["suite"]
             elif site_obj.get("sku"):

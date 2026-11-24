@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.0.1 — 2026-11-24
+
+### Fixed
+- **Restoring into a Trial account no longer fails at every new site.** The restore created each missing site with the source site's type, so a destination account on a trial was sent `siteType: "Paid"` and SentinelOne refused it — *Cannot create a paid Site where Account is trial (code 4000010)*. Every group under that site then failed with *parent site '…' not found*, because the site was never created; a restore into an empty trial account landed only *Default site* (which is reused, not created) and its Default Group. New sites now take the destination account's type: Trial in a trial account, the source site's own type otherwise. The log says when a site's type was changed.
+- **A restore with failed sites or groups no longer says it succeeded.** A site or group the destination couldn't find or create was marked failed in the progress table and the Gap Report, but left out of the restore's own results — so the completion pop-up read *Migration Completed Successfully* and *Failures: None 🎉* with 52 of 54 scopes failed. Those scopes now count as failures in the pop-up (*N item(s) across N node(s)*, with **Explain Errors**), in **Explain Errors** itself and in the restore report.
+
+### Tests
+- 962 total (+7): the real restore driven against a fake trial console that refuses paid sites — sites created as Trial with their groups created under them, the log line, a paid account still getting paid sites, the site-type rule itself, and sites and groups the destination refuses counted as failures.
+
 ## v3.0.0 — 2026-10-22
 
 ### Changed

@@ -140,7 +140,7 @@ That's it. The installer downloads the latest DMG, copies the app to `/Applicati
 
 ```bash
 # pin a specific version
-S1CC_VERSION=v3.0.0 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
+S1CC_VERSION=v3.0.1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
 
 # install but don't auto-launch
 S1CC_NO_LAUNCH=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/s1community/s1-command-center/main/installer/install.sh)"
@@ -403,6 +403,13 @@ Pure static page reading the public GitHub Releases API — no telemetry shipped
 ## Changelog
 
 Full history, including the releases between v2.2.8 and v2.5.0, is in the [wiki changelog](wiki/Changelog.md).
+
+### v3.0.1 — 2026-11-24
+#### Fixed
+- **Restoring into a Trial account** — new sites were created with the source site's type (*Paid*), which a trial account refuses (*Cannot create a paid Site where Account is trial*), so every group under them failed with *parent site not found*. New sites now take the destination account's type.
+- **A restore with failed sites or groups no longer reports success** — they now count in the completion pop-up (no more *Failures: None 🎉* with 52 of 54 scopes failed), in Explain Errors and in the restore report.
+#### Tests
+- 962 total (+7): the restore against a fake trial console that refuses paid sites, and refused sites and groups counted as failures.
 
 ### v3.0.0 — 2026-10-22
 #### Added
